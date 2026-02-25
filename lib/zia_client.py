@@ -177,6 +177,24 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.cloud_firewall_ips.list_rules()
         return _to_dicts(_unwrap(result, resp, err))
 
+    def get_firewall_rule(self, rule_id: str) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall_rules.get_rule(int(rule_id))
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_firewall_rule(self, rule_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zia.cloud_firewall_rules.update_rule(int(rule_id), **config)
+        _unwrap(result, resp, err)
+        return True
+
+    def get_firewall_dns_rule(self, rule_id: str) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall_dns.get_rule(int(rule_id))
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_firewall_dns_rule(self, rule_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zia.cloud_firewall_dns.update_rule(int(rule_id), **config)
+        _unwrap(result, resp, err)
+        return True
+
     # ------------------------------------------------------------------
     # Firewall Supporting Objects
     # ------------------------------------------------------------------
