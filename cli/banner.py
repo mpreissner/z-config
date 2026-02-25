@@ -17,15 +17,15 @@ VERSION = "0.2.0"
 # Falls back to the hand-drawn art if pyfiglet isn't installed.
 try:
     import pyfiglet
-    _LOGO_TEXT = pyfiglet.figlet_format("Z-Config", font="slant").rstrip()
+    _LOGO_TEXT = pyfiglet.figlet_format("zs-Config", font="slant").rstrip()
 except Exception:
     _LOGO_TEXT = (
-        " _____        ____             __ _\n"
-        "|__  /  ___  / ___|___  _ __  / _(_) __ _\n"
-        "  / /  |___|| |   / _ \\| '_ \\| |_| |/ _` |\n"
-        " / /__      | |__| (_) | | | |  _| | (_| |\n"
-        "/____|       \\____\\___/|_| |_|_| |_|\\__, |\n"
-        "                                      |___/"
+        "                   ______            _____      \n"
+        " ____  _____      / ____/___  ____  / __(_)___ _\n"
+        "/_  / / ___/_____/ /   / __ \\/ __ \\/ /_/ / __ `/\n"
+        " / /_(__  )_____/ /___/ /_/ / / / / __/ / /_/ / \n"
+        "/___/____/      \\____/\\____/_/ /_/_/ /_/\\__, /  \n"
+        "                                       /____/"
     )
 
 

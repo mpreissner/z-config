@@ -27,7 +27,7 @@ api = [
 ]
 
 [project.scripts]
-z-config = "cli.z_config:main"
+zs-config = "cli.z_config:main"
 
 [tool.setuptools.packages.find]
 include = ["cli*", "db*", "lib*", "services*", "api*"]
