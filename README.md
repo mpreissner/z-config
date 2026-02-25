@@ -11,8 +11,13 @@ Automation toolset for Zscaler OneAPI — interactive TUI with a local DB cache 
 - **Interactive TUI** — Rich terminal UI with a persistent banner, full-screen scrollable table views, and keyboard-driven navigation
 - **ZPA Application Segments** — list, search, bulk enable/disable, and bulk create from CSV with dry-run and dependency resolution
 - **ZPA Certificate Management** — upload, rotate across all matching resources, and delete certificates
+- **ZPA Connectors** — list, search, enable/disable, rename, and delete App Connectors; full CRUD for Connector Groups
+- **ZPA Privileged Remote Access** — PRA Portal list, search, create, enable/disable, and delete
 - **ZPA Config Import** — pull a full snapshot of 18 resource types into a local SQLite cache for fast lookups
-- **ZIA** — policy activation and URL category lookup
+- **ZIA Firewall Policy** — list, search, and enable/disable L4 Firewall Rules and DNS Filter Rules; IPS subscription-awareness
+- **ZIA Locations** — list and search locations and location groups
+- **ZIA SSL Inspection** — list, search, and enable/disable SSL inspection rules
+- **ZIA Config Import** — pull a full snapshot of 19 resource types into a local SQLite cache
 - **Audit Log** — immutable record of every operation with local-timezone timestamps
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
 
@@ -39,7 +44,8 @@ z-config/
 │   ├── zpa_service.py           # ZPA workflows (cert rotation, etc.)
 │   ├── zpa_import_service.py    # ZPA config import (pulls live config into DB)
 │   ├── zpa_segment_service.py   # App segment bulk-create logic
-│   └── zia_service.py           # ZIA workflows
+│   ├── zia_service.py           # ZIA workflows
+│   └── zia_import_service.py    # ZIA config import (pulls live config into DB)
 │
 ├── cli/               # Interactive Rich TUI
 │   ├── zscaler-cli.py
@@ -102,10 +108,11 @@ Go to **Settings → Manage Tenants → Add Tenant** to register your first Zsca
 
 | Option | Description |
 |---|---|
-| Application Segments | Segment list, search, enable/disable, bulk create |
+| Application Segments | Segment list, search, enable/disable, bulk create; App Segment Groups *(coming soon)* |
 | Certificate Management | List, rotate, and delete certificates |
 | Connectors | List, search, enable/disable, rename, and delete App Connectors; full CRUD for Connector Groups |
-| PRA Portals | List, search, create, enable/disable, and delete PRA Portals |
+| Privileged Remote Access | PRA Portals — list, search, create, enable/disable, delete; PRA Consoles *(coming soon)* |
+| Access Policy | *(coming soon)* |
 | Import Config | Pull a full ZPA config snapshot into the local DB |
 | Reset N/A Resource Types | Clear the list of auto-disabled resource types so they are retried on the next import |
 
@@ -211,8 +218,17 @@ Use **Export CSV Template** to get a pre-filled starting point, or build your ow
 
 | Option | Description |
 |---|---|
-| Activate Policy | Push pending ZIA policy changes |
-| URL Category Lookup | Look up the category classification of one or more URLs |
+| SSL Inspection | List, search, and enable/disable SSL inspection rules |
+| Locations | List and search locations; list location groups |
+| Firewall Policy | List, search, and enable/disable L4 Firewall Rules and DNS Filter Rules; IPS subscription-awareness |
+| URL Lookup | Look up the category classification of one or more URLs |
+| Security Policy Settings | *(coming soon)* |
+| URL Categories | *(coming soon)* |
+| URL Filtering | *(coming soon)* |
+| Traffic Forwarding | *(coming soon)* |
+| Activation | View activation status; push pending ZIA policy changes |
+| Import Config | Pull a full ZIA config snapshot (19 resource types) into the local DB |
+| Reset N/A Resource Types | Clear the list of auto-disabled resource types so they are retried on the next import |
 
 ---
 
@@ -249,7 +265,8 @@ export ZSCALER_DB_URL="postgresql://user:pass@host/dbname"
 | `AuditLog` | Immutable record of every operation performed |
 | `Certificate` | Lifecycle tracking for certs managed by this toolset |
 | `ZPAResource` | Full JSON snapshot of every ZPA resource (`tenant × type × id`); SHA-256 hash enables fast change detection on re-import |
-| `SyncLog` | Outcome of each import run (status, counters, errors) |
+| `ZIAResource` | Full JSON snapshot of every ZIA resource (`tenant × type × id`); same SHA-256 change-detection pattern as ZPA |
+| `SyncLog` | Outcome of each import run (status, counters, errors) — shared by ZPA and ZIA imports |
 
 ---
 

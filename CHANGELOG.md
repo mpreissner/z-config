@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.2.0] - 2026-02-25
+
+### Added
+
+#### ZIA — Import Config
+- Pulls 19 resource types from the ZIA API into a new `ZIAResource` local DB table
+- SHA-256 change detection — re-runs only write rows whose content has changed
+- Automatic N/A detection — resource types that return 401 or `NOT_SUBSCRIBED` (403) are skipped and recorded per tenant
+- **Reset N/A Resource Types** — clear the auto-disabled list so they are retried on the next import
+
+#### ZIA — Firewall Policy
+- **List / Search Firewall Rules** — scrollable table: Order, Name, Action, State (green ENABLED / red DISABLED), Description
+- **Enable / Disable Firewall Rules** — checkbox multi-select; patches `state` via API and updates local DB immediately
+- **List / Search DNS Filter Rules** — same table layout as firewall rules
+- **Enable / Disable DNS Rules** — checkbox multi-select
+- **List / Search IPS Rules** — shows subscription-not-available message when `firewall_ips_rule` is marked N/A for the tenant
+
+#### ZIA — Locations
+- **List Locations** — scrollable table: Name, Country, Timezone, Sub-location flag, VPN flag
+- **Search Locations** — partial name match
+- **List Location Groups** — table: Name, Type, Location count
+
+#### ZIA — SSL Inspection
+- **List Rules** — scrollable table: Order, Name, Action (extracts `type` from nested action object), State, Description
+- **Search Rules** — partial name match
+- **Enable / Disable** — checkbox multi-select; patches `state` via API and updates local DB immediately
+
+#### ZPA — Menu restructure
+- **Privileged Remote Access** replaces the old "PRA Portals" top-level item — new parent submenu containing PRA Portals (active) and PRA Consoles (coming soon)
+- **Access Policy** coming-soon stub added to ZPA menu
+- **App Segment Groups** coming-soon stub added to the App Segments submenu
+
+### Changed
+- Main menu: ZIA moved above ZPA
+- ZIA menu order: SSL Inspection → Locations → Firewall Policy → URL Lookup *(active section)* · coming-soon stubs *(middle section)* · Activation → Import Config → Reset N/A → Back *(bottom section)*
+
+### Fixed
+- SSL Inspection list/search crash — `action` field in SSL rules is a nested object; now extracts `action["type"]` for display
+- ZIA Import: `url_categories` SDK method corrected (`list_categories` not `list_url_categories`); `url_filtering` corrected (`list_rules` not `list_url_filtering_rules`)
+- ZIA Import: `NOT_SUBSCRIBED` (403) errors now treated identically to 401 — resource type is auto-disabled and skipped on future runs
+- Admin & Roles removed from ZIA menu — the ZIA admin users endpoint returns an empty list for tenants using ZIdentity; will be revisited under the ZIdentity product area
+
+---
+
 ## [0.1.0] - 2026-02-25
 
 ### Added
