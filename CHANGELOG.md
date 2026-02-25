@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.3.0] - 2026-02-25
+
+### Added
+
+#### Config Snapshots (ZPA + ZIA)
+- **Save Snapshot** — captures the full local DB state for a tenant into a `restore_points` table; auto-named by timestamp, optional comment
+- **List Snapshots** — scrollable table showing name, comment, resource count, and local-timezone timestamp
+- **Compare Snapshot to Current DB** — field-level summary table or full JSON diff (with `+`/`-` highlighting) between any saved snapshot and the current DB state
+- **Compare Two Snapshots** — same diff view between any two saved snapshots
+- **Export Snapshot to JSON** — writes a portable JSON envelope (product, tenant, resources) to a user-chosen directory
+- **Delete Snapshot** — with confirmation prompt
+- Snapshot saves are recorded in the Audit Log
+- Available under both ZPA and ZIA menus
+
+### Changed
+
+#### zs-config rename
+- All `z-config` references updated across source, docs, and filesystem paths
+- Encryption key path moved from `~/.config/z-config/secret.key` to `~/.config/zs-config/secret.key`; existing key migrated automatically on first launch
+- Database path moved from `~/.local/share/z-config/zscaler.db` to `~/.local/share/zs-config/zscaler.db`; existing DB moved automatically on first launch
+- Windows conf file default path updated from `%APPDATA%\z-config\` to `%APPDATA%\zs-config\`
+- GitHub repository renamed to `mpreissner/zs-config`
+
+---
+
 ## [0.2.0] - 2026-02-25
 
 ### Added
