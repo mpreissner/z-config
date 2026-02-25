@@ -22,13 +22,9 @@ def zia_menu():
                 questionary.Choice("URL Lookup", value="url_lookup"),
                 questionary.Separator(),
                 questionary.Choice("Admin & Roles", value="admin_roles"),
+                questionary.Choice("Firewall Policy", value="firewall"),
                 questionary.Choice("Locations", value="locations"),
                 questionary.Choice("SSL Inspection", value="ssl"),
-                questionary.Choice("URL Categories      [coming soon]", value="url_cats"),
-                questionary.Choice("URL Filter Rules    [coming soon]", value="url_rules"),
-                questionary.Choice("Firewall Policy     [coming soon]", value="firewall"),
-                questionary.Choice("Security Policy     [coming soon]", value="security"),
-                questionary.Choice("Traffic Forwarding  [coming soon]", value="forwarding"),
                 questionary.Separator(),
                 questionary.Choice("Import Config", value="import"),
                 questionary.Choice("Reset N/A Resource Types", value="reset_na"),
@@ -38,11 +34,13 @@ def zia_menu():
         ).ask()
 
         if choice == "activation":
-            _activation_menu(client, tenant)
+            activation_menu(client, tenant)
         elif choice == "url_lookup":
             _url_lookup(client, tenant)
         elif choice == "admin_roles":
             admin_roles_menu(client, tenant)
+        elif choice == "firewall":
+            firewall_policy_menu(client, tenant)
         elif choice == "locations":
             locations_menu(client, tenant)
         elif choice == "ssl":
@@ -51,8 +49,6 @@ def zia_menu():
             _import_zia_config(client, tenant)
         elif choice == "reset_na":
             _reset_zia_na_resources(client, tenant)
-        elif choice in ("url_cats", "url_rules", "firewall", "security", "forwarding"):
-            console.print("[yellow]Coming soon.[/yellow]")
         elif choice in ("back", None):
             break
 
@@ -61,7 +57,7 @@ def zia_menu():
 # Activation
 # ------------------------------------------------------------------
 
-def _activation_menu(client, tenant):
+def activation_menu(client, tenant):
     from services.zia_service import ZIAService
     service = ZIAService(client, tenant_id=tenant.id)
     while True:
@@ -390,6 +386,361 @@ def _list_roles(tenant):
 
 
 # ------------------------------------------------------------------
+# Firewall Policy
+# ------------------------------------------------------------------
+
+def firewall_policy_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Firewall Policy",
+            choices=[
+                questionary.Choice("List Firewall Rules", value="list_fw"),
+                questionary.Choice("Search Firewall Rules", value="search_fw"),
+                questionary.Separator(),
+                questionary.Choice("List DNS Filter Rules", value="list_dns"),
+                questionary.Choice("Search DNS Filter Rules", value="search_dns"),
+                questionary.Separator(),
+                questionary.Choice("List IPS Rules", value="list_ips"),
+                questionary.Choice("Search IPS Rules", value="search_ips"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list_fw":
+            _list_firewall_rules(tenant)
+        elif choice == "search_fw":
+            _search_firewall_rules(tenant)
+        elif choice == "list_dns":
+            _list_dns_rules(tenant)
+        elif choice == "search_dns":
+            _search_dns_rules(tenant)
+        elif choice == "list_ips":
+            _list_ips_rules(tenant)
+        elif choice == "search_ips":
+            _search_ips_rules(tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_firewall_rules(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="firewall_rule", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No firewall rules in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    table = Table(title=f"Firewall Rules ({len(rows)} total)", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = cfg.get("action") or "—"
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        description = (cfg.get("description") or "")[:60]
+        table.add_row(order, r["name"] or "—", action, state_str, description)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_firewall_rules(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="firewall_rule", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No firewall rules matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    table = Table(title=f"Matching Firewall Rules ({len(rows)})", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = cfg.get("action") or "—"
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        table.add_row(order, r["name"] or "—", action, state_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _list_dns_rules(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="firewall_dns_rule", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No DNS filter rules in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    table = Table(title=f"DNS Filter Rules ({len(rows)} total)", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = cfg.get("action") or "—"
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        description = (cfg.get("description") or "")[:60]
+        table.add_row(order, r["name"] or "—", action, state_str, description)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_dns_rules(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="firewall_dns_rule", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No DNS filter rules matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    table = Table(title=f"Matching DNS Filter Rules ({len(rows)})", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = cfg.get("action") or "—"
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        table.add_row(order, r["name"] or "—", action, state_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _list_ips_rules(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="firewall_ips_rule", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No IPS rules in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    table = Table(title=f"IPS Rules ({len(rows)} total)", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = cfg.get("action") or "—"
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        description = (cfg.get("description") or "")[:60]
+        table.add_row(order, r["name"] or "—", action, state_str, description)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_ips_rules(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="firewall_ips_rule", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No IPS rules matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    table = Table(title=f"Matching IPS Rules ({len(rows)})", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = cfg.get("action") or "—"
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        table.add_row(order, r["name"] or "—", action, state_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+# ------------------------------------------------------------------
 # Locations
 # ------------------------------------------------------------------
 
@@ -601,7 +952,6 @@ def _list_ssl_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    # Sort by order/rank if present
     rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
 
     table = Table(title=f"SSL Inspection Rules ({len(rows)} total)", show_lines=False)
