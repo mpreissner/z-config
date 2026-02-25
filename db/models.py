@@ -28,12 +28,14 @@ class TenantConfig(Base):
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     zpa_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
+    zia_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     audit_logs = relationship("AuditLog", back_populates="tenant", lazy="select")
     certificates = relationship("Certificate", back_populates="tenant", lazy="select")
     zpa_resources = relationship("ZPAResource", back_populates="tenant", lazy="select")
+    zia_resources = relationship("ZIAResource", back_populates="tenant", lazy="select")
     sync_logs = relationship("SyncLog", back_populates="tenant", lazy="select")
 
     def __repr__(self) -> str:
@@ -147,3 +149,31 @@ class SyncLog(Base):
 
     def __repr__(self) -> str:
         return f"<SyncLog [{self.started_at}] {self.product} {self.status}>"
+
+
+class ZIAResource(Base):
+    """Snapshot of a ZIA resource fetched from the API.
+
+    One row per (tenant, resource_type, zia_id).  raw_config holds the full
+    JSON payload from the API; config_hash is a SHA-256 of that payload so
+    subsequent syncs can skip unchanged records.
+    """
+
+    __tablename__ = "zia_resources"
+    __table_args__ = (UniqueConstraint("tenant_id", "resource_type", "zia_id", name="uq_zia_resource"),)
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenant_configs.id"), nullable=False)
+    resource_type = Column(String(64), nullable=False)
+    zia_id = Column(String(255), nullable=False)
+    name = Column(String(512), nullable=True)
+    raw_config = Column(JSON, nullable=False)
+    config_hash = Column(String(64), nullable=True)
+    first_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    synced_at = Column(DateTime, nullable=True)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+
+    tenant = relationship("TenantConfig", back_populates="zia_resources")
+
+    def __repr__(self) -> str:
+        return f"<ZIAResource type={self.resource_type!r} name={self.name!r} id={self.zia_id!r}>"
