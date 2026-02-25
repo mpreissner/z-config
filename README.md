@@ -1,5 +1,6 @@
 # z-config
 
+[![PyPI](https://img.shields.io/pypi/v/zs-config)](https://pypi.org/project/zs-config/)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
 Automation toolset for Zscaler OneAPI — interactive TUI with a local DB cache for fast lookups and bulk operations.
@@ -65,27 +66,44 @@ z-config/
 
 ---
 
-## Quick Start
+## Installation
 
-### 1. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Launch the CLI
+### Recommended — pipx (isolated, `z-config` available system-wide)
 
 ```bash
-python cli/z_config.py
+pipx install zs-config
 ```
 
-On first launch an encryption key is generated automatically and saved to `~/.config/zscaler-cli/secret.key`. No manual setup required.
+### Alternative — pip
 
-Go to **Settings → Manage Tenants → Add Tenant** to register your first Zscaler tenant, then **ZPA → Import Config** to pull your tenant's configuration into the local cache.
+```bash
+pip install zs-config
+```
+
+Then launch from anywhere:
+
+```bash
+z-config
+```
+
+On first launch an encryption key is generated automatically and saved to `~/.config/z-config/secret.key`. No manual setup required.
+
+Go to **Settings → Manage Tenants → Add Tenant** to register your first Zscaler tenant, then **ZIA → Import Config** or **ZPA → Import Config** to pull your tenant's configuration into the local cache.
 
 > **Key override:** set `ZSCALER_SECRET_KEY` in your environment to use a specific Fernet key instead of the auto-generated one.
 
-> **Database override:** set `ZSCALER_DB_URL` to use PostgreSQL or another SQLAlchemy-compatible database instead of the default SQLite file.
+> **Database override:** set `ZSCALER_DB_URL` to use PostgreSQL or another SQLAlchemy-compatible database instead of the default SQLite file (`~/.local/share/z-config/zscaler.db`).
+
+---
+
+## Development Setup
+
+```bash
+git clone https://github.com/mpreissner/z-config.git
+cd z-config
+pip install -e .
+z-config
+```
 
 ---
 
