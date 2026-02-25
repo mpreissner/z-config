@@ -21,8 +21,8 @@ def main_menu():
         choice = questionary.select(
             "Main Menu",
             choices=[
-                questionary.Choice("  ZPA   Zscaler Private Access", value="zpa"),
                 questionary.Choice("  ZIA   Zscaler Internet Access", value="zia"),
+                questionary.Choice("  ZPA   Zscaler Private Access", value="zpa"),
                 questionary.Separator(),
                 questionary.Choice(_active_tenant_label(), value="switch_tenant"),
                 questionary.Choice("  Settings", value="settings"),
