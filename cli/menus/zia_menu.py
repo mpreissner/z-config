@@ -4,6 +4,7 @@ from rich.table import Table
 
 from cli.banner import render_banner
 from cli.menus import get_zia_client
+from cli.menus.snapshots_menu import snapshots_menu
 
 console = Console()
 
@@ -30,6 +31,7 @@ def zia_menu():
                 questionary.Separator(),
                 questionary.Choice("Activation", value="activation"),
                 questionary.Choice("Import Config", value="import"),
+                questionary.Choice("Config Snapshots", value="snapshots"),
                 questionary.Choice("Reset N/A Resource Types", value="reset_na"),
                 questionary.Choice("← Back", value="back"),
             ],
@@ -48,6 +50,8 @@ def zia_menu():
             ssl_inspection_menu(client, tenant)
         elif choice == "import":
             _import_zia_config(client, tenant)
+        elif choice == "snapshots":
+            snapshots_menu(tenant, "ZIA")
         elif choice == "reset_na":
             _reset_zia_na_resources(client, tenant)
         elif choice in ("back", None):

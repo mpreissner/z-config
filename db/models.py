@@ -37,6 +37,8 @@ class TenantConfig(Base):
     zpa_resources = relationship("ZPAResource", back_populates="tenant", lazy="select")
     zia_resources = relationship("ZIAResource", back_populates="tenant", lazy="select")
     sync_logs = relationship("SyncLog", back_populates="tenant", lazy="select")
+    restore_points = relationship("RestorePoint", back_populates="tenant",
+                                  cascade="all, delete-orphan", lazy="select")
 
     def __repr__(self) -> str:
         return f"<TenantConfig name={self.name!r} active={self.is_active}>"
@@ -149,6 +151,31 @@ class SyncLog(Base):
 
     def __repr__(self) -> str:
         return f"<SyncLog [{self.started_at}] {self.product} {self.status}>"
+
+
+class RestorePoint(Base):
+    """Point-in-time snapshot of a tenant's full ZPA or ZIA configuration.
+
+    Stores the complete resource inventory captured from the local DB at the
+    time of the snapshot, enabling pre/post-change diffing and export.
+    """
+
+    __tablename__ = "restore_points"
+
+    id             = Column(Integer, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey("tenant_configs.id"), nullable=False)
+    product        = Column(String(32),  nullable=False)   # "ZPA" or "ZIA"
+    name           = Column(String(255), nullable=False)   # auto timestamp
+    comment        = Column(Text,        nullable=True)
+    created_at     = Column(DateTime,    default=datetime.utcnow)
+    resource_count = Column(Integer,     default=0)
+    snapshot       = Column(JSON,        nullable=False)
+    # snapshot structure: {"resources": {"resource_type": [{"id","name","raw_config"}, ...]}}
+
+    tenant = relationship("TenantConfig", back_populates="restore_points")
+
+    def __repr__(self) -> str:
+        return f"<RestorePoint product={self.product!r} name={self.name!r} resources={self.resource_count}>"
 
 
 class ZIAResource(Base):

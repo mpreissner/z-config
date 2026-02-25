@@ -6,6 +6,7 @@ from rich.table import Table
 
 from cli.banner import render_banner
 from cli.menus import get_zpa_client
+from cli.menus.snapshots_menu import snapshots_menu
 
 console = Console()
 
@@ -28,6 +29,7 @@ def zpa_menu():
                 questionary.Choice("Access Policy  [coming soon]", value="noop"),
                 questionary.Separator(),
                 questionary.Choice("Import Config", value="import"),
+                questionary.Choice("Config Snapshots", value="snapshots"),
                 questionary.Choice("Reset N/A Resource Types", value="reset_na"),
                 questionary.Choice("← Back", value="back"),
             ],
@@ -38,6 +40,8 @@ def zpa_menu():
             cert_menu(client, tenant)
         elif choice == "import":
             _import_config(client, tenant)
+        elif choice == "snapshots":
+            snapshots_menu(tenant, "ZPA")
         elif choice == "reset_na":
             _reset_na_resources(client, tenant)
         elif choice == "apps":
