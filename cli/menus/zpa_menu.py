@@ -23,7 +23,9 @@ def zpa_menu():
                 questionary.Choice("Application Segments", value="apps"),
                 questionary.Choice("Certificate Management", value="certs"),
                 questionary.Choice("Connectors", value="connectors"),
-                questionary.Choice("PRA Portals", value="pra"),
+                questionary.Choice("Privileged Remote Access", value="pra"),
+                questionary.Separator(),
+                questionary.Choice("Access Policy  [coming soon]", value="noop"),
                 questionary.Separator(),
                 questionary.Choice("Import Config", value="import"),
                 questionary.Choice("Reset N/A Resource Types", value="reset_na"),
@@ -41,7 +43,7 @@ def zpa_menu():
         elif choice == "apps":
             app_segments_menu(client, tenant)
         elif choice == "pra":
-            pra_portals_menu(client, tenant)
+            privileged_access_menu(client, tenant)
         elif choice == "connectors":
             connectors_menu(client, tenant)
         elif choice in ("back", None):
@@ -237,6 +239,7 @@ def app_segments_menu(client, tenant):
                 questionary.Choice("List Segments", value="list"),
                 questionary.Choice("Search by Domain", value="search"),
                 questionary.Choice("Enable / Disable", value="toggle"),
+                questionary.Choice("App Segment Groups  [coming soon]", value="noop"),
                 questionary.Separator(),
                 questionary.Choice("Bulk Create from CSV", value="bulk"),
                 questionary.Choice("Export CSV Template", value="template"),
@@ -785,6 +788,29 @@ def _export_template():
 
 
 # ------------------------------------------------------------------
+# Privileged Remote Access
+# ------------------------------------------------------------------
+
+def privileged_access_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Privileged Remote Access",
+            choices=[
+                questionary.Choice("PRA Portals", value="portals"),
+                questionary.Choice("PRA Consoles  [coming soon]", value="noop"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "portals":
+            pra_portals_menu(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
 # PRA Portals
 # ------------------------------------------------------------------
 
