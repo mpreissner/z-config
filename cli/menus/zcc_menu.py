@@ -13,7 +13,8 @@ from lib.zcc_client import OS_TYPE_LABELS, REGISTRATION_STATE_LABELS
 console = Console()
 
 _OS_CHOICES = [questionary.Choice(label, value=val) for val, label in OS_TYPE_LABELS.items()]
-_OS_CHOICES_ALL = [questionary.Choice("All OS types", value=None)] + _OS_CHOICES
+# value=0 is the "All OS types" sentinel; questionary returns the title string for value=None
+_OS_CHOICES_ALL = [questionary.Choice("All OS types", value=0)] + _OS_CHOICES
 
 _REG_STATE_CHOICES_FILTER = [
     questionary.Choice("All (except Removed)", value=None),
@@ -74,7 +75,6 @@ def devices_menu(client, tenant):
             choices=[
                 questionary.Choice("List Devices", value="list"),
                 questionary.Choice("Search by Username", value="search"),
-                questionary.Choice("Device Details", value="details"),
                 questionary.Separator(),
                 questionary.Choice("Soft Remove Device", value="remove"),
                 questionary.Choice("Force Remove Device", value="force_remove"),
@@ -88,8 +88,6 @@ def devices_menu(client, tenant):
             _list_devices(client, tenant)
         elif choice == "search":
             _search_devices(client, tenant)
-        elif choice == "details":
-            _device_details(client, tenant)
         elif choice == "remove":
             _remove_device(client, tenant, force=False)
         elif choice == "force_remove":
@@ -106,6 +104,8 @@ def _list_devices(client, tenant, username=None, os_type=None):
         os_type = questionary.select(
             "Filter by OS type:", choices=_OS_CHOICES_ALL
         ).ask()
+        if os_type == 0:
+            os_type = None  # sentinel → no filter
 
     with console.status("Fetching devices..."):
         try:
@@ -132,16 +132,16 @@ def _list_devices(client, tenant, username=None, os_type=None):
     table.add_column("UDID", style="dim")
 
     for d in devices:
-        os_int = d.get("osType") or d.get("os_type")
-        reg_int = d.get("registrationState") or d.get("registration_state")
-        os_str = OS_TYPE_LABELS.get(os_int, str(os_int) if os_int else "—")
-        reg_str = REGISTRATION_STATE_LABELS.get(reg_int, str(reg_int) if reg_int else "—")
+        os_int = d.get("type")
+        reg_int = d.get("registration_state")
+        os_str = OS_TYPE_LABELS.get(os_int, str(os_int) if os_int is not None else "—")
+        reg_str = REGISTRATION_STATE_LABELS.get(reg_int, str(reg_int) if reg_int is not None else "—")
         reg_style = "green" if reg_int == 1 else ("yellow" if reg_int == 3 else "dim")
         table.add_row(
-            d.get("userName") or d.get("username") or "—",
-            d.get("deviceName") or d.get("device_name") or "—",
+            d.get("user") or "—",
+            d.get("machine_hostname") or "—",
             os_str,
-            d.get("zcClientConnectorVersion") or d.get("zc_client_connector_version") or "—",
+            d.get("agent_version") or "—",
             f"[{reg_style}]{reg_str}[/{reg_style}]",
             d.get("udid") or "—",
         )
@@ -170,7 +170,8 @@ def _device_details(client, tenant):
     if not lookup:
         return
 
-    value = questionary.text(f"Enter {lookup}:").ask()
+    prompt = "Enter username (full email, e.g. user@company.com):" if lookup == "username" else "Enter UDID:"
+    value = questionary.text(prompt).ask()
     if not value:
         return
 
@@ -194,25 +195,24 @@ def _device_details(client, tenant):
     # Render as a key-value panel
     lines = []
     field_map = [
-        ("userName", "Username"),
-        ("deviceName", "Device Name"),
-        ("osType", "OS"),
-        ("zcClientConnectorVersion", "ZCC Version"),
-        ("registrationState", "Status"),
+        ("user_name", "Username"),
+        ("machine_hostname", "Device Name"),
+        ("type", "OS"),
+        ("agent_version", "ZCC Version"),
+        ("registration_state", "Status"),
         ("udid", "UDID"),
         ("owner", "Owner"),
-        ("lastSeen", "Last Seen"),
-        ("city", "City"),
-        ("countryCode", "Country"),
-        ("tunnelVersion", "Tunnel Version"),
+        ("last_seen_time", "Last Seen"),
+        ("tunnel_version", "Tunnel Version"),
+        ("os_version", "OS Version"),
     ]
     for key, label in field_map:
         raw = details.get(key)
         if raw is None:
             continue
-        if key == "osType":
+        if key == "type":
             raw = OS_TYPE_LABELS.get(raw, str(raw))
-        elif key == "registrationState":
+        elif key == "registration_state":
             raw = REGISTRATION_STATE_LABELS.get(raw, str(raw))
         lines.append(f"[bold]{label:<22}[/bold]{raw}")
 
