@@ -10,23 +10,27 @@ All notable changes to this project will be documented in this file.
 
 #### ZIA — Cloud Applications (read-only catalog)
 - New `── Cloud Apps ──` section in the ZIA menu
-- **Cloud Applications** — list all apps associated with DLP/CAC policy rules or SSL policy rules; search by name across either policy set
-- Table shows: name, app class, app type, ID
+- **Cloud Applications** — list all apps associated with DLP/CAC policy rules or SSL policy rules; search by name across either policy set; data populated via Import Config
+- Table shows: app name, parent category, ID
 
 #### ZIA — Cloud App Control (full CRUD)
-- **Cloud App Control** — browse rules by rule type (types loaded live from `get_rule_type_mapping()`)
+- **Cloud App Control** — browse rules by rule type; type list derived from DB after import
 - Per-type submenu: list rules, view details (JSON scroll view), create from JSON file, edit from JSON file, duplicate rule (prompts for new name), delete rule (with confirmation)
-- All mutations audit-logged and remind user to activate changes in ZIA
-- Rules fetched live from API (no DB caching); list sorted by order/rank
+- All mutations audit-logged, re-sync DB automatically, and remind user to activate changes in ZIA
+- Rules stored in DB via Import Config; list sorted by order/rank
+
+#### ZIA Import (`services/zia_import_service.py`)
+- Added `cloud_app_policy`, `cloud_app_ssl_policy`, and `cloud_app_control_rule` to `RESOURCE_DEFINITIONS` (import count: 24 → 27)
+- `list_all_cloud_app_rules()` iterates 18 known rule types (hardcoded — SDK's `form_response_body` mangles `UPPER_SNAKE` keys via `pydash.camel_case`, making `get_rule_type_mapping()` unusable as a driver)
 
 #### ZIA Client (`lib/zia_client.py`)
 - `list_cloud_app_policy`, `list_cloud_app_ssl_policy`
-- `get_cloud_app_rule_types`, `list_cloud_app_rules`, `get_cloud_app_rule`
+- `list_all_cloud_app_rules`, `get_cloud_app_rule_types`, `list_cloud_app_rules`, `get_cloud_app_rule`
 - `create_cloud_app_rule`, `update_cloud_app_rule`, `delete_cloud_app_rule`, `duplicate_cloud_app_rule`
 
 ### Fixed
-- **ZCC Entitlements (continued)**: base URL corrected to `/zcc/papi/public/v1` (was `/mobileadmin/v1`); GET methods now use direct HTTP against the correct endpoint
-- **ZIA URL Lookup**: missing `press_any_key_to_continue` on error/empty paths meant errors were wiped by `render_banner()` before user could read them; also handle empty result set gracefully
+- **ZCC Entitlements**: base URL corrected to `/zcc/papi/public/v1` (was `/mobileadmin/v1`); GET methods use direct HTTP against the correct endpoint
+- **ZIA URL Lookup**: missing `press_any_key_to_continue` on error/empty paths caused errors to be wiped by `render_banner()` before user could read them; empty result set now handled gracefully
 - **ZIA URL Lookup**: SDK method name corrected to `lookup` (was `url_lookup`); return value correctly unpacked as 2-tuple `(result, error)`
 
 ---

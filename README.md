@@ -12,11 +12,12 @@ Automation toolset for Zscaler OneAPI — interactive TUI with a local DB cache 
 - **Interactive TUI** — Rich terminal UI with a persistent banner, full-screen scrollable table views, and keyboard-driven navigation
 - **ZPA** — App Connectors (list/search/enable-disable/rename/delete), Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups (list/search), Access Policy (list/search), PRA Portals (full CRUD), PRA Consoles (list/search/enable-disable/delete), Service Edges (list/search/enable-disable), Certificate Management (upload/rotate/delete)
 - **ZPA Config Import** — pull a full snapshot of 25 resource types into a local SQLite cache for fast lookups
-- **ZIA** — URL Filtering (list/search/enable-disable), URL Categories (list/search/add-remove URLs), Security Policy Settings (allowlist/denylist view and edit), URL Lookup, Firewall Policy (L4 rules, DNS filter rules, IPS rules), SSL Inspection (list/search/enable-disable), Traffic Forwarding (list/search), Locations (list/search), Users (list/search), Policy Activation
-- **ZIA Config Import** — pull a full snapshot of 24 resource types into a local SQLite cache
+- **ZIA** — URL Filtering (list/search/enable-disable), URL Categories (list/search/add-remove URLs), Security Policy Settings (allowlist/denylist view and edit), URL Lookup, Firewall Policy (L4 rules, DNS filter rules, IPS rules), SSL Inspection (list/search/enable-disable), Traffic Forwarding (list/search), Locations (list/search), Users (list/search), DLP Engines (full CRUD + JSON import), DLP Dictionaries (full CRUD + JSON/CSV import), Cloud Applications (list/search policy and SSL-policy apps), Cloud App Control (full CRUD by rule type), Policy Activation
+- **ZIA Config Import** — pull a full snapshot of 27 resource types into a local SQLite cache
 - **ZCC Device Management** — list, search, and view enrolled devices; soft and force remove; OTP lookup; app profile password lookup; CSV exports for devices and service status
 - **ZCC Config Import** — sync devices, trusted networks, forwarding profiles, and admin users into a local SQLite cache
-- **ZCC Configuration** — Trusted Networks (list/search), Forwarding Profiles (list/search), Admin Users (list/search)
+- **ZCC Configuration** — Trusted Networks (list/search), Forwarding Profiles (list/search), Admin Users (list/search), Entitlements (view and manage ZPA and ZDX group access)
+- **ZDX** — Device lookup and health metrics, app performance on device, user lookup, application scores, deep trace management (list/start/view/stop)
 - **ZIdentity User Management** — list and search users; full profile with group membership and service entitlements; reset password, set password, and skip MFA
 - **ZIdentity Group Management** — list and search groups; view members; add and remove users
 - **ZIdentity API Client Management** — list and search clients; view details and scopes; manage secrets with expiry; delete clients
@@ -36,6 +37,7 @@ zs-config/
 │   ├── zpa_client.py    # ZPA API methods
 │   ├── zia_client.py    # ZIA API methods
 │   ├── zcc_client.py        # ZCC API methods
+│   ├── zdx_client.py        # ZDX API methods (direct HTTP — no SDK module)
 │   ├── zidentity_client.py  # ZIdentity API methods
 │   └── conf_writer.py       # zscaler-oneapi.conf writer (chmod 600)
 │
@@ -53,6 +55,7 @@ zs-config/
 │   ├── zia_import_service.py    # ZIA config import (24 resource types)
 │   ├── zcc_service.py           # ZCC workflows (device management, secrets)
 │   ├── zcc_import_service.py    # ZCC config import (devices, networks, profiles, admins)
+│   ├── zdx_service.py           # ZDX workflows (device health, deep trace)
 │   └── zidentity_service.py     # ZIdentity workflows (users, groups, API clients)
 │
 ├── cli/               # Interactive Rich TUI
@@ -65,6 +68,7 @@ zs-config/
 │       ├── zpa_menu.py         # ZPA menus
 │       ├── zia_menu.py         # ZIA menus
 │       ├── zcc_menu.py         # ZCC menus
+│       ├── zdx_menu.py         # ZDX menus
 │       └── zidentity_menu.py   # ZIdentity menus
 │
 ├── api/               # FastAPI REST API (future GUI backend)
@@ -125,6 +129,7 @@ zs-config
 | ZIA | Zscaler Internet Access management |
 | ZPA | Zscaler Private Access management |
 | ZCC | Zscaler Client Connector management |
+| ZDX | Zscaler Digital Experience — device health, app performance, deep trace |
 | ZIdentity | User, group, and API client management |
 | Switch Tenant | Switch active tenant (shows current tenant name) |
 | Settings | Add / list / remove tenants; clear imported data |
@@ -303,12 +308,26 @@ Entries are grouped into labeled sections.
 | Users | List and search users |
 | Locations | List and search locations; list location groups |
 
+**DLP**
+
+| Option | Description |
+|---|---|
+| DLP Engines | List, search, view details, create from JSON file, edit from JSON file, delete |
+| DLP Dictionaries | List, search, view details, create from JSON or CSV file, edit, delete |
+
+**Cloud Apps**
+
+| Option | Description |
+|---|---|
+| Cloud Applications | List and search apps associated with DLP/CAC policy rules or SSL policy rules |
+| Cloud App Control | Full CRUD for web application rules, grouped by rule type (AI & ML, Webmail, Streaming Media, etc.) |
+
 **Bottom section**
 
 | Option | Description |
 |---|---|
 | Activation | View activation status; push pending ZIA policy changes |
-| Import Config | Pull a full ZIA config snapshot (24 resource types) into the local DB |
+| Import Config | Pull a full ZIA config snapshot (27 resource types) into the local DB |
 | Config Snapshots | Save, compare, export, and delete point-in-time config snapshots |
 | Reset N/A Resource Types | Clear the list of auto-disabled resource types so they are retried on the next import |
 
@@ -338,6 +357,7 @@ Entries are grouped into labeled sections.
 | Trusted Networks | List and search defined trusted networks (DNS servers and search domains) |
 | Forwarding Profiles | List and search forwarding profiles |
 | Admin Users | List and search ZCC admin users |
+| Entitlements | View and manage ZPA and ZDX group access entitlements |
 
 **Bottom section**
 
@@ -357,6 +377,37 @@ Entries are grouped into labeled sections.
 | Device Details | Full device record by username or UDID |
 | Soft Remove Device | Mark device as Removal Pending — unenrolled on next connection |
 | Force Remove Device | Immediately remove a Registered or Removal Pending device |
+
+---
+
+### ZDX Menu
+
+Time window is selected on entry (Last 2 / 4 / 8 / 24 hours) and applied to all data queries.
+
+**Device Analytics**
+
+| Option | Description |
+|---|---|
+| Device Lookup & Health | Search by hostname or email; select device; view health metrics and events table |
+| App Performance on Device | Search device → select app → view score and metric trend |
+
+**Users**
+
+| Option | Description |
+|---|---|
+| User Lookup | Search by email or name; view associated devices and per-device ZDX score |
+
+**Applications**
+
+| Option | Description |
+|---|---|
+| Application Scores | List all monitored apps with ZDX scores (color-coded) |
+
+**Diagnostics**
+
+| Option | Description |
+|---|---|
+| Deep Trace | List active traces; start new trace (device + optional app + session name); view results; stop trace |
 
 ---
 
