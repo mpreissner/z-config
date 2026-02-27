@@ -4,6 +4,89 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.7.0] - 2026-02-27
+
+### Added
+
+#### ZIA — Cloud Applications (read-only catalog)
+- New `── Cloud Apps ──` section in the ZIA menu
+- **Cloud Applications** — list all apps associated with DLP/CAC policy rules or SSL policy rules; search by name across either policy set; data populated via Import Config
+- Table shows: app name, parent category, ID
+
+#### ZIA — Cloud App Control (full CRUD)
+- **Cloud App Control** — browse rules by rule type; type list derived from DB after import
+- Per-type submenu: list rules, view details (JSON scroll view), create from JSON file, edit from JSON file, duplicate rule (prompts for new name), delete rule (with confirmation)
+- All mutations audit-logged, re-sync DB automatically, and remind user to activate changes in ZIA
+- Rules stored in DB via Import Config; list sorted by order/rank
+
+#### ZIA Import (`services/zia_import_service.py`)
+- Added `cloud_app_policy`, `cloud_app_ssl_policy`, and `cloud_app_control_rule` to `RESOURCE_DEFINITIONS` (import count: 24 → 27)
+- `list_all_cloud_app_rules()` iterates 18 known rule types (hardcoded — SDK's `form_response_body` mangles `UPPER_SNAKE` keys via `pydash.camel_case`, making `get_rule_type_mapping()` unusable as a driver)
+
+#### ZIA Client (`lib/zia_client.py`)
+- `list_cloud_app_policy`, `list_cloud_app_ssl_policy`
+- `list_all_cloud_app_rules`, `get_cloud_app_rule_types`, `list_cloud_app_rules`, `get_cloud_app_rule`
+- `create_cloud_app_rule`, `update_cloud_app_rule`, `delete_cloud_app_rule`, `duplicate_cloud_app_rule`
+
+### Fixed
+- **ZCC Entitlements**: base URL corrected to `/zcc/papi/public/v1` (was `/mobileadmin/v1`); GET methods use direct HTTP against the correct endpoint
+- **ZIA URL Lookup**: missing `press_any_key_to_continue` on error/empty paths caused errors to be wiped by `render_banner()` before user could read them; empty result set now handled gracefully
+- **ZIA URL Lookup**: SDK method name corrected to `lookup` (was `url_lookup`); return value correctly unpacked as 2-tuple `(result, error)`
+
+---
+
+## [0.6.1] - 2026-02-27
+
+### Fixed
+- **ZIA — DLP Engines / Dictionaries list**: rows were sorted alphabetically by name; now sorted numerically by ZIA ID
+- **ZCC Entitlements / ZDX — 401 Unauthorized**: direct-HTTP token requests (`_get_token`) were missing the `audience: https://api.zscaler.com` body parameter required by the Zscaler OneAPI token endpoint; the Postman collection's collection-level OAuth2 config reveals this as mandatory. Added to `lib/zcc_client.py` and `lib/zdx_client.py`.
+
+---
+
+## [0.6.0] - 2026-02-27
+
+### Added
+
+#### ZIA — DLP CRUD
+- **DLP Engines** — list, search, view details (JSON scroll view), create from JSON file, edit from JSON file, delete; all mutations remind the user to activate changes in ZIA
+- **DLP Dictionaries** — same CRUD operations plus CSV-based creation and editing; CSV format: one value per row (header optional); phrases and patterns are supported separately
+- Both DLP submenus are accessible under a new `── DLP ──` section in the ZIA menu, inserted after `── Identity & Access ──`
+- DB is re-synced automatically after every create/update/delete via a targeted `ZIAImportService.run(resource_types=[...])` call
+
+#### ZIA Client (`lib/zia_client.py`)
+- `get_dlp_engine`, `create_dlp_engine`, `update_dlp_engine`, `delete_dlp_engine`
+- `get_dlp_dictionary`, `create_dlp_dictionary`, `update_dlp_dictionary`, `delete_dlp_dictionary`
+
+#### ZCC — Entitlements
+- **Entitlements** added to the `── Configuration ──` section of the ZCC menu
+- **View ZPA / ZDX Entitlements** — fetches live data and renders a group access table (or raw JSON if structure is non-standard)
+- **Manage ZPA / ZDX Group Access** — checkbox multi-select to toggle group access; confirms changes before PUT; audit-logged
+
+#### ZCC Client (`lib/zcc_client.py`)
+- OAuth2 direct-HTTP token management (same 30 s early-refresh pattern as `zidentity_client.py`)
+- `get_zpa_entitlements`, `get_zdx_entitlements` — GET from `mobileadmin/v1/getZpaGroupEntitlements` and `getZdxGroupEntitlements`
+- `update_zpa_entitlements`, `update_zdx_entitlements` — PUT to corresponding update endpoints
+
+#### ZDX — Help Desk Module (new product area)
+- **Main menu** — `ZDX  Zscaler Digital Experience` added between ZCC and ZIdentity
+- **Time window picker** — 2 / 4 / 8 / 24 hours, shown at menu entry or per-action as needed
+- **Device Lookup & Health** — hostname/email search → device picker → health metrics table + events table in a single scroll view
+- **App Performance on Device** — search device → list apps with ZDX scores → optional drill into a single app for detailed JSON metrics
+- **User Lookup** — email/name search → users table with device count and ZDX score
+- **Application Scores** — all apps with color-coded ZDX scores (green ≥80, yellow ≥50, red <50) and affected user count
+- **Deep Trace** — list traces per device; start new trace (device picker → optional app scope → session name → POST → status poll); view trace results (JSON); stop trace (DELETE)
+- All READ operations audit-logged with `product="ZDX"`; CREATE/DELETE mutations audit-logged with resource details
+
+#### New Files
+- `lib/zdx_client.py` — direct-HTTP ZDX client with OAuth2 token caching
+- `services/zdx_service.py` — thin service layer with audit logging
+- `cli/menus/zdx_menu.py` — full ZDX TUI menu
+
+#### Infrastructure
+- `cli/menus/__init__.py` — `get_zdx_client()` factory added
+
+---
+
 ## [0.5.0] - 2026-02-27
 
 ### Added

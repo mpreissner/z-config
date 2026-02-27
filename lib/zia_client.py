@@ -87,8 +87,10 @@ class ZIAClient:
         return _to_dict(_unwrap(result, resp, err))
 
     def url_lookup(self, urls: List[str]) -> List[Dict]:
-        result, resp, err = self._sdk.zia.url_categories.url_lookup(urls)
-        return _to_dicts(_unwrap(result, resp, err))
+        result, err = self._sdk.zia.url_categories.lookup(urls)
+        if err:
+            raise RuntimeError(err)
+        return _to_dicts(result or [])
 
     # ------------------------------------------------------------------
     # URL Filtering Policies
@@ -268,9 +270,41 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.dlp_engine.list_dlp_engines()
         return _to_dicts(_unwrap(result, resp, err))
 
+    def get_dlp_engine(self, engine_id: str) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_engine.get_dlp_engine(int(engine_id))
+        return _to_dict(_unwrap(result, resp, err))
+
+    def create_dlp_engine(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_engine.add_dlp_engine(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_dlp_engine(self, engine_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_engine.update_dlp_engine(int(engine_id), **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_dlp_engine(self, engine_id: str) -> None:
+        result, resp, err = self._sdk.zia.dlp_engine.delete_dlp_engine(int(engine_id))
+        _unwrap(result, resp, err)
+
     def list_dlp_dictionaries(self) -> List[Dict]:
         result, resp, err = self._sdk.zia.dlp_dictionary.list_dicts()
         return _to_dicts(_unwrap(result, resp, err))
+
+    def get_dlp_dictionary(self, dict_id: str) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_dictionary.get_dict(int(dict_id))
+        return _to_dict(_unwrap(result, resp, err))
+
+    def create_dlp_dictionary(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_dictionary.add_dict(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_dlp_dictionary(self, dict_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_dictionary.update_dict(int(dict_id), **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_dlp_dictionary(self, dict_id: str) -> None:
+        result, resp, err = self._sdk.zia.dlp_dictionary.delete_dict(int(dict_id))
+        _unwrap(result, resp, err)
 
     # ------------------------------------------------------------------
     # Security Policy (singleton list wrappers for import)
@@ -336,4 +370,80 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.url_categories.update_url_category(
             category_id, urls=updated
         )
+        return _to_dict(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Cloud Applications (read-only catalog)
+    # ------------------------------------------------------------------
+
+    def list_cloud_app_policy(self, search: Optional[str] = None, app_class: Optional[str] = None) -> List[Dict]:
+        params = {}
+        if search:
+            params["search"] = search
+        if app_class:
+            params["app_class"] = app_class
+        result, resp, err = self._sdk.zia.cloud_applications.list_cloud_app_policy(query_params=params)
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def list_cloud_app_ssl_policy(self, search: Optional[str] = None, app_class: Optional[str] = None) -> List[Dict]:
+        params = {}
+        if search:
+            params["search"] = search
+        if app_class:
+            params["app_class"] = app_class
+        result, resp, err = self._sdk.zia.cloud_applications.list_cloud_app_ssl_policy(query_params=params)
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Cloud App Control
+    # ------------------------------------------------------------------
+
+    # SDK's form_response_body mangles UPPER_SNAKE keys via pydash.camel_case
+    # (e.g. AI_ML → aiMl), so get_rule_type_mapping() can't be used to drive
+    # the import loop.  Use the canonical type list from the SDK docs instead.
+    _CLOUD_APP_RULE_TYPES: List[str] = [
+        "AI_ML", "BUSINESS_PRODUCTIVITY", "CONSUMER", "DNS_OVER_HTTPS",
+        "ENTERPRISE_COLLABORATION", "FILE_SHARE", "FINANCE", "HEALTH_CARE",
+        "HOSTING_PROVIDER", "HUMAN_RESOURCES", "INSTANT_MESSAGING", "IT_SERVICES",
+        "LEGAL", "SALES_AND_MARKETING", "SOCIAL_NETWORKING", "STREAMING_MEDIA",
+        "SYSTEM_AND_DEVELOPMENT", "WEBMAIL",
+    ]
+
+    def list_all_cloud_app_rules(self) -> List[Dict]:
+        """Fetch rules for every rule type and return combined list (for import)."""
+        all_rules: List[Dict] = []
+        for rule_type in self._CLOUD_APP_RULE_TYPES:
+            try:
+                all_rules.extend(self.list_cloud_app_rules(rule_type))
+            except Exception:
+                pass
+        return all_rules
+
+    def get_cloud_app_rule_types(self) -> Dict:
+        result, resp, err = self._sdk.zia.cloudappcontrol.get_rule_type_mapping()
+        return _to_dict(_unwrap(result, resp, err))
+
+    def list_cloud_app_rules(self, rule_type: str) -> List[Dict]:
+        result, resp, err = self._sdk.zia.cloudappcontrol.list_rules(rule_type)
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def get_cloud_app_rule(self, rule_type: str, rule_id: str) -> Dict:
+        result, resp, err = self._sdk.zia.cloudappcontrol.get_rule(rule_type, rule_id)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def create_cloud_app_rule(self, rule_type: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloudappcontrol.add_rule(rule_type, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_cloud_app_rule(self, rule_type: str, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloudappcontrol.update_rule(rule_type, rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_cloud_app_rule(self, rule_type: str, rule_id: str) -> None:
+        _, resp, err = self._sdk.zia.cloudappcontrol.delete_rule(rule_type, rule_id)
+        if err:
+            raise RuntimeError(str(err))
+
+    def duplicate_cloud_app_rule(self, rule_type: str, rule_id: str, name: str) -> Dict:
+        result, resp, err = self._sdk.zia.cloudappcontrol.add_duplicate_rule(rule_type, rule_id, name)
         return _to_dict(_unwrap(result, resp, err))

@@ -24,6 +24,7 @@ def main_menu():
                 questionary.Choice("  ZIA   Zscaler Internet Access", value="zia"),
                 questionary.Choice("  ZPA   Zscaler Private Access", value="zpa"),
                 questionary.Choice("  ZCC   Zscaler Client Connector", value="zcc"),
+                questionary.Choice("  ZDX   Zscaler Digital Experience", value="zdx"),
                 questionary.Choice("  ZIdentity", value="zidentity"),
                 questionary.Separator(),
                 questionary.Choice(_active_tenant_label(), value="switch_tenant"),
@@ -44,6 +45,9 @@ def main_menu():
         elif choice == "zcc":
             from cli.menus.zcc_menu import zcc_menu
             zcc_menu()
+        elif choice == "zdx":
+            from cli.menus.zdx_menu import zdx_menu
+            zdx_menu()
         elif choice == "zidentity":
             from cli.menus.zidentity_menu import zidentity_menu
             zidentity_menu()

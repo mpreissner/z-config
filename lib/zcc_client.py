@@ -1,5 +1,7 @@
+import time
 from typing import Dict, List, Optional
 
+import requests
 from zscaler import ZscalerClient
 
 from .auth import ZscalerAuth
@@ -80,6 +82,52 @@ class ZCCClient:
             "clientSecret": auth.client_secret,
             "vanityDomain": auth.vanity_domain,
         })
+        self._zcc_base = f"{oneapi_base_url}/zcc/papi/public/v1"
+        self._token: Optional[str] = None
+        self._token_expires_at: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Direct HTTP helpers (for SDK-missing endpoints)
+    # ------------------------------------------------------------------
+
+    def _get_token(self) -> str:
+        if self._token and time.time() < self._token_expires_at - 30:
+            return self._token
+        resp = requests.post(
+            f"{self.auth.zidentity_base_url}/oauth2/v1/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": self.auth.client_id,
+                "client_secret": self.auth.client_secret,
+                "audience": "https://api.zscaler.com",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._token = data["access_token"]
+        self._token_expires_at = time.time() + data.get("expires_in", 3600)
+        return self._token
+
+    def _direct_get(self, path: str, params: Optional[dict] = None) -> Dict:
+        resp = requests.get(
+            f"{self._zcc_base}/{path}",
+            headers={"Authorization": f"Bearer {self._get_token()}"},
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    def _direct_put(self, path: str, json: Optional[dict] = None) -> Dict:
+        resp = requests.put(
+            f"{self._zcc_base}/{path}",
+            headers={"Authorization": f"Bearer {self._get_token()}"},
+            json=json,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
 
     # ------------------------------------------------------------------
     # Devices
@@ -225,3 +273,19 @@ class ZCCClient:
     def list_admin_users(self) -> List[Dict]:
         result, resp, err = self._sdk.zcc.admin_user.list_admin_users()
         return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Entitlements
+    # ------------------------------------------------------------------
+
+    def get_zpa_entitlements(self) -> Dict:
+        return self._direct_get("getZpaGroupEntitlements")
+
+    def get_zdx_entitlements(self) -> Dict:
+        return self._direct_get("getZdxGroupEntitlements")
+
+    def update_zpa_entitlements(self, payload: Dict) -> Dict:
+        return self._direct_put("updateZpaGroupEntitlement", json=payload)
+
+    def update_zdx_entitlements(self, payload: Dict) -> Dict:
+        return self._direct_put("updateZdxGroupEntitlement", json=payload)

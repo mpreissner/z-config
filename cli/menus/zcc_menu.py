@@ -45,6 +45,7 @@ def zcc_menu():
                 questionary.Choice("Trusted Networks", value="trusted_networks"),
                 questionary.Choice("Forwarding Profiles", value="forwarding_profiles"),
                 questionary.Choice("Admin Users", value="admin_users"),
+                questionary.Choice("Entitlements", value="entitlements"),
                 questionary.Separator(),
                 questionary.Choice("Export Devices CSV", value="export_devices"),
                 questionary.Choice("Export Service Status CSV", value="export_status"),
@@ -69,6 +70,8 @@ def zcc_menu():
             forwarding_profiles_menu(tenant)
         elif choice == "admin_users":
             admin_users_menu(tenant)
+        elif choice == "entitlements":
+            entitlements_menu(client, tenant)
         elif choice == "export_devices":
             _export_devices(client, tenant)
         elif choice == "export_status":
@@ -803,3 +806,203 @@ def _search_admin_users(tenant):
     if not search:
         return
     _list_admin_users(tenant, search=search.strip())
+
+
+# ------------------------------------------------------------------
+# Entitlements (ZPA and ZDX group access)
+# ------------------------------------------------------------------
+
+def entitlements_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Entitlements",
+            choices=[
+                questionary.Separator("── ZPA Access ──"),
+                questionary.Choice("View ZPA Entitlements", value="view_zpa"),
+                questionary.Choice("Manage ZPA Group Access", value="manage_zpa"),
+                questionary.Separator("── ZDX Access ──"),
+                questionary.Choice("View ZDX Entitlements", value="view_zdx"),
+                questionary.Choice("Manage ZDX Group Access", value="manage_zdx"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "view_zpa":
+            _view_entitlements(client, tenant, "zpa")
+        elif choice == "manage_zpa":
+            _manage_entitlements(client, tenant, "zpa")
+        elif choice == "view_zdx":
+            _view_entitlements(client, tenant, "zdx")
+        elif choice == "manage_zdx":
+            _manage_entitlements(client, tenant, "zdx")
+        elif choice in ("back", None):
+            break
+
+
+def _fetch_entitlements(client, product: str) -> dict:
+    """Fetch raw entitlement data. Returns dict with 'groups' list and 'raw' for full response."""
+    if product == "zpa":
+        raw = client.get_zpa_entitlements()
+    else:
+        raw = client.get_zdx_entitlements()
+    # Normalise: look for a list of group objects under common keys
+    groups = (
+        raw.get("upmGroupList")
+        or raw.get("groupList")
+        or raw.get("groups")
+        or []
+    )
+    return {"raw": raw, "groups": groups}
+
+
+def _view_entitlements(client, tenant, product: str):
+    label = product.upper()
+    with console.status(f"Fetching {label} entitlements..."):
+        try:
+            data = _fetch_entitlements(client, product)
+        except Exception as e:
+            console.print(f"[red]✗ Could not fetch {label} entitlements: {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+    groups = data["groups"]
+    raw = data["raw"]
+
+    from services import audit_service
+    audit_service.log(
+        product="ZCC",
+        operation=f"view_{product}_entitlements",
+        action="READ",
+        status="SUCCESS",
+        tenant_id=tenant.id,
+    )
+
+    if not groups:
+        # Show raw JSON if no normalised group list found
+        import json
+        from rich.syntax import Syntax
+        from cli.banner import capture_banner
+        from cli.scroll_view import render_rich_to_lines, scroll_view
+        syntax = Syntax(json.dumps(raw, indent=2, default=str), "json", theme="monokai")
+        scroll_view(render_rich_to_lines(syntax), header_ansi=capture_banner())
+        return
+
+    table = Table(title=f"{label} Entitlements — Group Access ({len(groups)} groups)", show_lines=False)
+    table.add_column("Group Name")
+    table.add_column("Group ID", style="dim")
+    table.add_column("Enabled")
+
+    for g in groups:
+        name = g.get("name") or g.get("groupName") or "—"
+        gid = str(g.get("id") or g.get("groupId") or "—")
+        enabled = g.get("enabled") if "enabled" in g else g.get("zdxEnabled") if "zdxEnabled" in g else None
+        if enabled is True:
+            enabled_str = "[green]Yes[/green]"
+        elif enabled is False:
+            enabled_str = "[red]No[/red]"
+        else:
+            enabled_str = "[dim]—[/dim]"
+        table.add_row(name, gid, enabled_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _manage_entitlements(client, tenant, product: str):
+    label = product.upper()
+    with console.status(f"Fetching {label} entitlements..."):
+        try:
+            data = _fetch_entitlements(client, product)
+        except Exception as e:
+            console.print(f"[red]✗ Could not fetch {label} entitlements: {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+    groups = data["groups"]
+    raw = data["raw"]
+
+    if not groups:
+        console.print(
+            f"[yellow]No group list found in {label} entitlements response.\n"
+            "The API response structure may differ from expected. Use View to inspect the raw data.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    # Build checkbox choices — pre-check currently enabled groups
+    enabled_key = "enabled" if "enabled" in groups[0] else "zdxEnabled"
+    choices = [
+        questionary.Choice(
+            title=g.get("name") or g.get("groupName") or str(g.get("id") or "?"),
+            value=g,
+            checked=bool(g.get(enabled_key)),
+        )
+        for g in groups
+    ]
+
+    selected = questionary.checkbox(
+        f"Select groups to enable for {label} access:",
+        choices=choices,
+    ).ask()
+
+    if selected is None:
+        return
+
+    selected_ids = {
+        str(g.get("id") or g.get("groupId")) for g in selected
+    }
+
+    # Build updated payload: mark selected as enabled, others disabled
+    updated_groups = []
+    changes = []
+    for g in groups:
+        gid = str(g.get("id") or g.get("groupId") or "")
+        new_enabled = gid in selected_ids
+        old_enabled = bool(g.get(enabled_key))
+        updated = dict(g)
+        updated[enabled_key] = new_enabled
+        updated_groups.append(updated)
+        if new_enabled != old_enabled:
+            gname = g.get("name") or g.get("groupName") or gid
+            changes.append(f"  {'[green]+[/green]' if new_enabled else '[red]-[/red]'} {gname}")
+
+    if not changes:
+        console.print("[dim]No changes to apply.[/dim]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print("\n[bold]Pending changes:[/bold]")
+    for c in changes:
+        console.print(c)
+
+    confirmed = questionary.confirm("Apply these changes?", default=True).ask()
+    if not confirmed:
+        return
+
+    # Rebuild payload using same top-level structure as raw response
+    group_key = "upmGroupList" if "upmGroupList" in raw else "groupList" if "groupList" in raw else "groups"
+    payload = dict(raw)
+    payload[group_key] = updated_groups
+
+    try:
+        if product == "zpa":
+            client.update_zpa_entitlements(payload)
+        else:
+            client.update_zdx_entitlements(payload)
+        console.print(f"[green]✓ {label} entitlements updated.[/green]")
+        from services import audit_service
+        audit_service.log(
+            product="ZCC",
+            operation=f"update_{product}_entitlements",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=tenant.id,
+            details={"changes": len(changes)},
+        )
+    except Exception as e:
+        console.print(f"[red]✗ Error updating entitlements: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()

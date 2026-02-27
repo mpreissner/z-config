@@ -31,6 +31,12 @@ def zia_menu():
                 questionary.Separator("── Identity & Access ──"),
                 questionary.Choice("Users", value="users"),
                 questionary.Choice("Locations", value="locations"),
+                questionary.Separator("── DLP ──"),
+                questionary.Choice("DLP Engines", value="dlp_engines"),
+                questionary.Choice("DLP Dictionaries", value="dlp_dictionaries"),
+                questionary.Separator("── Cloud Apps ──"),
+                questionary.Choice("Cloud Applications", value="cloud_applications"),
+                questionary.Choice("Cloud App Control", value="cloud_app_control"),
                 questionary.Separator(),
                 questionary.Choice("Activation", value="activation"),
                 questionary.Choice("Import Config", value="import"),
@@ -59,6 +65,14 @@ def zia_menu():
             zia_users_menu(tenant)
         elif choice == "locations":
             locations_menu(client, tenant)
+        elif choice == "dlp_engines":
+            dlp_engines_menu(client, tenant)
+        elif choice == "dlp_dictionaries":
+            dlp_dictionaries_menu(client, tenant)
+        elif choice == "cloud_applications":
+            cloud_applications_menu(client, tenant)
+        elif choice == "cloud_app_control":
+            cloud_app_control_menu(client, tenant)
         elif choice == "activation":
             activation_menu(client, tenant)
         elif choice == "import":
@@ -156,7 +170,13 @@ def _url_lookup(client, tenant):
             results = service.url_lookup(urls)
         except Exception as e:
             console.print(f"[red]✗ {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
             return
+
+    if not results:
+        console.print("[yellow]No categorisation results returned.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
 
     table = Table(title="URL Lookup Results", show_lines=False)
     table.add_column("URL")
@@ -1870,3 +1890,988 @@ def _search_zia_users(tenant):
     if not search:
         return
     _list_zia_users(tenant, search=search.strip())
+
+
+# ------------------------------------------------------------------
+# DLP — shared helpers
+# ------------------------------------------------------------------
+
+def _sync_dlp_resource(client, tenant, resource_type: str):
+    """Re-sync a single DLP resource type from the API into the DB."""
+    from services.zia_import_service import ZIAImportService
+    service = ZIAImportService(client, tenant_id=tenant.id)
+    service.run(resource_types=[resource_type])
+
+
+def _view_raw_json(title: str, data: dict):
+    """Display a dict as pretty-printed JSON in the scroll viewer."""
+    import json
+    from rich.syntax import Syntax
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    syntax = Syntax(json.dumps(data, indent=2, default=str), "json", theme="monokai")
+    scroll_view(render_rich_to_lines(syntax), header_ansi=capture_banner())
+
+
+# ------------------------------------------------------------------
+# DLP Engines
+# ------------------------------------------------------------------
+
+def dlp_engines_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "DLP Engines",
+            choices=[
+                questionary.Choice("List All", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("View Details", value="view"),
+                questionary.Separator(),
+                questionary.Choice("Create from JSON File", value="create"),
+                questionary.Choice("Edit", value="edit"),
+                questionary.Choice("Delete", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_dlp_engines(tenant)
+        elif choice == "search":
+            _search_dlp_engines(tenant)
+        elif choice == "view":
+            _view_dlp_engine(tenant)
+        elif choice == "create":
+            _create_dlp_engine(client, tenant)
+        elif choice == "edit":
+            _edit_dlp_engine(client, tenant)
+        elif choice == "delete":
+            _delete_dlp_engine(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_dlp_engines(tenant, search: str = None):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="dlp_engine", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}, "synced_at": r.synced_at}
+            for r in resources
+        ]
+    rows.sort(key=lambda r: int(r["zia_id"]) if r["zia_id"].isdigit() else float("inf"))
+
+    if search:
+        search_lower = search.lower()
+        rows = [r for r in rows if search_lower in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No DLP engines matching '{search}'.[/yellow]" if search
+            else "[yellow]No DLP engines in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"DLP Engines ({len(rows)} total)", show_lines=False)
+    table.add_column("ID", style="dim")
+    table.add_column("Name")
+    table.add_column("Engine Expression (preview)")
+    table.add_column("Last Synced", style="dim")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        expr = str(cfg.get("engineExpression") or cfg.get("description") or "")[:60]
+        synced = r["synced_at"].strftime("%Y-%m-%d %H:%M") if r["synced_at"] else "—"
+        table.add_row(r["zia_id"], r["name"] or "—", expr or "[dim]—[/dim]", synced)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_dlp_engines(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_dlp_engines(tenant, search=search.strip())
+
+
+def _pick_dlp_engine(tenant):
+    """Let the user pick a DLP engine from the DB. Returns raw_config dict or None."""
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="dlp_engine", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print("[yellow]No DLP engines in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+
+    chosen = questionary.select(
+        "Select DLP engine:",
+        choices=[
+            questionary.Choice(f"{r['name']} (ID: {r['zia_id']})", value=r)
+            for r in rows
+        ],
+    ).ask()
+    return chosen
+
+
+def _view_dlp_engine(tenant):
+    chosen = _pick_dlp_engine(tenant)
+    if not chosen:
+        return
+    _view_raw_json(f"DLP Engine — {chosen['name']}", chosen["raw_config"])
+
+
+def _create_dlp_engine(client, tenant):
+    import json
+    console.print("\n[bold]Create DLP Engine from JSON File[/bold]")
+    path = questionary.text("Path to JSON file:").ask()
+    if not path:
+        return
+    try:
+        with open(path.strip()) as fh:
+            config = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"[dim]Creating engine: {config.get('name', '(unnamed)')}[/dim]")
+    try:
+        result = client.create_dlp_engine(config)
+        console.print(f"[green]✓ Created DLP engine ID {result.get('id', '?')}.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_engine")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _edit_dlp_engine(client, tenant):
+    import json
+    chosen = _pick_dlp_engine(tenant)
+    if not chosen:
+        return
+
+    console.print("\n[bold]Current configuration:[/bold]")
+    _view_raw_json(chosen["name"], chosen["raw_config"])
+
+    console.print("\n[bold]Edit DLP Engine[/bold]")
+    path = questionary.text("Path to JSON file with updated config:").ask()
+    if not path:
+        return
+    try:
+        with open(path.strip()) as fh:
+            config = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    confirmed = questionary.confirm(
+        f"Update engine '{chosen['name']}' (ID: {chosen['zia_id']})?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.update_dlp_engine(chosen["zia_id"], config)
+        console.print("[green]✓ DLP engine updated.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_engine")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_dlp_engine(client, tenant):
+    chosen = _pick_dlp_engine(tenant)
+    if not chosen:
+        return
+
+    confirmed = questionary.confirm(
+        f"Delete engine '{chosen['name']}' (ID: {chosen['zia_id']})? This cannot be undone.",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.delete_dlp_engine(chosen["zia_id"])
+        console.print("[green]✓ DLP engine deleted.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_engine")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# DLP Dictionaries
+# ------------------------------------------------------------------
+
+def dlp_dictionaries_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "DLP Dictionaries",
+            choices=[
+                questionary.Choice("List All", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("View Details", value="view"),
+                questionary.Separator(),
+                questionary.Choice("Create from JSON File", value="create_json"),
+                questionary.Choice("Create from CSV File", value="create_csv"),
+                questionary.Choice("Edit", value="edit"),
+                questionary.Choice("Edit from CSV", value="edit_csv"),
+                questionary.Choice("Delete", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_dlp_dictionaries(tenant)
+        elif choice == "search":
+            _search_dlp_dictionaries(tenant)
+        elif choice == "view":
+            _view_dlp_dictionary(tenant)
+        elif choice == "create_json":
+            _create_dlp_dictionary_json(client, tenant)
+        elif choice == "create_csv":
+            _create_dlp_dictionary_csv(client, tenant)
+        elif choice == "edit":
+            _edit_dlp_dictionary(client, tenant)
+        elif choice == "edit_csv":
+            _edit_dlp_dictionary_csv(client, tenant)
+        elif choice == "delete":
+            _delete_dlp_dictionary(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_dlp_dictionaries(tenant, search: str = None):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="dlp_dictionary", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}, "synced_at": r.synced_at}
+            for r in resources
+        ]
+    rows.sort(key=lambda r: int(r["zia_id"]) if r["zia_id"].isdigit() else float("inf"))
+
+    if search:
+        search_lower = search.lower()
+        rows = [r for r in rows if search_lower in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No DLP dictionaries matching '{search}'.[/yellow]" if search
+            else "[yellow]No DLP dictionaries in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"DLP Dictionaries ({len(rows)} total)", show_lines=False)
+    table.add_column("ID", style="dim")
+    table.add_column("Name")
+    table.add_column("Type")
+    table.add_column("Entries")
+    table.add_column("Last Synced", style="dim")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        dict_type = str(cfg.get("dictionaryType") or cfg.get("type") or "—")
+        phrases = len(cfg.get("phrases") or [])
+        patterns = len(cfg.get("patterns") or [])
+        entries = f"phrases:{phrases} patterns:{patterns}" if (phrases or patterns) else "—"
+        synced = r["synced_at"].strftime("%Y-%m-%d %H:%M") if r["synced_at"] else "—"
+        table.add_row(r["zia_id"], r["name"] or "—", dict_type, entries, synced)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_dlp_dictionaries(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_dlp_dictionaries(tenant, search=search.strip())
+
+
+def _pick_dlp_dictionary(tenant):
+    """Let the user pick a DLP dictionary from the DB. Returns row dict or None."""
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="dlp_dictionary", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print("[yellow]No DLP dictionaries in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+
+    chosen = questionary.select(
+        "Select DLP dictionary:",
+        choices=[
+            questionary.Choice(f"{r['name']} (ID: {r['zia_id']})", value=r)
+            for r in rows
+        ],
+    ).ask()
+    return chosen
+
+
+def _view_dlp_dictionary(tenant):
+    chosen = _pick_dlp_dictionary(tenant)
+    if not chosen:
+        return
+    _view_raw_json(f"DLP Dictionary — {chosen['name']}", chosen["raw_config"])
+
+
+def _read_csv_entries(path: str) -> list:
+    """Read a CSV file and return a list of value strings (one per row, skips header)."""
+    import csv
+    entries = []
+    with open(path.strip()) as fh:
+        reader = csv.reader(fh)
+        rows = list(reader)
+    if not rows:
+        return []
+    # Skip header if first row contains a non-data header word
+    first = rows[0][0].strip().lower() if rows[0] else ""
+    start = 1 if first in ("value", "phrase", "pattern", "entry") else 0
+    for row in rows[start:]:
+        if row and row[0].strip():
+            entries.append(row[0].strip())
+    return entries
+
+
+def _create_dlp_dictionary_json(client, tenant):
+    import json
+    console.print("\n[bold]Create DLP Dictionary from JSON File[/bold]")
+    path = questionary.text("Path to JSON file:").ask()
+    if not path:
+        return
+    try:
+        with open(path.strip()) as fh:
+            config = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"[dim]Creating dictionary: {config.get('name', '(unnamed)')}[/dim]")
+    try:
+        result = client.create_dlp_dictionary(config)
+        console.print(f"[green]✓ Created DLP dictionary ID {result.get('id', '?')}.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_dictionary")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _create_dlp_dictionary_csv(client, tenant):
+    """Create a DLP dictionary from a CSV file of phrases/patterns."""
+    console.print("\n[bold]Create DLP Dictionary from CSV File[/bold]")
+    console.print("[dim]CSV format: one value per row (phrase or regex pattern). Optional header: value/phrase/pattern.[/dim]")
+
+    name = questionary.text("Dictionary name:").ask()
+    if not name:
+        return
+
+    dict_type = questionary.select(
+        "Dictionary type:",
+        choices=[
+            questionary.Choice("Phrases", value="PATTERNS_AND_PHRASES"),
+            questionary.Choice("Patterns (regex)", value="PATTERNS_AND_PHRASES"),
+        ],
+    ).ask()
+
+    entry_type = questionary.select(
+        "Entry type:",
+        choices=[
+            questionary.Choice("Phrases", value="phrases"),
+            questionary.Choice("Patterns (regex)", value="patterns"),
+        ],
+    ).ask()
+
+    path = questionary.text("Path to CSV file:").ask()
+    if not path:
+        return
+    try:
+        entries = _read_csv_entries(path)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    if not entries:
+        console.print("[yellow]No entries found in CSV.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"[dim]Found {len(entries)} entries.[/dim]")
+
+    if entry_type == "phrases":
+        payload = {
+            "name": name,
+            "dictionaryType": dict_type,
+            "phrases": [{"action": "PHRASE_COUNT_TYPE_UNIQUE", "phrase": e} for e in entries],
+        }
+    else:
+        payload = {
+            "name": name,
+            "dictionaryType": dict_type,
+            "patterns": [{"action": "PATTERN_COUNT_TYPE_UNIQUE", "pattern": e} for e in entries],
+        }
+
+    try:
+        result = client.create_dlp_dictionary(payload)
+        console.print(f"[green]✓ Created DLP dictionary ID {result.get('id', '?')} with {len(entries)} entries.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_dictionary")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _edit_dlp_dictionary(client, tenant):
+    import json
+    chosen = _pick_dlp_dictionary(tenant)
+    if not chosen:
+        return
+
+    console.print("\n[bold]Current configuration:[/bold]")
+    _view_raw_json(chosen["name"], chosen["raw_config"])
+
+    console.print("\n[bold]Edit DLP Dictionary[/bold]")
+    path = questionary.text("Path to JSON file with updated config:").ask()
+    if not path:
+        return
+    try:
+        with open(path.strip()) as fh:
+            config = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    confirmed = questionary.confirm(
+        f"Update dictionary '{chosen['name']}' (ID: {chosen['zia_id']})?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.update_dlp_dictionary(chosen["zia_id"], config)
+        console.print("[green]✓ DLP dictionary updated.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_dictionary")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _edit_dlp_dictionary_csv(client, tenant):
+    """Replace the phrase/pattern list in an existing DLP dictionary from a CSV."""
+    chosen = _pick_dlp_dictionary(tenant)
+    if not chosen:
+        return
+
+    cfg = chosen["raw_config"]
+    console.print(f"\n[dim]Current: {len(cfg.get('phrases') or [])} phrases, {len(cfg.get('patterns') or [])} patterns[/dim]")
+
+    entry_type = questionary.select(
+        "Replace which entry type:",
+        choices=[
+            questionary.Choice("Phrases", value="phrases"),
+            questionary.Choice("Patterns (regex)", value="patterns"),
+        ],
+    ).ask()
+
+    path = questionary.text("Path to CSV file:").ask()
+    if not path:
+        return
+    try:
+        entries = _read_csv_entries(path)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    if not entries:
+        console.print("[yellow]No entries found in CSV.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"[dim]Found {len(entries)} entries. Will replace existing {entry_type}.[/dim]")
+    confirmed = questionary.confirm(
+        f"Update dictionary '{chosen['name']}' (ID: {chosen['zia_id']})?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    updated_cfg = dict(cfg)
+    if entry_type == "phrases":
+        updated_cfg["phrases"] = [{"action": "PHRASE_COUNT_TYPE_UNIQUE", "phrase": e} for e in entries]
+    else:
+        updated_cfg["patterns"] = [{"action": "PATTERN_COUNT_TYPE_UNIQUE", "pattern": e} for e in entries]
+
+    try:
+        client.update_dlp_dictionary(chosen["zia_id"], updated_cfg)
+        console.print(f"[green]✓ DLP dictionary updated with {len(entries)} {entry_type}.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_dictionary")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_dlp_dictionary(client, tenant):
+    chosen = _pick_dlp_dictionary(tenant)
+    if not chosen:
+        return
+
+    confirmed = questionary.confirm(
+        f"Delete dictionary '{chosen['name']}' (ID: {chosen['zia_id']})? This cannot be undone.",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.delete_dlp_dictionary(chosen["zia_id"])
+        console.print("[green]✓ DLP dictionary deleted.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _sync_dlp_resource(client, tenant, "dlp_dictionary")
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Cloud Applications
+# ------------------------------------------------------------------
+
+def cloud_applications_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Cloud Applications",
+            choices=[
+                questionary.Choice("List Policy Apps (DLP / CAC)", value="list_policy"),
+                questionary.Choice("List SSL Policy Apps", value="list_ssl"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list_policy":
+            _list_cloud_apps_db(tenant, resource_type="cloud_app_policy")
+        elif choice == "list_ssl":
+            _list_cloud_apps_db(tenant, resource_type="cloud_app_ssl_policy")
+        elif choice == "search":
+            _search_cloud_apps_db(tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_cloud_apps_db(tenant, resource_type: str, search: str = None):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    label = "SSL Policy Apps" if resource_type == "cloud_app_ssl_policy" else "Policy Apps"
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type=resource_type, is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if search:
+        rows = [r for r in rows if search.lower() in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No {label} matching '{search}'.[/yellow]" if search
+            else f"[yellow]No {label} in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"{label} ({len(rows)} total)", show_lines=False)
+    table.add_column("App Name")
+    table.add_column("Parent Category")
+    table.add_column("ID", style="dim")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        app_name = r["name"] or cfg.get("app_name") or cfg.get("appName") or "—"
+        parent = cfg.get("parent_name") or cfg.get("parentName") or "—"
+        app_id = r["zia_id"] or "—"
+        table.add_row(app_name, parent, app_id)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_cloud_apps_db(tenant):
+    search = questionary.text("Search (app name or partial):").ask()
+    if not search:
+        return
+    policy_type = questionary.select(
+        "Search in:",
+        choices=[
+            questionary.Choice("Policy Apps (DLP / CAC)", value="cloud_app_policy"),
+            questionary.Choice("SSL Policy Apps", value="cloud_app_ssl_policy"),
+        ],
+    ).ask()
+    if not policy_type:
+        return
+    _list_cloud_apps_db(tenant, resource_type=policy_type, search=search.strip())
+
+
+# ------------------------------------------------------------------
+# Cloud App Control
+# ------------------------------------------------------------------
+
+def _sync_cloud_app_resource(client, tenant):
+    """Re-sync cloud_app_control_rule from the API into the DB."""
+    from services.zia_import_service import ZIAImportService
+    service = ZIAImportService(client, tenant_id=tenant.id)
+    service.run(resource_types=["cloud_app_control_rule"])
+
+
+def cloud_app_control_menu(client, tenant):
+    while True:
+        render_banner()
+
+        # Build type list from DB (distinct 'type' values in raw_config)
+        from db.database import get_session
+        from db.models import ZIAResource
+
+        with get_session() as session:
+            resources = (
+                session.query(ZIAResource)
+                .filter_by(tenant_id=tenant.id, resource_type="cloud_app_control_rule", is_deleted=False)
+                .all()
+            )
+            rule_types = sorted({
+                (r.raw_config or {}).get("type")
+                for r in resources
+                if (r.raw_config or {}).get("type")
+            })
+
+        if not rule_types:
+            console.print(
+                "[yellow]No Cloud App Control rules in local DB. "
+                "Run [bold]Import Config[/bold] first.[/yellow]"
+            )
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+        type_choices = [
+            questionary.Choice(rt.replace("_", " ").title(), value=rt)
+            for rt in rule_types
+        ] + [questionary.Separator(), questionary.Choice("← Back", value="back")]
+
+        rule_type = questionary.select(
+            "Cloud App Control — Select Rule Type",
+            choices=type_choices,
+            use_indicator=True,
+        ).ask()
+
+        if rule_type in ("back", None):
+            break
+
+        _cloud_app_rules_menu(client, tenant, rule_type)
+
+
+def _cloud_app_rules_menu(client, tenant, rule_type: str):
+    label = rule_type.replace("_", " ").title()
+    while True:
+        render_banner()
+        choice = questionary.select(
+            f"Cloud App Control — {label}",
+            choices=[
+                questionary.Choice("List Rules", value="list"),
+                questionary.Choice("View Details", value="view"),
+                questionary.Separator(),
+                questionary.Choice("Create from JSON File", value="create"),
+                questionary.Choice("Edit from JSON File", value="edit"),
+                questionary.Choice("Duplicate Rule", value="duplicate"),
+                questionary.Choice("Delete Rule", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_cloud_app_rules_db(tenant, rule_type)
+        elif choice == "view":
+            _view_cloud_app_rule_db(tenant, rule_type)
+        elif choice == "create":
+            _create_cloud_app_rule(client, tenant, rule_type)
+        elif choice == "edit":
+            _edit_cloud_app_rule(client, tenant, rule_type)
+        elif choice == "duplicate":
+            _duplicate_cloud_app_rule(client, tenant, rule_type)
+        elif choice == "delete":
+            _delete_cloud_app_rule(client, tenant, rule_type)
+        elif choice in ("back", None):
+            break
+
+
+def _get_cloud_app_rules_from_db(tenant, rule_type: str):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="cloud_app_control_rule", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if (r.raw_config or {}).get("type") == rule_type
+        ]
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    return rows
+
+
+def _list_cloud_app_rules_db(tenant, rule_type: str):
+    rows = _get_cloud_app_rules_from_db(tenant, rule_type)
+    label = rule_type.replace("_", " ").title()
+
+    if not rows:
+        console.print(f"[yellow]No rules for {label} in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"{label} Rules ({len(rows)})", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("State")
+    table.add_column("Actions")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        actions = ", ".join(cfg.get("actions") or []) or "—"
+        if len(actions) > 50:
+            actions = actions[:47] + "..."
+        desc = str(cfg.get("description") or "")[:50]
+        table.add_row(order, r["name"] or "—", state_str, actions, desc)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _pick_cloud_app_rule_db(tenant, rule_type: str):
+    """Pick a cloud app control rule from the DB. Returns row dict or None."""
+    rows = _get_cloud_app_rules_from_db(tenant, rule_type)
+    if not rows:
+        console.print("[yellow]No rules in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+    return questionary.select(
+        "Select rule:",
+        choices=[
+            questionary.Choice(
+                f"{r['name']}  (ID: {r['zia_id']}  order: {r['raw_config'].get('order', '—')})",
+                value=r,
+            )
+            for r in rows
+        ],
+    ).ask()
+
+
+def _view_cloud_app_rule_db(tenant, rule_type: str):
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
+    if not chosen:
+        return
+    _view_raw_json(f"{rule_type} — {chosen['name']}", chosen["raw_config"])
+
+
+def _create_cloud_app_rule(client, tenant, rule_type: str):
+    import json
+    from services import audit_service
+    console.print(f"\n[bold]Create Cloud App Control Rule — {rule_type.replace('_', ' ').title()}[/bold]")
+    path = questionary.text("Path to JSON file:").ask()
+    if not path:
+        return
+    try:
+        with open(path.strip()) as fh:
+            config = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    try:
+        result = client.create_cloud_app_rule(rule_type, config)
+        console.print(f"[green]✓ Created rule ID {result.get('id', '?')}.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        audit_service.log(
+            product="ZIA", operation="create_cloud_app_rule", action="CREATE",
+            status="SUCCESS", tenant_id=tenant.id,
+            resource_type=rule_type, details={"name": config.get("name")},
+        )
+        _sync_cloud_app_resource(client, tenant)
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _edit_cloud_app_rule(client, tenant, rule_type: str):
+    import json
+    from services import audit_service
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
+    if not chosen:
+        return
+
+    _view_raw_json(f"Current — {chosen['name']}", chosen["raw_config"])
+
+    path = questionary.text("Path to JSON file with updated config:").ask()
+    if not path:
+        return
+    try:
+        with open(path.strip()) as fh:
+            config = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    try:
+        client.update_cloud_app_rule(rule_type, chosen["zia_id"], config)
+        console.print("[green]✓ Rule updated.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        audit_service.log(
+            product="ZIA", operation="update_cloud_app_rule", action="UPDATE",
+            status="SUCCESS", tenant_id=tenant.id,
+            resource_type=rule_type, details={"id": chosen["zia_id"], "name": chosen["name"]},
+        )
+        _sync_cloud_app_resource(client, tenant)
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _duplicate_cloud_app_rule(client, tenant, rule_type: str):
+    from services import audit_service
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
+    if not chosen:
+        return
+
+    new_name = questionary.text(
+        "Name for duplicate rule:",
+        default=f"Copy of {chosen['name']}",
+    ).ask()
+    if not new_name:
+        return
+
+    try:
+        result = client.duplicate_cloud_app_rule(rule_type, chosen["zia_id"], new_name)
+        console.print(f"[green]✓ Duplicated as '{new_name}' (ID {result.get('id', '?')}).[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        audit_service.log(
+            product="ZIA", operation="duplicate_cloud_app_rule", action="CREATE",
+            status="SUCCESS", tenant_id=tenant.id,
+            resource_type=rule_type, details={"source_id": chosen["zia_id"], "new_name": new_name},
+        )
+        _sync_cloud_app_resource(client, tenant)
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_cloud_app_rule(client, tenant, rule_type: str):
+    from services import audit_service
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
+    if not chosen:
+        return
+
+    confirmed = questionary.confirm(
+        f"Delete rule '{chosen['name']}' (ID: {chosen['zia_id']})? This cannot be undone.",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.delete_cloud_app_rule(rule_type, chosen["zia_id"])
+        console.print("[green]✓ Rule deleted.[/green]")
+        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        audit_service.log(
+            product="ZIA", operation="delete_cloud_app_rule", action="DELETE",
+            status="SUCCESS", tenant_id=tenant.id,
+            resource_type=rule_type, details={"id": chosen["zia_id"], "name": chosen["name"]},
+        )
+        _sync_cloud_app_resource(client, tenant)
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
