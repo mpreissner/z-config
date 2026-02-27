@@ -25,8 +25,9 @@ def zpa_menu():
                 questionary.Choice("Certificate Management", value="certs"),
                 questionary.Choice("Connectors", value="connectors"),
                 questionary.Choice("Privileged Remote Access", value="pra"),
+                questionary.Choice("Service Edges", value="edges"),
                 questionary.Separator(),
-                questionary.Choice("Access Policy  [coming soon]", value="noop"),
+                questionary.Choice("Access Policy", value="policy"),
                 questionary.Separator(),
                 questionary.Choice("Import Config", value="import"),
                 questionary.Choice("Config Snapshots", value="snapshots"),
@@ -48,6 +49,10 @@ def zpa_menu():
             app_segments_menu(client, tenant)
         elif choice == "pra":
             privileged_access_menu(client, tenant)
+        elif choice == "edges":
+            service_edges_menu(client, tenant)
+        elif choice == "policy":
+            access_policy_menu(client, tenant)
         elif choice == "connectors":
             connectors_menu(client, tenant)
         elif choice in ("back", None):
@@ -243,7 +248,7 @@ def app_segments_menu(client, tenant):
                 questionary.Choice("List Segments", value="list"),
                 questionary.Choice("Search by Domain", value="search"),
                 questionary.Choice("Enable / Disable", value="toggle"),
-                questionary.Choice("App Segment Groups  [coming soon]", value="noop"),
+                questionary.Choice("App Segment Groups", value="seg_groups"),
                 questionary.Separator(),
                 questionary.Choice("Bulk Create from CSV", value="bulk"),
                 questionary.Choice("Export CSV Template", value="template"),
@@ -260,6 +265,8 @@ def app_segments_menu(client, tenant):
             _search_by_domain(tenant)
         elif choice == "toggle":
             _toggle_enable(client, tenant)
+        elif choice == "seg_groups":
+            segment_groups_menu(client, tenant)
         elif choice == "bulk":
             _bulk_create(client, tenant)
         elif choice == "template":
@@ -802,7 +809,7 @@ def privileged_access_menu(client, tenant):
             "Privileged Remote Access",
             choices=[
                 questionary.Choice("PRA Portals", value="portals"),
-                questionary.Choice("PRA Consoles  [coming soon]", value="noop"),
+                questionary.Choice("PRA Consoles", value="consoles"),
                 questionary.Separator(),
                 questionary.Choice("← Back", value="back"),
             ],
@@ -811,6 +818,8 @@ def privileged_access_menu(client, tenant):
 
         if choice == "portals":
             pra_portals_menu(client, tenant)
+        elif choice == "consoles":
+            pra_consoles_menu(client, tenant)
         elif choice in ("back", None):
             break
 
@@ -2248,6 +2257,821 @@ def _update_connector_group_enabled_in_db(tenant_id: int, zpa_id: str, enabled: 
         rec = (
             session.query(ZPAResource)
             .filter_by(tenant_id=tenant_id, resource_type="app_connector_group", zpa_id=zpa_id)
+            .first()
+        )
+        if rec:
+            cfg = dict(rec.raw_config or {})
+            cfg["enabled"] = enabled
+            rec.raw_config = cfg
+            flag_modified(rec, "raw_config")
+
+
+# ------------------------------------------------------------------
+# App Segment Groups
+# ------------------------------------------------------------------
+
+def segment_groups_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "App Segment Groups",
+            choices=[
+                questionary.Choice("List Segment Groups", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_segment_groups(tenant)
+        elif choice == "search":
+            _search_segment_groups(tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_segment_groups(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="segment_group", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No Segment Groups in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"App Segment Groups ({len(rows)} total)", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Enabled")
+    table.add_column("Config Space")
+    table.add_column("# Applications")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        enabled = cfg.get("enabled", True)
+        enabled_str = "[green]Yes[/green]" if enabled else "[red]No[/red]"
+        config_space = cfg.get("configSpace") or cfg.get("config_space", "DEFAULT")
+        apps = cfg.get("applications") or []
+        table.add_row(r["name"], enabled_str, config_space, str(len(apps)))
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_segment_groups(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="segment_group", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No segment groups matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Matching Segment Groups ({len(rows)})", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Enabled")
+    table.add_column("Config Space")
+    table.add_column("# Applications")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        enabled = cfg.get("enabled", True)
+        enabled_str = "[green]Yes[/green]" if enabled else "[red]No[/red]"
+        config_space = cfg.get("configSpace") or cfg.get("config_space", "DEFAULT")
+        apps = cfg.get("applications") or []
+        table.add_row(r["name"], enabled_str, config_space, str(len(apps)))
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+# ------------------------------------------------------------------
+# PRA Consoles
+# ------------------------------------------------------------------
+
+def pra_consoles_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "PRA Consoles",
+            choices=[
+                questionary.Choice("List PRA Consoles", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("Enable / Disable", value="toggle"),
+                questionary.Choice("Delete Console", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_pra_consoles(tenant)
+        elif choice == "search":
+            _search_pra_consoles(tenant)
+        elif choice == "toggle":
+            _toggle_pra_console(client, tenant)
+        elif choice == "delete":
+            _delete_pra_console(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_pra_consoles(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="pra_console", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No PRA Consoles in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"PRA Consoles ({len(rows)} total)", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Enabled")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        enabled = cfg.get("enabled", True)
+        enabled_str = "[green]Yes[/green]" if enabled else "[red]No[/red]"
+        desc = cfg.get("description", "") or ""
+        table.add_row(r["name"], enabled_str, desc[:60])
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_pra_consoles(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="pra_console", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No PRA Consoles matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Matching PRA Consoles ({len(rows)})", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Enabled")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        enabled = cfg.get("enabled", True)
+        enabled_str = "[green]Yes[/green]" if enabled else "[red]No[/red]"
+        desc = cfg.get("description", "") or ""
+        table.add_row(r["name"], enabled_str, desc[:60])
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _toggle_pra_console(client, tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+    from services import audit_service
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="pra_console", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {
+                "name": r.name,
+                "zpa_id": r.zpa_id,
+                "enabled": (r.raw_config or {}).get("enabled", True),
+            }
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No PRA Consoles in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    selected = questionary.checkbox(
+        "Select consoles:",
+        choices=[
+            questionary.Choice(
+                f"{'✓' if r['enabled'] else '✗'}  {r['name']}",
+                value=r,
+            )
+            for r in rows
+        ],
+        instruction="(Space to select, Enter to confirm, Ctrl+C to cancel)",
+    ).ask()
+
+    if not selected:
+        return
+
+    action = questionary.select(
+        f"Action for {len(selected)} console(s):",
+        choices=[
+            questionary.Choice("Enable", value="enable"),
+            questionary.Choice("Disable", value="disable"),
+        ],
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if action is None:
+        return
+
+    confirmed = questionary.confirm(
+        f"{action.title()} {len(selected)} console(s)?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    new_state = action == "enable"
+    success_count = 0
+    fail_count = 0
+
+    for item in selected:
+        try:
+            config = client.get_pra_console(item["zpa_id"])
+            config["enabled"] = new_state
+            client.update_pra_console(item["zpa_id"], config)
+
+            _update_resource_enabled_in_db(tenant.id, "pra_console", item["zpa_id"], new_state)
+
+            icon = "✓" if new_state else "✗"
+            color = "green" if new_state else "red"
+            console.print(f"  [{color}]{icon} {item['name']}[/{color}]")
+
+            audit_service.log(
+                product="ZPA",
+                operation="toggle_pra_console",
+                action="UPDATE",
+                status="SUCCESS",
+                tenant_id=tenant.id,
+                resource_type="pra_console",
+                resource_id=item["zpa_id"],
+                resource_name=item["name"],
+                details={"enabled": new_state},
+            )
+            success_count += 1
+        except Exception as exc:
+            console.print(f"  [red]✗ {item['name']}: {exc}[/red]")
+            audit_service.log(
+                product="ZPA",
+                operation="toggle_pra_console",
+                action="UPDATE",
+                status="FAILURE",
+                tenant_id=tenant.id,
+                resource_type="pra_console",
+                resource_id=item["zpa_id"],
+                resource_name=item["name"],
+                error_message=str(exc),
+            )
+            fail_count += 1
+
+    console.print(
+        f"\n[green]✓ {success_count} succeeded[/green]"
+        + (f"  [red]✗ {fail_count} failed[/red]" if fail_count else "")
+    )
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_pra_console(client, tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+    from services import audit_service
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="pra_console", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No PRA Consoles in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    item = questionary.select(
+        "Select console to delete:",
+        choices=[
+            questionary.Choice(r["name"], value=r)
+            for r in rows
+        ],
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+
+    if not item:
+        return
+
+    confirmed = questionary.confirm(
+        f"Delete '{item['name']}'? This cannot be undone.", default=False
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.delete_pra_console(item["zpa_id"])
+    except Exception as exc:
+        console.print(f"[red]✗ Error: {exc}[/red]")
+        audit_service.log(
+            product="ZPA",
+            operation="delete_pra_console",
+            action="DELETE",
+            status="FAILURE",
+            tenant_id=tenant.id,
+            resource_type="pra_console",
+            resource_id=item["zpa_id"],
+            resource_name=item["name"],
+            error_message=str(exc),
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    with get_session() as session:
+        rec = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="pra_console", zpa_id=item["zpa_id"])
+            .first()
+        )
+        if rec:
+            rec.is_deleted = True
+
+    audit_service.log(
+        product="ZPA",
+        operation="delete_pra_console",
+        action="DELETE",
+        status="SUCCESS",
+        tenant_id=tenant.id,
+        resource_type="pra_console",
+        resource_id=item["zpa_id"],
+        resource_name=item["name"],
+    )
+
+    console.print("[green]✓ PRA Console deleted.[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Access Policy
+# ------------------------------------------------------------------
+
+def access_policy_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Access Policy",
+            choices=[
+                questionary.Choice("List Rules", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_access_policy_rules(tenant)
+        elif choice == "search":
+            _search_access_policy_rules(tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_access_policy_rules(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="policy_access", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No Access Policy rules in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Access Policy Rules ({len(rows)} total)", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        action = cfg.get("action", "—") or "—"
+        desc = (cfg.get("description") or "")[:60]
+        table.add_row(r["name"], action, desc)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_access_policy_rules(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="policy_access", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No access policy rules matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Matching Access Policy Rules ({len(rows)})", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        action = cfg.get("action", "—") or "—"
+        desc = (cfg.get("description") or "")[:60]
+        table.add_row(r["name"], action, desc)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+# ------------------------------------------------------------------
+# Service Edges
+# ------------------------------------------------------------------
+
+def service_edges_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Service Edges",
+            choices=[
+                questionary.Choice("List Service Edges", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("Enable / Disable", value="toggle"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_service_edges(tenant)
+        elif choice == "search":
+            _search_service_edges(tenant)
+        elif choice == "toggle":
+            _toggle_service_edge(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_service_edges(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="service_edge", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No Service Edges in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Service Edges ({len(rows)} total)", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Group")
+    table.add_column("Status")
+    table.add_column("Private IP")
+    table.add_column("Version")
+    table.add_column("Enabled")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        group = cfg.get("service_edge_group_name", "—") or "—"
+        status_val = cfg.get("control_channel_status", "—") or "—"
+        status_str = (
+            f"[green]{status_val}[/green]"
+            if status_val == "ZPN_STATUS_AUTHENTICATED"
+            else f"[red]{status_val}[/red]"
+        )
+        private_ip = cfg.get("private_ip", "—") or "—"
+        version = cfg.get("current_version", "—") or "—"
+        enabled = cfg.get("enabled", True)
+        enabled_str = "[green]Yes[/green]" if enabled else "[red]No[/red]"
+        table.add_row(r["name"], group, status_str, private_ip, version, enabled_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_service_edges(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    search = questionary.text(
+        "Search (name or partial):",
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if not search:
+        return
+    search = search.lower()
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="service_edge", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if search in (r.name or "").lower()
+        ]
+
+    if not rows:
+        console.print(f"[yellow]No service edges matching '{search}'.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Matching Service Edges ({len(rows)})", show_lines=False)
+    table.add_column("Name")
+    table.add_column("Group")
+    table.add_column("Status")
+    table.add_column("Private IP")
+    table.add_column("Version")
+    table.add_column("Enabled")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        group = cfg.get("service_edge_group_name", "—") or "—"
+        status_val = cfg.get("control_channel_status", "—") or "—"
+        status_str = (
+            f"[green]{status_val}[/green]"
+            if status_val == "ZPN_STATUS_AUTHENTICATED"
+            else f"[red]{status_val}[/red]"
+        )
+        private_ip = cfg.get("private_ip", "—") or "—"
+        version = cfg.get("current_version", "—") or "—"
+        enabled = cfg.get("enabled", True)
+        enabled_str = "[green]Yes[/green]" if enabled else "[red]No[/red]"
+        table.add_row(r["name"], group, status_str, private_ip, version, enabled_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _toggle_service_edge(client, tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+    from services import audit_service
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="service_edge", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {
+                "name": r.name,
+                "zpa_id": r.zpa_id,
+                "group": (r.raw_config or {}).get("service_edge_group_name", ""),
+                "enabled": (r.raw_config or {}).get("enabled", True),
+            }
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No Service Edges in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    selected = questionary.checkbox(
+        "Select service edges:",
+        choices=[
+            questionary.Choice(
+                f"{'✓' if r['enabled'] else '✗'}  {r['name']}  ({r['group']})",
+                value=r,
+            )
+            for r in rows
+        ],
+        instruction="(Space to select, Enter to confirm, Ctrl+C to cancel)",
+    ).ask()
+
+    if not selected:
+        return
+
+    action = questionary.select(
+        f"Action for {len(selected)} service edge(s):",
+        choices=[
+            questionary.Choice("Enable", value="enable"),
+            questionary.Choice("Disable", value="disable"),
+        ],
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if action is None:
+        return
+
+    confirmed = questionary.confirm(
+        f"{action.title()} {len(selected)} service edge(s)?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    new_state = action == "enable"
+    success_count = 0
+    fail_count = 0
+
+    for item in selected:
+        try:
+            config = client.get_service_edge(item["zpa_id"])
+            config["enabled"] = new_state
+            client.update_service_edge(item["zpa_id"], config)
+
+            _update_resource_enabled_in_db(tenant.id, "service_edge", item["zpa_id"], new_state)
+
+            icon = "✓" if new_state else "✗"
+            color = "green" if new_state else "red"
+            console.print(f"  [{color}]{icon} {item['name']}[/{color}]")
+
+            audit_service.log(
+                product="ZPA",
+                operation="toggle_service_edge",
+                action="UPDATE",
+                status="SUCCESS",
+                tenant_id=tenant.id,
+                resource_type="service_edge",
+                resource_id=item["zpa_id"],
+                resource_name=item["name"],
+                details={"enabled": new_state},
+            )
+            success_count += 1
+        except Exception as exc:
+            console.print(f"  [red]✗ {item['name']}: {exc}[/red]")
+            audit_service.log(
+                product="ZPA",
+                operation="toggle_service_edge",
+                action="UPDATE",
+                status="FAILURE",
+                tenant_id=tenant.id,
+                resource_type="service_edge",
+                resource_id=item["zpa_id"],
+                resource_name=item["name"],
+                error_message=str(exc),
+            )
+            fail_count += 1
+
+    console.print(
+        f"\n[green]✓ {success_count} succeeded[/green]"
+        + (f"  [red]✗ {fail_count} failed[/red]" if fail_count else "")
+    )
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Shared helper
+# ------------------------------------------------------------------
+
+def _update_resource_enabled_in_db(tenant_id: int, resource_type: str, zpa_id: str, enabled: bool) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        rec = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant_id, resource_type=resource_type, zpa_id=zpa_id)
             .first()
         )
         if rec:
