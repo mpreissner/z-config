@@ -82,7 +82,7 @@ class ZCCClient:
             "clientSecret": auth.client_secret,
             "vanityDomain": auth.vanity_domain,
         })
-        self._zcc_base = f"{oneapi_base_url}/mobileadmin/v1"
+        self._zcc_base = f"{oneapi_base_url}/zcc/papi/public/v1"
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
 
@@ -275,14 +275,22 @@ class ZCCClient:
         return _to_dicts(_unwrap(result, resp, err))
 
     # ------------------------------------------------------------------
-    # Entitlements (direct HTTP — not in SDK)
+    # Entitlements
     # ------------------------------------------------------------------
 
     def get_zpa_entitlements(self) -> Dict:
-        return self._direct_get("getZpaGroupEntitlements")
+        result, resp, err = self._sdk.zcc.entitlements.get_zpa_group_entitlements()
+        items = _unwrap(result, resp, err)
+        if isinstance(items, list):
+            return _to_dict(items[0]) if items else {}
+        return _to_dict(items)
 
     def get_zdx_entitlements(self) -> Dict:
-        return self._direct_get("getZdxGroupEntitlements")
+        result, resp, err = self._sdk.zcc.entitlements.get_zdx_group_entitlements()
+        items = _unwrap(result, resp, err)
+        if isinstance(items, list):
+            return _to_dict(items[0]) if items else {}
+        return _to_dict(items)
 
     def update_zpa_entitlements(self, payload: Dict) -> Dict:
         return self._direct_put("updateZpaGroupEntitlement", json=payload)
