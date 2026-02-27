@@ -259,3 +259,81 @@ class ZIAClient:
     def list_time_intervals(self) -> List[Dict]:
         result, resp, err = self._sdk.zia.time_intervals.list_time_intervals()
         return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # DLP
+    # ------------------------------------------------------------------
+
+    def list_dlp_engines(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.dlp_engine.list_dlp_engines()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def list_dlp_dictionaries(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.dlp_dictionary.list_dicts()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Security Policy (singleton list wrappers for import)
+    # ------------------------------------------------------------------
+
+    def list_allowlist(self) -> List[Dict]:
+        """Wrap allowlist singleton as a single-element list for the import service."""
+        data = self.get_allowlist()
+        return [{"id": "allowlist", "name": "allowlist", **data}]
+
+    def list_denylist(self) -> List[Dict]:
+        """Wrap denylist singleton as a single-element list for the import service."""
+        data = self.get_denylist()
+        return [{"id": "denylist", "name": "denylist", **data}]
+
+    def add_to_allowlist(self, url_list: List[str]) -> Dict:
+        result, resp, err = self._sdk.zia.security_policy_settings.add_urls_to_whitelist(url_list)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def remove_from_allowlist(self, url_list: List[str]) -> Dict:
+        result, resp, err = self._sdk.zia.security_policy_settings.delete_urls_from_whitelist(url_list)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def add_to_denylist(self, url_list: List[str]) -> Dict:
+        result, resp, err = self._sdk.zia.security_policy_settings.add_urls_to_blacklist(url_list)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def remove_from_denylist(self, url_list: List[str]) -> Dict:
+        result, resp, err = self._sdk.zia.security_policy_settings.delete_urls_from_blacklist(url_list)
+        return _to_dict(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # URL Filtering — get/update for enable/disable
+    # ------------------------------------------------------------------
+
+    def get_url_filtering_rule(self, rule_id: str) -> Dict:
+        result, resp, err = self._sdk.zia.url_filtering.get_rule(rule_id)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_url_filtering_rule(self, rule_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zia.url_filtering.update_rule(rule_id, **config)
+        _unwrap(result, resp, err)
+        return True
+
+    # ------------------------------------------------------------------
+    # URL Categories — update for add/remove URLs
+    # ------------------------------------------------------------------
+
+    def add_urls_to_category(self, category_id: str, urls: List[str]) -> Dict:
+        cat = self.get_url_category(category_id)
+        existing = cat.get("urls") or []
+        merged = list(set(existing) | set(urls))
+        result, resp, err = self._sdk.zia.url_categories.update_url_category(
+            category_id, urls=merged
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def remove_urls_from_category(self, category_id: str, urls: List[str]) -> Dict:
+        cat = self.get_url_category(category_id)
+        existing = cat.get("urls") or []
+        to_remove = set(urls)
+        updated = [u for u in existing if u not in to_remove]
+        result, resp, err = self._sdk.zia.url_categories.update_url_category(
+            category_id, urls=updated
+        )
+        return _to_dict(_unwrap(result, resp, err))

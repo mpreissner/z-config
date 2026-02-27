@@ -266,3 +266,95 @@ class ZPAClient:
     def get_policy_set(self, policy_type: str) -> Dict:
         result, resp, err = self._sdk.zpa.policies.get_policy(policy_type)
         return _to_dict(_unwrap(result, resp, err))
+
+    def get_policy_rule(self, policy_type: str, rule_id: str) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.get_rule(policy_type, rule_id)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_policy_rule(self, policy_type: str, rule_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zpa.policies.update_rule(policy_type, rule_id, **config)
+        _unwrap(result, resp, err)
+        return True
+
+    # ------------------------------------------------------------------
+    # PRA Consoles
+    # ------------------------------------------------------------------
+
+    def list_pra_consoles(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.pra_console.list_consoles()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def get_pra_console(self, console_id: str) -> Dict:
+        result, resp, err = self._sdk.zpa.pra_console.get_console(console_id)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def create_pra_console(self, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.pra_console.add_console(**kwargs)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_pra_console(self, console_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zpa.pra_console.update_console(console_id, **config)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_pra_console(self, console_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.pra_console.delete_console(console_id)
+        _unwrap(result, resp, err)
+        return True
+
+    # ------------------------------------------------------------------
+    # Service Edge Groups
+    # ------------------------------------------------------------------
+
+    def list_service_edge_groups(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.service_edge_group.list_service_edge_groups()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Service Edges
+    # ------------------------------------------------------------------
+
+    def list_service_edges(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.service_edges.list_service_edges()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def get_service_edge(self, service_edge_id: str) -> Dict:
+        result, resp, err = self._sdk.zpa.service_edges.get_service_edge(service_edge_id)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_service_edge(self, service_edge_id: str, config: Dict) -> bool:
+        result, resp, err = self._sdk.zpa.service_edges.update_service_edge(service_edge_id, **config)
+        _unwrap(result, resp, err)
+        return True
+
+    # ------------------------------------------------------------------
+    # Servers
+    # ------------------------------------------------------------------
+
+    def list_servers(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.servers.list_servers()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Machine Groups
+    # ------------------------------------------------------------------
+
+    def list_machine_groups(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.machine_groups.list_machine_groups()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Trusted Networks
+    # ------------------------------------------------------------------
+
+    def list_trusted_networks(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.trusted_networks.list_trusted_networks()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # LSS Configs
+    # ------------------------------------------------------------------
+
+    def list_lss_configs(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.lss.list_configs()
+        return _to_dicts(_unwrap(result, resp, err))

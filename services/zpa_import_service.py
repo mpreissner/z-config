@@ -55,6 +55,13 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("policy_inspection",    "list_policy_rules", list_args={"policy_type": "inspection"}),
     ResourceDef("policy_isolation",     "list_policy_rules", list_args={"policy_type": "isolation"}),
     ResourceDef("certificate",          "list_certificates"),
+    ResourceDef("pra_console",          "list_pra_consoles"),
+    ResourceDef("service_edge_group",   "list_service_edge_groups"),
+    ResourceDef("service_edge",         "list_service_edges"),
+    ResourceDef("server",               "list_servers"),
+    ResourceDef("machine_group",        "list_machine_groups"),
+    ResourceDef("trusted_network",      "list_trusted_networks"),
+    ResourceDef("lss_config",           "list_lss_configs"),
 ]
 
 

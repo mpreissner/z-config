@@ -201,3 +201,27 @@ class ZCCClient:
             query_params={"username": username, "os_type": _OS_TYPE_SDK.get(os_type, str(os_type))}
         )
         return _to_dict(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Trusted Networks
+    # ------------------------------------------------------------------
+
+    def list_trusted_networks(self) -> List[Dict]:
+        result, resp, err = self._sdk.zcc.trusted_networks.list_by_company()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Forwarding Profiles
+    # ------------------------------------------------------------------
+
+    def list_forwarding_profiles(self) -> List[Dict]:
+        result, resp, err = self._sdk.zcc.forwarding_profile.list_by_company()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Admin Users
+    # ------------------------------------------------------------------
+
+    def list_admin_users(self) -> List[Dict]:
+        result, resp, err = self._sdk.zcc.admin_user.list_admin_users()
+        return _to_dicts(_unwrap(result, resp, err))

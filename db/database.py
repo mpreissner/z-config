@@ -63,6 +63,7 @@ def _migrate(engine) -> None:
     migrations = [
         "ALTER TABLE tenant_configs ADD COLUMN zpa_disabled_resources JSON",
         "ALTER TABLE tenant_configs ADD COLUMN zia_disabled_resources JSON",
+        "ALTER TABLE tenant_configs ADD COLUMN zcc_disabled_resources JSON",
     ]
     with engine.connect() as conn:
         for stmt in migrations:
