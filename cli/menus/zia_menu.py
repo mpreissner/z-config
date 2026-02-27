@@ -3018,12 +3018,11 @@ def _delete_cloud_app_rule(client, tenant, rule_type: str):
 def apply_baseline_menu(client, tenant):
     import json
     from collections import defaultdict
-    from typing import Dict
     from services.zia_push_service import SKIP_TYPES, ZIAPushService
 
     render_banner()
     console.print("\n[bold]Apply Baseline from JSON[/bold]")
-    console.print("[dim]Reads a ZIA snapshot export file and pushes config to the live tenant.[/dim]\n")
+    console.print("[dim]Reads a ZIA snapshot export file and pushes only deltas to the live tenant.[/dim]\n")
 
     path = questionary.text("Path to baseline JSON file:").ask()
     if not path:
@@ -3048,97 +3047,139 @@ def apply_baseline_menu(client, tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    # Show summary table
-    summary_table = Table(title="Baseline Summary", show_lines=False)
-    summary_table.add_column("Resource Type")
-    summary_table.add_column("Count", justify="right")
-    total_resources = 0
+    # ── Step 1: show what's in the file ───────────────────────────────────
+    file_table = Table(title="Baseline File Contents", show_lines=False)
+    file_table.add_column("Resource Type")
+    file_table.add_column("In File", justify="right")
     pushable_types = 0
-    for rtype, entries in resources.items():
+    for rtype, entries in sorted(resources.items()):
         count = len(entries) if isinstance(entries, list) else 1
-        skipped_note = "  [dim](skipped)[/dim]" if rtype in SKIP_TYPES else ""
-        summary_table.add_row(rtype + skipped_note, str(count))
+        skipped_note = "  [dim](env-specific, skipped)[/dim]" if rtype in SKIP_TYPES else ""
+        file_table.add_row(rtype + skipped_note, str(count))
         if rtype not in SKIP_TYPES:
-            total_resources += count
             pushable_types += 1
-    console.print(summary_table)
+    console.print(file_table)
 
     confirmed = questionary.confirm(
-        f"Import target state + push deltas for {pushable_types} types to {tenant.name}?",
+        f"Compare {pushable_types} resource types against current state of {tenant.name}?",
+        default=True,
+    ).ask()
+    if not confirmed:
+        return
+
+    # ── Step 2: import + classify (dry run) ───────────────────────────────
+    service = ZIAPushService(client, tenant_id=tenant.id)
+    console.print()
+
+    with console.status(f"[cyan]Syncing current state from {tenant.name}...[/cyan]") as status:
+        def _import_progress(rtype, done, total):
+            status.update(f"[cyan]Comparing: {rtype} ({done}/{total})[/cyan]")
+
+        dry_run = service.classify_baseline(baseline, import_progress_callback=_import_progress)
+
+    creates, updates = dry_run.changes_by_action()
+    total_changes = len(creates) + len(updates)
+
+    # ── Step 3: show dry-run summary ──────────────────────────────────────
+    console.print()
+    summary = dry_run.type_summary()
+    delta_table = Table(title="Comparison Result (dry run)", show_lines=False)
+    delta_table.add_column("Resource Type")
+    delta_table.add_column("Create", justify="right", style="green")
+    delta_table.add_column("Update", justify="right", style="cyan")
+    delta_table.add_column("Skip", justify="right", style="dim")
+    for rtype in sorted(summary):
+        counts = summary[rtype]
+        delta_table.add_row(
+            rtype,
+            str(counts["create"]) if counts["create"] else "—",
+            str(counts["update"]) if counts["update"] else "—",
+            str(counts["skip"])   if counts["skip"]   else "—",
+        )
+    console.print(delta_table)
+
+    if total_changes == 0:
+        console.print("\n[green]✓ Nothing to push — target is already in sync with the baseline.[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    # Show per-resource detail for creates and updates (cap at 30 each)
+    _MAX_DETAIL = 30
+    if creates:
+        console.print(f"\n[green]To create ({len(creates)}):[/green]")
+        for rtype, name in creates[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(creates) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(creates) - _MAX_DETAIL} more[/dim]")
+
+    if updates:
+        console.print(f"\n[cyan]To update ({len(updates)}):[/cyan]")
+        for rtype, name in updates[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(updates) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(updates) - _MAX_DETAIL} more[/dim]")
+
+    console.print()
+    confirmed = questionary.confirm(
+        f"Push {len(creates)} create(s) and {len(updates)} update(s) to {tenant.name}?",
         default=False,
     ).ask()
     if not confirmed:
         return
 
-    # Phase 1: fresh import + delta push (one combined status block)
-    service = ZIAPushService(client, tenant_id=tenant.id)
-    all_records = []
+    # ── Step 4: push the delta ────────────────────────────────────────────
+    push_records = []
     current_pass = [0]
 
     console.print()
-    with console.status(f"[cyan]Syncing current state from {tenant.name}...[/cyan]") as status:
-        from services.zia_import_service import RESOURCE_DEFINITIONS
-        import_total = len(RESOURCE_DEFINITIONS)
-
-        def _import_progress(rtype, done, total):
-            status.update(f"[cyan]Syncing: {rtype} ({done}/{total})[/cyan]")
-
+    with console.status("[cyan]Pushing...[/cyan]") as status:
         def _push_progress(pass_num, rtype, rec):
             if pass_num != current_pass[0]:
                 current_pass[0] = pass_num
-                status.update(f"[cyan][Pass {pass_num}] starting...[/cyan]")
             status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
 
-        all_records = service.push_baseline(
-            baseline,
-            progress_callback=_push_progress,
-            import_progress_callback=_import_progress,
-        )
+        push_records = service.push_classified(dry_run, progress_callback=_push_progress)
 
-    # Tally results
-    created = sum(1 for r in all_records if r.is_created)
-    updated = sum(1 for r in all_records if r.is_updated)
-    skipped = sum(1 for r in all_records if r.is_skipped)
-    failed = sum(1 for r in all_records if r.is_failed)
+    all_records = dry_run.skipped + push_records
+    created  = sum(1 for r in push_records if r.is_created)
+    updated  = sum(1 for r in push_records if r.is_updated)
+    skipped  = sum(1 for r in all_records  if r.is_skipped)
+    failed   = sum(1 for r in push_records if r.is_failed)
+    passes   = current_pass[0] or 1
 
-    passes = current_pass[0] or 1
     console.print(f"\n[bold]Push complete[/bold] — {passes} pass(es)")
     console.print(f"  [green]Created:[/green]  {created}")
     console.print(f"  [cyan]Updated:[/cyan]  {updated}")
     console.print(f"  [dim]Skipped:[/dim]  {skipped}")
     console.print(f"  [red]Failed:[/red]   {failed}")
 
-    # Results table by type
-    if all_records:
-        by_type: Dict = defaultdict(lambda: {"created": 0, "updated": 0, "skipped": 0, "failed": 0})
-        for r in all_records:
+    # Results table by type (push records only — skips are uninteresting here)
+    if push_records:
+        by_type = defaultdict(lambda: {"created": 0, "updated": 0, "failed": 0})
+        for r in push_records:
             if r.is_created:
                 by_type[r.resource_type]["created"] += 1
             elif r.is_updated:
                 by_type[r.resource_type]["updated"] += 1
-            elif r.is_skipped:
-                by_type[r.resource_type]["skipped"] += 1
             elif r.is_failed:
                 by_type[r.resource_type]["failed"] += 1
 
-        results_table = Table(title="Results by Type", show_lines=False)
+        results_table = Table(title="Push Results by Type", show_lines=False)
         results_table.add_column("Resource Type")
         results_table.add_column("Created", justify="right", style="green")
         results_table.add_column("Updated", justify="right", style="cyan")
-        results_table.add_column("Skipped", justify="right", style="dim")
-        results_table.add_column("Failed", justify="right", style="red")
+        results_table.add_column("Failed",  justify="right", style="red")
         for rtype, counts in sorted(by_type.items()):
             results_table.add_row(
                 rtype,
                 str(counts["created"]) if counts["created"] else "—",
                 str(counts["updated"]) if counts["updated"] else "—",
-                str(counts["skipped"]) if counts["skipped"] else "—",
-                str(counts["failed"]) if counts["failed"] else "—",
+                str(counts["failed"])  if counts["failed"]  else "—",
             )
         console.print(results_table)
 
     # Failure detail
-    failures = [r for r in all_records if r.is_failed]
+    failures = [r for r in push_records if r.is_failed]
     if failures:
         console.print("\n[bold red]Failures:[/bold red]")
         fail_table = Table(show_lines=False)

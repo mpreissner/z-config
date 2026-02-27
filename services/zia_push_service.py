@@ -4,20 +4,25 @@ Reads an exported snapshot JSON (produced by Config Snapshots → Export) and
 pushes only the delta to a live ZIA tenant via the API.
 
 Strategy:
-  - Fresh import: ZIAImportService runs against the target tenant first, so we
+  - Fresh import: ZIAImportService runs against the target tenant first so we
     have an accurate picture of its current state.
-  - Delta detection: each baseline entry is compared (after stripping read-only
-    fields) against the freshly imported state. Resources whose stripped config
-    matches are skipped entirely — no API call is made.
-  - Predefined/system resources (dlp_engine, dlp_dictionary, url_category,
-    network_service) are always skipped regardless of content. Zscaler manages
-    these and they differ across tenants.
-  - Resources absent in the target are created; changed resources are updated
-    directly (no speculative create → 409 loop).
-  - Multi-pass retry for transient failures until the error set stabilises.
-  - ID remapping: source→target ID pairs are registered during classification
-    (name-matched resources) and after each successful create, then applied to
-    every outbound payload so cross-environment references resolve correctly.
+  - Delta detection via ID-first lookup:
+      1. Match baseline entry against target by source ID (zia_id).
+         Works for same-tenant pushes and for Zscaler-system resources whose
+         IDs are constants across all tenants (e.g. "ADULT_DATING", predefined
+         DLP engines).
+      2. Fall back to name-based match for cross-tenant pushes of user-defined
+         resources where the numeric ID differs between environments.
+      Matched resources whose stripped configs are identical → skipped (no API
+      call).  Changed → updated directly.  Not found → created.
+  - Predefined/system resources are always skipped:
+      dlp_engine, dlp_dictionary, network_service  — flagged by predefined:true
+      url_category — flagged by type:"ZSCALER_DEFINED" (no predefined field)
+  - Multi-pass retry for transient failures; permanent errors (4xx) are not
+    retried.  The last actual error is preserved in the "stable" failure message
+    so the cause is always visible.
+  - ID remapping: source→target IDs registered during classification and after
+    each successful create; applied to every outbound payload.
 
 Usage:
     service = ZIAPushService(client, tenant_id=tenant.id)
@@ -32,7 +37,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Push order — resources are attempted tier by tier within each pass
@@ -86,8 +91,7 @@ SKIP_TYPES: set = {
 }
 
 # Types where only user-defined (non-predefined) resources are pushed.
-# Zscaler periodically updates its own predefined resources independently;
-# pushing them cross-tenant would overwrite Zscaler's managed versions.
+# Zscaler manages predefined entries in these types independently across tenants.
 SKIP_IF_PREDEFINED: set = {
     "url_category",
     "dlp_engine",
@@ -117,8 +121,7 @@ READONLY_FIELDS: set = {
 # SDK method dispatch tables
 # ---------------------------------------------------------------------------
 
-# Maps resource_type → (create_method_name, update_method_name)
-_WRITE_METHODS: Dict[str, tuple] = {
+_WRITE_METHODS: Dict[str, Tuple[str, str]] = {
     "rule_label":             ("create_rule_label",             "update_rule_label"),
     "time_interval":          ("create_time_interval",          "update_time_interval"),
     "workload_group":         ("create_workload_group",         "update_workload_group"),
@@ -171,10 +174,70 @@ class PushRecord:
         return self.status.startswith("failed:")
 
     @property
+    def is_permanent_failure(self) -> bool:
+        return self.status.startswith("failed:permanent:")
+
+    @property
     def failure_reason(self) -> str:
         if self.is_failed:
-            return self.status[len("failed:"):]
+            reason = self.status[len("failed:"):]
+            return reason[len("permanent:"):] if reason.startswith("permanent:") else reason
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Dry-run result
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DryRunResult:
+    """Classification output from classify_baseline() — no API writes made."""
+    # Skipped records (predefined, identical config, SKIP_TYPES)
+    skipped: List[PushRecord]
+    # Entries queued to push, keyed by resource_type; each entry dict has
+    # __action ("create"|"update"), __target_id, __display_name
+    pending: Dict[str, List[dict]]
+    # ID remap populated during classification (preserved for push_classified)
+    id_remap: Dict[str, str]
+
+    @property
+    def create_count(self) -> int:
+        return sum(1 for v in self.pending.values()
+                   for e in v if e.get("__action") == "create")
+
+    @property
+    def update_count(self) -> int:
+        return sum(1 for v in self.pending.values()
+                   for e in v if e.get("__action") == "update")
+
+    @property
+    def skip_count(self) -> int:
+        return len(self.skipped)
+
+    def type_summary(self) -> Dict[str, Dict[str, int]]:
+        """Return {rtype: {"create": N, "update": N, "skip": N}} across all types."""
+        out: Dict[str, Dict[str, int]] = {}
+        for r in self.skipped:
+            out.setdefault(r.resource_type, {"create": 0, "update": 0, "skip": 0})
+            out[r.resource_type]["skip"] += 1
+        for rtype, entries in self.pending.items():
+            out.setdefault(rtype, {"create": 0, "update": 0, "skip": 0})
+            for e in entries:
+                key = "create" if e.get("__action") == "create" else "update"
+                out[rtype][key] += 1
+        return out
+
+    def changes_by_action(self) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+        """Return (creates, updates) as lists of (resource_type, display_name) tuples."""
+        creates, updates = [], []
+        for rtype, entries in self.pending.items():
+            for e in entries:
+                dname = e.get("__display_name") or e.get("name") or "?"
+                if e.get("__action") == "create":
+                    creates.append((rtype, dname))
+                else:
+                    updates.append((rtype, dname))
+        return creates, updates
 
 
 # ---------------------------------------------------------------------------
@@ -191,47 +254,40 @@ class ZIAPushService:
     # Public API
     # ------------------------------------------------------------------
 
-    def push_baseline(
+    def classify_baseline(
         self,
         baseline: dict,
-        progress_callback: Optional[Callable] = None,
         import_progress_callback: Optional[Callable] = None,
-    ) -> List[PushRecord]:
-        """Main entry point. Imports target state, diffs, then pushes only deltas.
+    ) -> DryRunResult:
+        """Step 1 + 2 + 3: import target state, load DB, classify each entry.
+
+        No API writes are made.  Returns a DryRunResult the caller can inspect
+        before deciding whether to call push_classified().
 
         Args:
             baseline: Parsed snapshot export JSON dict (must have 'resources' key).
-            progress_callback: Called after each push attempt.
-                Signature: callback(pass_num: int, resource_type: str, record: PushRecord)
             import_progress_callback: Called during the fresh import phase.
                 Signature: callback(resource_type: str, done: int, total: int)
 
         Returns:
-            All PushRecord objects (created + updated + skipped + failed).
+            DryRunResult with .pending (to push) and .skipped (no-op entries).
         """
-        # ------------------------------------------------------------------
-        # Step 1: Fresh import — get current state of target tenant into DB
-        # ------------------------------------------------------------------
+        # Step 1: Fresh import
         from services.zia_import_service import ZIAImportService
         import_svc = ZIAImportService(self._client, self._tenant_id)
         import_svc.run(progress_callback=import_progress_callback)
 
-        # ------------------------------------------------------------------
-        # Step 2: Load freshly imported state from DB
-        # ------------------------------------------------------------------
+        # Step 2: Load freshly imported state, keyed by zia_id
         existing = self._load_existing_from_db()
-        # existing: {resource_type: {name: {"id": str, "raw_config": dict}}}
 
-        # ------------------------------------------------------------------
-        # Step 3: Classify each baseline entry — skip / create / update
-        # ------------------------------------------------------------------
+        # Step 3: Classify
         resources = baseline.get("resources", {})
         ordered_types = [t for t in PUSH_ORDER if t in resources]
         extra_types = [t for t in resources if t not in PUSH_ORDER]
         ordered_types.extend(extra_types)
 
         pending: Dict[str, List[dict]] = {}
-        all_records: List[PushRecord] = []
+        skipped: List[PushRecord] = []
 
         for rtype in ordered_types:
             if rtype in SKIP_TYPES:
@@ -245,46 +301,72 @@ class ZIAPushService:
                     pending[rtype] = list(entries)
                 continue
 
+            existing_for_type = existing.get(rtype) or {}
+
             for entry in entries:
                 name = entry.get("name") or ""
                 source_id = str(entry.get("id", ""))
                 raw_config = entry.get("raw_config", {})
+                display_name = name or source_id or "?"
 
-                # Always skip predefined resources for managed types
-                if rtype in SKIP_IF_PREDEFINED and raw_config.get("predefined"):
-                    # Still register remap so downstream rules can reference them
-                    existing_entry = (existing.get(rtype) or {}).get(name)
+                # Skip predefined/system resources for managed types
+                if rtype in SKIP_IF_PREDEFINED and _is_predefined(rtype, raw_config):
+                    existing_entry = self._find_existing(existing_for_type, source_id, name)
                     if existing_entry and source_id:
                         self._register_remap(source_id, existing_entry["id"])
-                    all_records.append(PushRecord(rtype, name, "skipped"))
+                    skipped.append(PushRecord(rtype, display_name, "skipped"))
                     continue
 
-                existing_entry = (existing.get(rtype) or {}).get(name)
+                existing_entry = self._find_existing(existing_for_type, source_id, name)
 
                 if existing_entry:
                     target_id = existing_entry["id"]
-                    # Pre-populate remap — downstream entries can use this ID
                     if source_id:
                         self._register_remap(source_id, target_id)
 
-                    # Delta check: compare stripped configs
                     if self._configs_match(raw_config, existing_entry["raw_config"]):
-                        # Identical — nothing to do
-                        all_records.append(PushRecord(rtype, name, "skipped"))
+                        skipped.append(PushRecord(rtype, display_name, "skipped"))
                         continue
 
-                    # Config differs — queue for update
-                    queued = dict(entry, __action="update", __target_id=target_id)
+                    queued = dict(entry, __action="update", __target_id=target_id,
+                                  __display_name=display_name)
                 else:
-                    # Not found in target — queue for create
-                    queued = dict(entry, __action="create")
+                    queued = dict(entry, __action="create", __display_name=display_name)
 
                 pending.setdefault(rtype, []).append(queued)
 
-        # ------------------------------------------------------------------
-        # Step 4: Push deltas — multi-pass retry until stable
-        # ------------------------------------------------------------------
+        return DryRunResult(
+            skipped=skipped,
+            pending=pending,
+            id_remap=dict(self._id_remap),
+        )
+
+    def push_classified(
+        self,
+        dry_run: DryRunResult,
+        progress_callback: Optional[Callable] = None,
+    ) -> List[PushRecord]:
+        """Step 4: push the delta from a prior classify_baseline() call.
+
+        Restores the ID remap populated during classification so references
+        resolve correctly, then runs multi-pass push until stable.
+
+        Args:
+            dry_run: Result from classify_baseline().
+            progress_callback: Called after each push attempt.
+                Signature: callback(pass_num: int, resource_type: str, record: PushRecord)
+
+        Returns:
+            PushRecord list for the pushed entries (created / updated / failed).
+            Combine with dry_run.skipped for the full picture.
+        """
+        # Restore remap state from classification
+        self._id_remap = dict(dry_run.id_remap)
+
+        pending = {rtype: list(entries) for rtype, entries in dry_run.pending.items()}
+        all_records: List[PushRecord] = []
         pass_num = 0
+
         while pending:
             pass_num += 1
             prev_count = sum(len(v) for v in pending.values())
@@ -294,27 +376,43 @@ class ZIAPushService:
             pending = new_pending
 
             if sum(len(v) for v in pending.values()) >= prev_count:
-                # No progress — stable failure set
                 for rtype, entries in pending.items():
                     for entry in entries:
+                        last_err = entry.get("__last_error", "unknown error")
+                        dname = entry.get("__display_name") or entry.get("name") or "?"
                         all_records.append(PushRecord(
                             resource_type=rtype,
-                            name=entry.get("name", "?"),
-                            status="failed:stable — no progress after retry",
+                            name=dname,
+                            status=f"failed:{last_err} (stable, no progress)",
                         ))
                 break
 
         return all_records
 
+    def push_baseline(
+        self,
+        baseline: dict,
+        progress_callback: Optional[Callable] = None,
+        import_progress_callback: Optional[Callable] = None,
+    ) -> List[PushRecord]:
+        """Convenience wrapper: classify then push, returning all records."""
+        dry_run = self.classify_baseline(baseline, import_progress_callback)
+        push_records = self.push_classified(dry_run, progress_callback)
+        return dry_run.skipped + push_records
+
     # ------------------------------------------------------------------
-    # Internal
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _load_existing_from_db(self) -> Dict[str, Dict[str, dict]]:
         """Load all non-deleted resources for this tenant from the DB.
 
         Returns:
-            {resource_type: {name: {"id": str, "raw_config": dict}}}
+            {resource_type: {zia_id: {"id": str, "name": str, "raw_config": dict}}}
+
+        Keyed by zia_id (not name) so same-tenant lookups always hit by ID,
+        and Zscaler-system resources (whose IDs are constant across tenants)
+        also match by ID in cross-tenant scenarios.
         """
         from db.database import get_session
         from db.models import ZIAResource
@@ -327,13 +425,36 @@ class ZIAPushService:
                 .all()
             )
             for row in rows:
-                if not row.name:
-                    continue
-                result.setdefault(row.resource_type, {})[row.name] = {
+                result.setdefault(row.resource_type, {})[row.zia_id] = {
                     "id": row.zia_id,
+                    "name": row.name or "",
                     "raw_config": row.raw_config or {},
                 }
         return result
+
+    def _find_existing(
+        self,
+        existing_for_type: Dict[str, dict],
+        source_id: str,
+        name: str,
+    ) -> Optional[dict]:
+        """Locate an existing target resource by ID first, then name.
+
+        ID-first handles same-tenant pushes and Zscaler-system resources whose
+        IDs are constants across all tenants.  Name fallback handles cross-tenant
+        pushes of user-defined resources where numeric IDs differ.
+        """
+        # Primary: exact ID match
+        if source_id and source_id in existing_for_type:
+            return existing_for_type[source_id]
+
+        # Fallback: name match (cross-tenant, user-defined resources)
+        if name:
+            for entry in existing_for_type.values():
+                if entry.get("name") == name:
+                    return entry
+
+        return None
 
     def _configs_match(self, baseline_config: dict, existing_config: dict) -> bool:
         """Return True if both configs are identical after stripping read-only fields."""
@@ -344,10 +465,12 @@ class ZIAPushService:
         pending: Dict[str, List[dict]],
         pass_num: int,
         progress_callback=None,
-    ) -> tuple[Dict[str, List[dict]], List[PushRecord]]:
+    ) -> Tuple[Dict[str, List[dict]], List[PushRecord]]:
         """One iteration over pending resources.
 
         Returns (new_pending, records_this_pass).
+        Permanent failures (4xx) are not retried.
+        Transient failures are kept in new_pending with __last_error set.
         """
         new_pending: Dict[str, List[dict]] = {}
         records: List[PushRecord] = []
@@ -369,8 +492,9 @@ class ZIAPushService:
                 if progress_callback:
                     progress_callback(pass_num, rtype, rec)
 
-                if rec.is_failed and "stable" not in rec.failure_reason:
-                    # Transient failure — keep for retry
+                if rec.is_failed and not rec.is_permanent_failure:
+                    # Transient — keep for retry, preserve the error
+                    entry["__last_error"] = rec.failure_reason
                     remaining.append(entry)
                 else:
                     records.append(rec)
@@ -382,7 +506,7 @@ class ZIAPushService:
 
     def _push_one(self, resource_type: str, entry: dict) -> PushRecord:
         """Push a single pre-classified resource entry."""
-        name = entry.get("name", "?")
+        name = entry.get("__display_name") or entry.get("name") or "?"
         source_id = str(entry.get("id", ""))
         raw_config = entry.get("raw_config", {})
         action = entry.get("__action", "create")
@@ -394,8 +518,7 @@ class ZIAPushService:
         if resource_type not in _WRITE_METHODS:
             return PushRecord(resource_type=resource_type, name=name, status="skipped")
 
-        _, update_method_name = _WRITE_METHODS[resource_type]
-        create_method_name, _ = _WRITE_METHODS[resource_type]
+        create_method_name, update_method_name = _WRITE_METHODS[resource_type]
         create_method = getattr(self._client, create_method_name)
         update_method = getattr(self._client, update_method_name)
 
@@ -407,17 +530,7 @@ class ZIAPushService:
                 update_method(target_id, config)
                 return PushRecord(resource_type=resource_type, name=name, status="updated")
             except Exception as exc:
-                exc_str = str(exc)
-                permanent = any(c in exc_str for c in ("400", "403", "NOT_SUBSCRIBED", "not licensed"))
-                return PushRecord(
-                    resource_type=resource_type,
-                    name=name,
-                    status=f"failed:{exc_str[:120]}",
-                ) if permanent else PushRecord(
-                    resource_type=resource_type,
-                    name=name,
-                    status=f"failed:{exc_str[:120]}",
-                )
+                return self._classify_error(resource_type, name, exc)
 
         # action == "create"
         try:
@@ -430,7 +543,7 @@ class ZIAPushService:
             exc_str = str(exc)
             # Safety net: 409 means it exists but wasn't in our import snapshot
             if "409" in exc_str or "already exists" in exc_str.lower() or "conflict" in exc_str.lower():
-                found_id = self._find_by_name(resource_type, name)
+                found_id = self._find_by_name_live(resource_type, name)
                 if found_id:
                     if source_id:
                         self._register_remap(source_id, found_id)
@@ -438,21 +551,13 @@ class ZIAPushService:
                         update_method(found_id, config)
                         return PushRecord(resource_type=resource_type, name=name, status="updated")
                     except Exception as upd_exc:
-                        return PushRecord(
-                            resource_type=resource_type,
-                            name=name,
-                            status=f"failed:{upd_exc}",
-                        )
+                        return self._classify_error(resource_type, name, upd_exc)
                 return PushRecord(
                     resource_type=resource_type,
                     name=name,
-                    status="failed:409 — could not locate existing resource by name",
+                    status="failed:permanent:409 — resource exists but name lookup failed",
                 )
-            return PushRecord(
-                resource_type=resource_type,
-                name=name,
-                status=f"failed:{exc_str[:120]}",
-            )
+            return self._classify_error(resource_type, name, exc)
 
     def _push_cloud_app_rule(
         self,
@@ -462,13 +567,13 @@ class ZIAPushService:
         action: str,
         target_id: Optional[str],
     ) -> PushRecord:
-        """Push a cloud app control rule (requires rule_type embedded in config)."""
+        """Push a cloud app control rule (rule_type embedded in config)."""
         rule_type = raw_config.get("type") or raw_config.get("ruleType")
         if not rule_type:
             return PushRecord(
                 resource_type="cloud_app_control_rule",
                 name=name,
-                status="failed:missing rule type in config",
+                status="failed:permanent:missing rule type in config",
             )
 
         config = self._strip(raw_config)
@@ -479,13 +584,8 @@ class ZIAPushService:
                 self._client.update_cloud_app_rule(rule_type, target_id, config)
                 return PushRecord(resource_type="cloud_app_control_rule", name=name, status="updated")
             except Exception as exc:
-                return PushRecord(
-                    resource_type="cloud_app_control_rule",
-                    name=name,
-                    status=f"failed:{exc}",
-                )
+                return self._classify_error("cloud_app_control_rule", name, exc)
 
-        # create
         try:
             result = self._client.create_cloud_app_rule(rule_type, config)
             new_target_id = str(result.get("id", ""))
@@ -506,23 +606,15 @@ class ZIAPushService:
                             self._client.update_cloud_app_rule(rule_type, found_id, config)
                             return PushRecord(resource_type="cloud_app_control_rule", name=name, status="updated")
                         except Exception as upd_exc:
-                            return PushRecord(
-                                resource_type="cloud_app_control_rule",
-                                name=name,
-                                status=f"failed:{upd_exc}",
-                            )
+                            return self._classify_error("cloud_app_control_rule", name, upd_exc)
                 except Exception:
                     pass
                 return PushRecord(
                     resource_type="cloud_app_control_rule",
                     name=name,
-                    status="failed:409 — could not locate existing rule by name",
+                    status="failed:permanent:409 — rule exists but name lookup failed",
                 )
-            return PushRecord(
-                resource_type="cloud_app_control_rule",
-                name=name,
-                status=f"failed:{exc_str[:120]}",
-            )
+            return self._classify_error("cloud_app_control_rule", name, exc)
 
     def _push_list_resource(self, resource_type: str, entries: List[dict]) -> List[PushRecord]:
         """Special handler for allowlist / denylist — merge only (add new URLs)."""
@@ -543,9 +635,20 @@ class ZIAPushService:
                 records.append(PushRecord(
                     resource_type=resource_type,
                     name=resource_type,
-                    status=f"failed:{exc}",
+                    status=f"failed:permanent:{exc}",
                 ))
         return records
+
+    def _classify_error(self, resource_type: str, name: str, exc: Exception) -> PushRecord:
+        """Classify an exception as permanent (4xx) or transient."""
+        exc_str = str(exc)
+        permanent = any(code in exc_str for code in ("400", "403", "NOT_SUBSCRIBED", "not licensed", "404"))
+        prefix = "failed:permanent:" if permanent else "failed:"
+        return PushRecord(
+            resource_type=resource_type,
+            name=name,
+            status=f"{prefix}{exc_str[:150]}",
+        )
 
     def _strip(self, config: dict) -> dict:
         """Return a shallow copy of config with READONLY_FIELDS removed."""
@@ -571,9 +674,9 @@ class ZIAPushService:
         """Store source→target ID mapping (both coerced to str)."""
         self._id_remap[str(source_id)] = str(target_id)
 
-    def _find_by_name(self, resource_type: str, name: str) -> Optional[str]:
-        """Safety-net lookup: return target ID of existing resource matching name, or None.
-        Only called when a create unexpectedly 409s (import snapshot was stale/incomplete).
+    def _find_by_name_live(self, resource_type: str, name: str) -> Optional[str]:
+        """Safety-net: query the live API for a resource by name.
+        Only called when a create unexpectedly 409s (snapshot was stale).
         """
         from services.zia_import_service import RESOURCE_DEFINITIONS
         list_method_name = next(
@@ -590,3 +693,24 @@ class ZIAPushService:
         except Exception:
             pass
         return None
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper
+# ---------------------------------------------------------------------------
+
+def _is_predefined(resource_type: str, raw_config: dict) -> bool:
+    """Return True if this resource is predefined/system-managed.
+
+    Different resource types use different fields to signal predefined status:
+    - dlp_engine, dlp_dictionary, network_service: predefined:true boolean
+    - url_category: type:"ZSCALER_DEFINED" (no predefined field)
+    """
+    if raw_config.get("predefined"):
+        return True
+    if resource_type == "url_category":
+        if raw_config.get("type") == "ZSCALER_DEFINED":
+            return True
+        if raw_config.get("customCategory") is False:
+            return True
+    return False
