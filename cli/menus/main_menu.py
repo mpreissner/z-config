@@ -12,7 +12,7 @@ console = Console()
 def _active_tenant_label() -> str:
     from cli.session import get_active_tenant
     t = get_active_tenant()
-    return f"  Tenant Management  (active: {t.name})" if t else "  Tenant Management"
+    return f"  Switch Tenant  (active: {t.name})" if t else "  Switch Tenant"
 
 
 def main_menu():
@@ -73,6 +73,7 @@ def _switch_tenant():
     if tenant:
         set_active_tenant(tenant)
         console.print(f"[green]✓ Active tenant: [bold]{tenant.name}[/bold][/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 # ------------------------------------------------------------------
