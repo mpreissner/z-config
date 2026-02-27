@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ## [0.8.0] - 2026-02-27
 
+### Changed
+
+#### ZIA — Apply Baseline: delta-only push strategy
+- Before pushing anything, a full ZIA import is now run against the target tenant
+  to capture its current state
+- Each baseline entry is compared (after stripping read-only fields such as
+  `id`, `lastModifiedTime`, etc.) to the freshly imported record:
+  - **Identical** → skipped; no API call made
+  - **Changed** → updated directly using the known target ID
+  - **Not found** → created
+- Eliminates redundant pushes of unchanged resources (e.g. all 110 predefined
+  URL categories that exist in every tenant were previously pushed and 409'd on
+  every run)
+- `SKIP_IF_PREDEFINED` covers `url_category`, `dlp_engine`, `dlp_dictionary`,
+  `network_service` — predefined resources in these types are always skipped
+  regardless of content; Zscaler manages their lifecycle independently
+- Push classification is now done upfront; `_push_one` no longer uses speculative
+  create → 409 → name-lookup for known resources (409 fallback kept as safety net
+  for edge cases where the import snapshot is stale)
+- Menu prompt updated: "Import target state + push deltas" — shows import progress
+  (`Syncing: <type> N/M`) followed by push progress (`[Pass N] <type> — <name>`)
+  in a single combined status display
+
 ### Added
 
 #### ZIA — Import Gaps Filled (27 → 35 resource types)

@@ -3064,25 +3064,36 @@ def apply_baseline_menu(client, tenant):
     console.print(summary_table)
 
     confirmed = questionary.confirm(
-        f"Push {total_resources} resources across {pushable_types} types to {tenant.name}?",
+        f"Import target state + push deltas for {pushable_types} types to {tenant.name}?",
         default=False,
     ).ask()
     if not confirmed:
         return
 
-    # Run push with live status display
+    # Phase 1: fresh import + delta push (one combined status block)
     service = ZIAPushService(client, tenant_id=tenant.id)
     all_records = []
     current_pass = [0]
 
     console.print()
-    with console.status("[cyan]Pushing baseline...[/cyan]") as status:
-        def _progress(pass_num, rtype, rec):
+    with console.status(f"[cyan]Syncing current state from {tenant.name}...[/cyan]") as status:
+        from services.zia_import_service import RESOURCE_DEFINITIONS
+        import_total = len(RESOURCE_DEFINITIONS)
+
+        def _import_progress(rtype, done, total):
+            status.update(f"[cyan]Syncing: {rtype} ({done}/{total})[/cyan]")
+
+        def _push_progress(pass_num, rtype, rec):
             if pass_num != current_pass[0]:
                 current_pass[0] = pass_num
+                status.update(f"[cyan][Pass {pass_num}] starting...[/cyan]")
             status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
 
-        all_records = service.push_baseline(baseline, progress_callback=_progress)
+        all_records = service.push_baseline(
+            baseline,
+            progress_callback=_push_progress,
+            import_progress_callback=_import_progress,
+        )
 
     # Tally results
     created = sum(1 for r in all_records if r.is_created)
@@ -3090,7 +3101,8 @@ def apply_baseline_menu(client, tenant):
     skipped = sum(1 for r in all_records if r.is_skipped)
     failed = sum(1 for r in all_records if r.is_failed)
 
-    console.print(f"\n[bold]Push complete[/bold] — {current_pass[0]} pass(es)")
+    passes = current_pass[0] or 1
+    console.print(f"\n[bold]Push complete[/bold] — {passes} pass(es)")
     console.print(f"  [green]Created:[/green]  {created}")
     console.print(f"  [cyan]Updated:[/cyan]  {updated}")
     console.print(f"  [dim]Skipped:[/dim]  {skipped}")
