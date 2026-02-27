@@ -10,19 +10,17 @@ Automation toolset for Zscaler OneAPI — interactive TUI with a local DB cache 
 ## Features
 
 - **Interactive TUI** — Rich terminal UI with a persistent banner, full-screen scrollable table views, and keyboard-driven navigation
-- **ZPA Application Segments** — list, search, bulk enable/disable, and bulk create from CSV with dry-run and dependency resolution
-- **ZPA Certificate Management** — upload, rotate across all matching resources, and delete certificates
-- **ZPA Connectors** — list, search, enable/disable, rename, and delete App Connectors; full CRUD for Connector Groups
-- **ZPA Privileged Remote Access** — PRA Portal list, search, create, enable/disable, and delete
-- **ZPA Config Import** — pull a full snapshot of 18 resource types into a local SQLite cache for fast lookups
-- **ZIA Firewall Policy** — list, search, and enable/disable L4 Firewall Rules and DNS Filter Rules; IPS subscription-awareness
-- **ZIA Locations** — list and search locations and location groups
-- **ZIA SSL Inspection** — list, search, and enable/disable SSL inspection rules
-- **ZIA Config Import** — pull a full snapshot of 19 resource types into a local SQLite cache
+- **ZPA** — App Connectors (list/search/enable-disable/rename/delete), Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups (list/search), Access Policy (list/search), PRA Portals (full CRUD), PRA Consoles (list/search/enable-disable/delete), Service Edges (list/search/enable-disable), Certificate Management (upload/rotate/delete)
+- **ZPA Config Import** — pull a full snapshot of 25 resource types into a local SQLite cache for fast lookups
+- **ZIA** — URL Filtering (list/search/enable-disable), URL Categories (list/search/add-remove URLs), Security Policy Settings (allowlist/denylist view and edit), URL Lookup, Firewall Policy (L4 rules, DNS filter rules, IPS rules), SSL Inspection (list/search/enable-disable), Traffic Forwarding (list/search), Locations (list/search), Users (list/search), Policy Activation
+- **ZIA Config Import** — pull a full snapshot of 24 resource types into a local SQLite cache
 - **ZCC Device Management** — list, search, and view enrolled devices; soft and force remove; OTP lookup; app profile password lookup; CSV exports for devices and service status
+- **ZCC Config Import** — sync devices, trusted networks, forwarding profiles, and admin users into a local SQLite cache
+- **ZCC Configuration** — Trusted Networks (list/search), Forwarding Profiles (list/search), Admin Users (list/search)
 - **ZIdentity User Management** — list and search users; full profile with group membership and service entitlements; reset password, set password, and skip MFA
 - **ZIdentity Group Management** — list and search groups; view members; add and remove users
 - **ZIdentity API Client Management** — list and search clients; view details and scopes; manage secrets with expiry; delete clients
+- **Config Snapshots** — save, compare (field-level diff), export, and delete point-in-time snapshots for ZPA and ZIA
 - **Audit Log** — immutable record of every operation with local-timezone timestamps
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
 
@@ -42,18 +40,19 @@ zs-config/
 │   └── conf_writer.py       # zscaler-oneapi.conf writer (chmod 600)
 │
 ├── db/                # Database layer (SQLAlchemy + SQLite by default)
-│   ├── models.py      # TenantConfig, AuditLog, Certificate, ZPAResource, SyncLog
-│   └── database.py    # Engine setup, session context manager
+│   ├── models.py      # TenantConfig, AuditLog, Certificate, ZPAResource, ZIAResource, ZCCResource, SyncLog, RestorePoint
+│   └── database.py    # Engine setup, session context manager, auto-migrations
 │
 ├── services/          # Business logic — shared by CLI and API
 │   ├── config_service.py        # Tenant CRUD with encrypted secret storage
 │   ├── audit_service.py         # Operation audit logging
 │   ├── zpa_service.py           # ZPA workflows (cert rotation, etc.)
-│   ├── zpa_import_service.py    # ZPA config import (pulls live config into DB)
+│   ├── zpa_import_service.py    # ZPA config import (25 resource types)
 │   ├── zpa_segment_service.py   # App segment bulk-create logic
 │   ├── zia_service.py           # ZIA workflows
-│   ├── zia_import_service.py    # ZIA config import (pulls live config into DB)
+│   ├── zia_import_service.py    # ZIA config import (24 resource types)
 │   ├── zcc_service.py           # ZCC workflows (device management, secrets)
+│   ├── zcc_import_service.py    # ZCC config import (devices, networks, profiles, admins)
 │   └── zidentity_service.py     # ZIdentity workflows (users, groups, API clients)
 │
 ├── cli/               # Interactive Rich TUI
@@ -98,7 +97,7 @@ zs-config
 
 On first launch an encryption key is generated automatically and saved to `~/.config/zs-config/secret.key`. No manual setup required.
 
-Go to **Settings → Manage Tenants → Add Tenant** to register your first Zscaler tenant, then **ZIA → Import Config** or **ZPA → Import Config** to pull your tenant's configuration into the local cache.
+Go to **Settings → Add Tenant** to register your first Zscaler tenant, then **ZIA → Import Config** or **ZPA → Import Config** to pull your tenant's configuration into the local cache.
 
 > **Key override:** set `ZSCALER_SECRET_KEY` in your environment to use a specific Fernet key instead of the auto-generated one.
 
@@ -127,8 +126,8 @@ zs-config
 | ZPA | Zscaler Private Access management |
 | ZCC | Zscaler Client Connector management |
 | ZIdentity | User, group, and API client management |
-| Tenant Management | Switch active tenant; add, list, or remove tenants |
-| Settings | Data reset and tenant management |
+| Switch Tenant | Switch active tenant (shows current tenant name) |
+| Settings | Add / list / remove tenants; clear imported data |
 | Audit Log | Scrollable viewer of all recorded operations |
 | Exit | Quit |
 
@@ -136,14 +135,45 @@ zs-config
 
 ### ZPA Menu
 
+Entries are grouped into labeled sections.
+
+**Infrastructure**
+
 | Option | Description |
 |---|---|
-| Application Segments | Segment list, search, enable/disable, bulk create; App Segment Groups *(coming soon)* |
+| App Connectors | List, search, enable/disable, rename, and delete App Connectors; full CRUD for Connector Groups |
+| Service Edges | List, search, and enable/disable Service Edges |
+
+**Applications**
+
+| Option | Description |
+|---|---|
+| Application Segments | List, search, enable/disable, and bulk create from CSV |
+| App Segment Groups | List and search Segment Groups |
+
+**Policy**
+
+| Option | Description |
+|---|---|
+| Access Policy | List and search access policy rules |
+
+**PRA**
+
+| Option | Description |
+|---|---|
+| Privileged Remote Access | PRA Portals (full CRUD) and PRA Consoles (list/search/enable-disable/delete) |
+
+**Certificates**
+
+| Option | Description |
+|---|---|
 | Certificate Management | List, rotate, and delete certificates |
-| Connectors | List, search, enable/disable, rename, and delete App Connectors; full CRUD for Connector Groups |
-| Privileged Remote Access | PRA Portals — list, search, create, enable/disable, delete; PRA Consoles *(coming soon)* |
-| Access Policy | *(coming soon)* |
-| Import Config | Pull a full ZPA config snapshot into the local DB |
+
+**Bottom section**
+
+| Option | Description |
+|---|---|
+| Import Config | Pull a full ZPA config snapshot (25 resource types) into the local DB |
 | Config Snapshots | Save, compare, export, and delete point-in-time config snapshots |
 | Reset N/A Resource Types | Clear the list of auto-disabled resource types so they are retried on the next import |
 
@@ -151,7 +181,7 @@ zs-config
 
 ### ZPA — Import Config
 
-Fetches 18 resource types from your ZPA tenant and stores each as a `ZPAResource` row in the local DB. Uses SHA-256 comparison so re-runs only write rows whose content has changed.
+Fetches 25 resource types from your ZPA tenant and stores each as a `ZPAResource` row in the local DB. Uses SHA-256 comparison so re-runs only write rows whose content has changed.
 
 Resource types that return 401 (not entitled for your tenant) are automatically recorded as N/A and skipped on subsequent imports. Use **Reset N/A Resource Types** if your entitlements change.
 
@@ -247,18 +277,38 @@ Use **Export CSV Template** to get a pre-filled starting point, or build your ow
 
 ### ZIA Menu
 
+Entries are grouped into labeled sections.
+
+**Web & URL Policy**
+
 | Option | Description |
 |---|---|
-| SSL Inspection | List, search, and enable/disable SSL inspection rules |
-| Locations | List and search locations; list location groups |
-| Firewall Policy | List, search, and enable/disable L4 Firewall Rules and DNS Filter Rules; IPS subscription-awareness |
+| URL Filtering | List, search, and enable/disable URL filtering rules |
+| URL Categories | List and search custom categories; add and remove URLs per category |
+| Security Policy Settings | View, add to, and remove URLs from the global allowlist and denylist |
 | URL Lookup | Look up the category classification of one or more URLs |
-| Security Policy Settings | *(coming soon)* |
-| URL Categories | *(coming soon)* |
-| URL Filtering | *(coming soon)* |
-| Traffic Forwarding | *(coming soon)* |
+
+**Network Security**
+
+| Option | Description |
+|---|---|
+| Firewall Policy | List, search, and enable/disable L4 Firewall Rules, DNS Filter Rules, and IPS rules |
+| SSL Inspection | List, search, and enable/disable SSL inspection rules |
+| Traffic Forwarding | List and search forwarding rules |
+
+**Identity & Access**
+
+| Option | Description |
+|---|---|
+| Users | List and search users |
+| Locations | List and search locations; list location groups |
+
+**Bottom section**
+
+| Option | Description |
+|---|---|
 | Activation | View activation status; push pending ZIA policy changes |
-| Import Config | Pull a full ZIA config snapshot (19 resource types) into the local DB |
+| Import Config | Pull a full ZIA config snapshot (24 resource types) into the local DB |
 | Config Snapshots | Save, compare, export, and delete point-in-time config snapshots |
 | Reset N/A Resource Types | Clear the list of auto-disabled resource types so they are retried on the next import |
 
@@ -266,13 +316,37 @@ Use **Export CSV Template** to get a pre-filled starting point, or build your ow
 
 ### ZCC Menu
 
+Entries are grouped into labeled sections.
+
+**Devices**
+
 | Option | Description |
 |---|---|
 | Devices | List, search by username, view details, soft remove, force remove |
+
+**Device Credentials**
+
+| Option | Description |
+|---|---|
 | OTP Lookup | Fetch a one-time password for a specific device UDID |
 | App Profile Passwords | Look up profile passwords for a user/OS combination |
+
+**Configuration**
+
+| Option | Description |
+|---|---|
+| Trusted Networks | List and search defined trusted networks (DNS servers and search domains) |
+| Forwarding Profiles | List and search forwarding profiles |
+| Admin Users | List and search ZCC admin users |
+
+**Bottom section**
+
+| Option | Description |
+|---|---|
 | Export Devices CSV | Download enrolled device list as CSV, filterable by OS and registration state |
 | Export Service Status CSV | Download per-device service status as CSV, same filters |
+| Import Config | Sync devices, trusted networks, forwarding profiles, and admin users into the local DB |
+| Reset N/A Resource Types | Clear the list of auto-disabled resource types so they are retried on the next import |
 
 #### Devices submenu
 
@@ -332,8 +406,10 @@ Use **Export CSV Template** to get a pre-filled starting point, or build your ow
 
 | Option | Description |
 |---|---|
-| Manage Tenants | Add, list, or remove tenants |
-| Clear Imported Data & Audit Log | Delete all ZPA resources, sync logs, and audit entries (tenant config is preserved) |
+| Add Tenant | Register a new Zscaler tenant (vanity domain, client ID/secret, ZPA customer ID) |
+| List Tenants | Show all configured tenants |
+| Remove Tenant | Delete a tenant and its encrypted credentials |
+| Clear Imported Data & Audit Log | Delete all imported resources, sync logs, and audit entries (tenant config is preserved) |
 
 ---
 
@@ -360,7 +436,8 @@ export ZSCALER_DB_URL="postgresql://user:pass@host/dbname"
 | `Certificate` | Lifecycle tracking for certs managed by this toolset |
 | `ZPAResource` | Full JSON snapshot of every ZPA resource (`tenant × type × id`); SHA-256 hash enables fast change detection on re-import |
 | `ZIAResource` | Full JSON snapshot of every ZIA resource (`tenant × type × id`); same SHA-256 change-detection pattern as ZPA |
-| `SyncLog` | Outcome of each import run (status, counters, errors) — shared by ZPA and ZIA imports |
+| `ZCCResource` | Full JSON snapshot of every ZCC resource (`tenant × type × id`); same SHA-256 change-detection pattern |
+| `SyncLog` | Outcome of each import run (status, counters, errors) — shared by ZPA, ZIA, and ZCC imports |
 | `RestorePoint` | Point-in-time config snapshots for pre/post-change diffing and export |
 
 ---
@@ -371,7 +448,7 @@ Tenant secrets are encrypted with [Fernet](https://cryptography.io/en/latest/fer
 
 - **Auto-managed:** on first launch a key is generated and saved to `~/.config/zs-config/secret.key` (chmod 600)
 - **Env var override:** set `ZSCALER_SECRET_KEY` to use a specific key
-- **Rotation:** go to **Settings → Generate Encryption Key** — warning: rotating the key makes previously saved tenant secrets unreadable; re-add tenants after rotating
+- **Rotation:** rotating the key makes previously saved tenant secrets unreadable — re-add tenants after rotating
 
 ---
 
