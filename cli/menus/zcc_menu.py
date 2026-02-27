@@ -622,16 +622,13 @@ def _list_trusted_networks(tenant, search: str = None):
     table.add_column("Name")
     table.add_column("DNS Servers")
     table.add_column("DNS Search Domains")
-    table.add_column("Active")
 
     for r in rows:
         cfg = r["raw_config"]
         name = cfg.get("network_name") or r["name"] or "—"
         dns_servers = cfg.get("dns_servers") or "—"
         dns_domains = cfg.get("dns_search_domains") or "—"
-        active = cfg.get("active")
-        active_str = "[green]Yes[/green]" if active else "[red]No[/red]"
-        table.add_row(name, str(dns_servers), str(dns_domains), active_str)
+        table.add_row(name, str(dns_servers), str(dns_domains))
 
     from cli.banner import capture_banner
     from cli.scroll_view import render_rich_to_lines, scroll_view
