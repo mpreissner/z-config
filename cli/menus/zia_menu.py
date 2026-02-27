@@ -2490,6 +2490,7 @@ def _delete_dlp_dictionary(client, tenant):
         console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
+
 # ------------------------------------------------------------------
 # Cloud Applications
 # ------------------------------------------------------------------
@@ -2510,91 +2511,120 @@ def cloud_applications_menu(client, tenant):
         ).ask()
 
         if choice == "list_policy":
-            _list_cloud_apps(client, policy_type="policy")
+            _list_cloud_apps_db(tenant, resource_type="cloud_app_policy")
         elif choice == "list_ssl":
-            _list_cloud_apps(client, policy_type="ssl")
+            _list_cloud_apps_db(tenant, resource_type="cloud_app_ssl_policy")
         elif choice == "search":
-            _search_cloud_apps(client)
+            _search_cloud_apps_db(tenant)
         elif choice in ("back", None):
             break
 
 
-def _list_cloud_apps(client, policy_type: str = "policy", search: str = None):
-    label = "SSL Policy Apps" if policy_type == "ssl" else "Policy Apps"
-    with console.status(f"Fetching {label}..."):
-        try:
-            if policy_type == "ssl":
-                apps = client.list_cloud_app_ssl_policy(search=search)
-            else:
-                apps = client.list_cloud_app_policy(search=search)
-        except Exception as e:
-            console.print(f"[red]✗ {e}[/red]")
-            questionary.press_any_key_to_continue("Press any key to continue...").ask()
-            return
+def _list_cloud_apps_db(tenant, resource_type: str, search: str = None):
+    from db.database import get_session
+    from db.models import ZIAResource
 
-    if not apps:
-        msg = f"[yellow]No apps matching '{search}'.[/yellow]" if search else f"[yellow]No {label} returned.[/yellow]"
+    label = "SSL Policy Apps" if resource_type == "cloud_app_ssl_policy" else "Policy Apps"
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type=resource_type, is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if search:
+        rows = [r for r in rows if search.lower() in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No {label} matching '{search}'.[/yellow]" if search
+            else f"[yellow]No {label} in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
         console.print(msg)
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    table = Table(title=f"{label} ({len(apps)} total)", show_lines=False)
-    table.add_column("Name")
-    table.add_column("App Class")
-    table.add_column("App Type")
+    table = Table(title=f"{label} ({len(rows)} total)", show_lines=False)
+    table.add_column("App Name")
+    table.add_column("Parent Category")
     table.add_column("ID", style="dim")
 
-    for app in apps:
-        name = app.get("name") or app.get("appName") or "—"
-        app_class = app.get("appClass") or "—"
-        app_type = app.get("appType") or "—"
-        app_id = str(app.get("id") or "—")
-        table.add_row(name, app_class, app_type, app_id)
+    for r in rows:
+        cfg = r["raw_config"]
+        app_name = r["name"] or cfg.get("app_name") or cfg.get("appName") or "—"
+        parent = cfg.get("parent_name") or cfg.get("parentName") or "—"
+        app_id = r["zia_id"] or "—"
+        table.add_row(app_name, parent, app_id)
 
     from cli.banner import capture_banner
     from cli.scroll_view import render_rich_to_lines, scroll_view
     scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
 
 
-def _search_cloud_apps(client):
+def _search_cloud_apps_db(tenant):
     search = questionary.text("Search (app name or partial):").ask()
     if not search:
         return
-    choice = questionary.select(
+    policy_type = questionary.select(
         "Search in:",
         choices=[
-            questionary.Choice("Policy Apps (DLP / CAC)", value="policy"),
-            questionary.Choice("SSL Policy Apps", value="ssl"),
+            questionary.Choice("Policy Apps (DLP / CAC)", value="cloud_app_policy"),
+            questionary.Choice("SSL Policy Apps", value="cloud_app_ssl_policy"),
         ],
     ).ask()
-    if not choice:
+    if not policy_type:
         return
-    _list_cloud_apps(client, policy_type=choice, search=search.strip())
+    _list_cloud_apps_db(tenant, resource_type=policy_type, search=search.strip())
 
 
 # ------------------------------------------------------------------
 # Cloud App Control
 # ------------------------------------------------------------------
 
+def _sync_cloud_app_resource(client, tenant):
+    """Re-sync cloud_app_control_rule from the API into the DB."""
+    from services.zia_import_service import ZIAImportService
+    service = ZIAImportService(client, tenant_id=tenant.id)
+    service.run(resource_types=["cloud_app_control_rule"])
+
+
 def cloud_app_control_menu(client, tenant):
     while True:
         render_banner()
-        with console.status("Loading rule types..."):
-            try:
-                type_map = client.get_cloud_app_rule_types()
-            except Exception as e:
-                console.print(f"[red]✗ Could not fetch rule types: {e}[/red]")
-                questionary.press_any_key_to_continue("Press any key to continue...").ask()
-                return
 
-        if not type_map:
-            console.print("[yellow]No rule types returned from API.[/yellow]")
+        # Build type list from DB (distinct 'type' values in raw_config)
+        from db.database import get_session
+        from db.models import ZIAResource
+
+        with get_session() as session:
+            resources = (
+                session.query(ZIAResource)
+                .filter_by(tenant_id=tenant.id, resource_type="cloud_app_control_rule", is_deleted=False)
+                .all()
+            )
+            rule_types = sorted({
+                (r.raw_config or {}).get("type")
+                for r in resources
+                if (r.raw_config or {}).get("type")
+            })
+
+        if not rule_types:
+            console.print(
+                "[yellow]No Cloud App Control rules in local DB. "
+                "Run [bold]Import Config[/bold] first.[/yellow]"
+            )
             questionary.press_any_key_to_continue("Press any key to continue...").ask()
             return
 
         type_choices = [
-            questionary.Choice(k.replace("_", " ").title(), value=k)
-            for k in sorted(type_map.keys())
+            questionary.Choice(rt.replace("_", " ").title(), value=rt)
+            for rt in rule_types
         ] + [questionary.Separator(), questionary.Choice("← Back", value="back")]
 
         rule_type = questionary.select(
@@ -2630,9 +2660,9 @@ def _cloud_app_rules_menu(client, tenant, rule_type: str):
         ).ask()
 
         if choice == "list":
-            _list_cloud_app_rules(client, rule_type)
+            _list_cloud_app_rules_db(tenant, rule_type)
         elif choice == "view":
-            _view_cloud_app_rule(client, rule_type)
+            _view_cloud_app_rule_db(tenant, rule_type)
         elif choice == "create":
             _create_cloud_app_rule(client, tenant, rule_type)
         elif choice == "edit":
@@ -2645,87 +2675,85 @@ def _cloud_app_rules_menu(client, tenant, rule_type: str):
             break
 
 
-def _fetch_cloud_app_rules(client, rule_type: str):
-    """Fetch rules live from API, sorted by order."""
-    rules = client.list_cloud_app_rules(rule_type)
-    rules.sort(key=lambda r: r.get("order") or r.get("rank") or 0)
-    return rules
+def _get_cloud_app_rules_from_db(tenant, rule_type: str):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="cloud_app_control_rule", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+            if (r.raw_config or {}).get("type") == rule_type
+        ]
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    return rows
 
 
-def _pick_cloud_app_rule(client, rule_type: str):
-    """Fetch rules live and let user pick one. Returns rule dict or None."""
-    with console.status("Fetching rules..."):
-        try:
-            rules = _fetch_cloud_app_rules(client, rule_type)
-        except Exception as e:
-            console.print(f"[red]✗ {e}[/red]")
-            questionary.press_any_key_to_continue("Press any key to continue...").ask()
-            return None
-
-    if not rules:
-        console.print("[yellow]No rules found for this rule type.[/yellow]")
-        questionary.press_any_key_to_continue("Press any key to continue...").ask()
-        return None
-
-    return questionary.select(
-        "Select rule:",
-        choices=[
-            questionary.Choice(
-                f"{r.get('name', '?')}  (ID: {r.get('id', '?')}  order: {r.get('order', '—')})",
-                value=r,
-            )
-            for r in rules
-        ],
-    ).ask()
-
-
-def _list_cloud_app_rules(client, rule_type: str):
-    with console.status("Fetching rules..."):
-        try:
-            rules = _fetch_cloud_app_rules(client, rule_type)
-        except Exception as e:
-            console.print(f"[red]✗ {e}[/red]")
-            questionary.press_any_key_to_continue("Press any key to continue...").ask()
-            return
-
+def _list_cloud_app_rules_db(tenant, rule_type: str):
+    rows = _get_cloud_app_rules_from_db(tenant, rule_type)
     label = rule_type.replace("_", " ").title()
-    if not rules:
-        console.print(f"[yellow]No rules configured for {label}.[/yellow]")
+
+    if not rows:
+        console.print(f"[yellow]No rules for {label} in local DB. Run Import Config first.[/yellow]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    table = Table(title=f"{label} Rules ({len(rules)})", show_lines=False)
+    table = Table(title=f"{label} Rules ({len(rows)})", show_lines=False)
     table.add_column("Order", justify="right")
     table.add_column("Name")
     table.add_column("State")
     table.add_column("Actions")
     table.add_column("Description")
 
-    for r in rules:
-        order = str(r.get("order") or r.get("rank") or "—")
-        name = r.get("name") or "—"
-        state_val = r.get("state") or "—"
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        state_val = cfg.get("state") or "—"
         state_str = (
             f"[green]{state_val}[/green]" if state_val == "ENABLED"
             else f"[red]{state_val}[/red]" if state_val == "DISABLED"
             else state_val
         )
-        actions = ", ".join(r.get("actions") or []) or "—"
+        actions = ", ".join(cfg.get("actions") or []) or "—"
         if len(actions) > 50:
             actions = actions[:47] + "..."
-        desc = str(r.get("description") or "")[:50]
-        table.add_row(order, name, state_str, actions, desc)
+        desc = str(cfg.get("description") or "")[:50]
+        table.add_row(order, r["name"] or "—", state_str, actions, desc)
 
     from cli.banner import capture_banner
     from cli.scroll_view import render_rich_to_lines, scroll_view
     scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
 
 
-def _view_cloud_app_rule(client, rule_type: str):
-    chosen = _pick_cloud_app_rule(client, rule_type)
+def _pick_cloud_app_rule_db(tenant, rule_type: str):
+    """Pick a cloud app control rule from the DB. Returns row dict or None."""
+    rows = _get_cloud_app_rules_from_db(tenant, rule_type)
+    if not rows:
+        console.print("[yellow]No rules in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+    return questionary.select(
+        "Select rule:",
+        choices=[
+            questionary.Choice(
+                f"{r['name']}  (ID: {r['zia_id']}  order: {r['raw_config'].get('order', '—')})",
+                value=r,
+            )
+            for r in rows
+        ],
+    ).ask()
+
+
+def _view_cloud_app_rule_db(tenant, rule_type: str):
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
     if not chosen:
         return
-    _view_raw_json(f"{rule_type} — {chosen.get('name', '?')}", chosen)
+    _view_raw_json(f"{rule_type} — {chosen['name']}", chosen["raw_config"])
 
 
 def _create_cloud_app_rule(client, tenant, rule_type: str):
@@ -2743,7 +2771,6 @@ def _create_cloud_app_rule(client, tenant, rule_type: str):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    console.print(f"[dim]Creating rule: {config.get('name', '(unnamed)')}[/dim]")
     try:
         result = client.create_cloud_app_rule(rule_type, config)
         console.print(f"[green]✓ Created rule ID {result.get('id', '?')}.[/green]")
@@ -2753,6 +2780,7 @@ def _create_cloud_app_rule(client, tenant, rule_type: str):
             status="SUCCESS", tenant_id=tenant.id,
             resource_type=rule_type, details={"name": config.get("name")},
         )
+        _sync_cloud_app_resource(client, tenant)
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
@@ -2761,11 +2789,11 @@ def _create_cloud_app_rule(client, tenant, rule_type: str):
 def _edit_cloud_app_rule(client, tenant, rule_type: str):
     import json
     from services import audit_service
-    chosen = _pick_cloud_app_rule(client, rule_type)
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
     if not chosen:
         return
 
-    _view_raw_json(f"Current — {chosen.get('name', '?')}", chosen)
+    _view_raw_json(f"Current — {chosen['name']}", chosen["raw_config"])
 
     path = questionary.text("Path to JSON file with updated config:").ask()
     if not path:
@@ -2778,16 +2806,16 @@ def _edit_cloud_app_rule(client, tenant, rule_type: str):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rule_id = str(chosen.get("id", ""))
     try:
-        client.update_cloud_app_rule(rule_type, rule_id, config)
-        console.print(f"[green]✓ Rule updated.[/green]")
+        client.update_cloud_app_rule(rule_type, chosen["zia_id"], config)
+        console.print("[green]✓ Rule updated.[/green]")
         console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
         audit_service.log(
             product="ZIA", operation="update_cloud_app_rule", action="UPDATE",
             status="SUCCESS", tenant_id=tenant.id,
-            resource_type=rule_type, details={"id": rule_id, "name": chosen.get("name")},
+            resource_type=rule_type, details={"id": chosen["zia_id"], "name": chosen["name"]},
         )
+        _sync_cloud_app_resource(client, tenant)
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
@@ -2795,27 +2823,27 @@ def _edit_cloud_app_rule(client, tenant, rule_type: str):
 
 def _duplicate_cloud_app_rule(client, tenant, rule_type: str):
     from services import audit_service
-    chosen = _pick_cloud_app_rule(client, rule_type)
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
     if not chosen:
         return
 
     new_name = questionary.text(
         "Name for duplicate rule:",
-        default=f"Copy of {chosen.get('name', '')}",
+        default=f"Copy of {chosen['name']}",
     ).ask()
     if not new_name:
         return
 
-    rule_id = str(chosen.get("id", ""))
     try:
-        result = client.duplicate_cloud_app_rule(rule_type, rule_id, new_name)
+        result = client.duplicate_cloud_app_rule(rule_type, chosen["zia_id"], new_name)
         console.print(f"[green]✓ Duplicated as '{new_name}' (ID {result.get('id', '?')}).[/green]")
         console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
         audit_service.log(
             product="ZIA", operation="duplicate_cloud_app_rule", action="CREATE",
             status="SUCCESS", tenant_id=tenant.id,
-            resource_type=rule_type, details={"source_id": rule_id, "new_name": new_name},
+            resource_type=rule_type, details={"source_id": chosen["zia_id"], "new_name": new_name},
         )
+        _sync_cloud_app_resource(client, tenant)
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
@@ -2823,27 +2851,27 @@ def _duplicate_cloud_app_rule(client, tenant, rule_type: str):
 
 def _delete_cloud_app_rule(client, tenant, rule_type: str):
     from services import audit_service
-    chosen = _pick_cloud_app_rule(client, rule_type)
+    chosen = _pick_cloud_app_rule_db(tenant, rule_type)
     if not chosen:
         return
 
     confirmed = questionary.confirm(
-        f"Delete rule '{chosen.get('name', '?')}' (ID: {chosen.get('id', '?')})? This cannot be undone.",
+        f"Delete rule '{chosen['name']}' (ID: {chosen['zia_id']})? This cannot be undone.",
         default=False,
     ).ask()
     if not confirmed:
         return
 
-    rule_id = str(chosen.get("id", ""))
     try:
-        client.delete_cloud_app_rule(rule_type, rule_id)
-        console.print(f"[green]✓ Rule deleted.[/green]")
+        client.delete_cloud_app_rule(rule_type, chosen["zia_id"])
+        console.print("[green]✓ Rule deleted.[/green]")
         console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
         audit_service.log(
             product="ZIA", operation="delete_cloud_app_rule", action="DELETE",
             status="SUCCESS", tenant_id=tenant.id,
-            resource_type=rule_type, details={"id": rule_id, "name": chosen.get("name")},
+            resource_type=rule_type, details={"id": chosen["zia_id"], "name": chosen["name"]},
         )
+        _sync_cloud_app_resource(client, tenant)
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()

@@ -398,6 +398,20 @@ class ZIAClient:
     # Cloud App Control
     # ------------------------------------------------------------------
 
+    def list_all_cloud_app_rules(self) -> List[Dict]:
+        """Fetch rules for every rule type and return combined list (for import)."""
+        try:
+            type_map = self.get_cloud_app_rule_types()
+        except Exception:
+            return []
+        all_rules: List[Dict] = []
+        for rule_type in type_map.keys():
+            try:
+                all_rules.extend(self.list_cloud_app_rules(rule_type))
+            except Exception:
+                pass
+        return all_rules
+
     def get_cloud_app_rule_types(self) -> Dict:
         result, resp, err = self._sdk.zia.cloudappcontrol.get_rule_type_mapping()
         return _to_dict(_unwrap(result, resp, err))

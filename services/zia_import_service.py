@@ -58,6 +58,9 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("user",                  "list_users"),
     ResourceDef("dlp_engine",            "list_dlp_engines"),
     ResourceDef("dlp_dictionary",        "list_dlp_dictionaries"),
+    ResourceDef("cloud_app_policy",      "list_cloud_app_policy",     id_field="app",  name_field="app_name"),
+    ResourceDef("cloud_app_ssl_policy",  "list_cloud_app_ssl_policy", id_field="app",  name_field="app_name"),
+    ResourceDef("cloud_app_control_rule","list_all_cloud_app_rules",  id_field="id",   name_field="name"),
     ResourceDef("allowlist",             "list_allowlist",      id_field="id", name_field="name"),
     ResourceDef("denylist",              "list_denylist",       id_field="id", name_field="name"),
 ]
