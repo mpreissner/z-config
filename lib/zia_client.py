@@ -87,8 +87,10 @@ class ZIAClient:
         return _to_dict(_unwrap(result, resp, err))
 
     def url_lookup(self, urls: List[str]) -> List[Dict]:
-        result, resp, err = self._sdk.zia.url_categories.lookup(urls)
-        return _to_dicts(_unwrap(result, resp, err))
+        result, err = self._sdk.zia.url_categories.lookup(urls)
+        if err:
+            raise RuntimeError(err)
+        return _to_dicts(result or [])
 
     # ------------------------------------------------------------------
     # URL Filtering Policies
