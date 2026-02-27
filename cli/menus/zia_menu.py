@@ -163,7 +163,13 @@ def _url_lookup(client, tenant):
             results = service.url_lookup(urls)
         except Exception as e:
             console.print(f"[red]✗ {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
             return
+
+    if not results:
+        console.print("[yellow]No categorisation results returned.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
 
     table = Table(title="URL Lookup Results", show_lines=False)
     table.add_column("URL")
