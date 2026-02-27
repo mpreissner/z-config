@@ -398,14 +398,21 @@ class ZIAClient:
     # Cloud App Control
     # ------------------------------------------------------------------
 
+    # SDK's form_response_body mangles UPPER_SNAKE keys via pydash.camel_case
+    # (e.g. AI_ML → aiMl), so get_rule_type_mapping() can't be used to drive
+    # the import loop.  Use the canonical type list from the SDK docs instead.
+    _CLOUD_APP_RULE_TYPES: List[str] = [
+        "AI_ML", "BUSINESS_PRODUCTIVITY", "CONSUMER", "DNS_OVER_HTTPS",
+        "ENTERPRISE_COLLABORATION", "FILE_SHARE", "FINANCE", "HEALTH_CARE",
+        "HOSTING_PROVIDER", "HUMAN_RESOURCES", "INSTANT_MESSAGING", "IT_SERVICES",
+        "LEGAL", "SALES_AND_MARKETING", "SOCIAL_NETWORKING", "STREAMING_MEDIA",
+        "SYSTEM_AND_DEVELOPMENT", "WEBMAIL",
+    ]
+
     def list_all_cloud_app_rules(self) -> List[Dict]:
         """Fetch rules for every rule type and return combined list (for import)."""
-        try:
-            type_map = self.get_cloud_app_rule_types()
-        except Exception:
-            return []
         all_rules: List[Dict] = []
-        for rule_type in type_map.keys():
+        for rule_type in self._CLOUD_APP_RULE_TYPES:
             try:
                 all_rules.extend(self.list_cloud_app_rules(rule_type))
             except Exception:
