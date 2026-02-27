@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.6.1] - 2026-02-27
+
+### Fixed
+- **ZIA — DLP Engines / Dictionaries list**: rows were sorted alphabetically by name; now sorted numerically by ZIA ID
+- **ZCC Entitlements / ZDX — 401 Unauthorized**: direct-HTTP token requests (`_get_token`) were missing the `audience: https://api.zscaler.com` body parameter required by the Zscaler OneAPI token endpoint; the Postman collection's collection-level OAuth2 config reveals this as mandatory. Added to `lib/zcc_client.py` and `lib/zdx_client.py`.
+
+---
+
 ## [0.6.0] - 2026-02-27
 
 ### Added

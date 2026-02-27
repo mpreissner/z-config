@@ -11,7 +11,7 @@ from rich.text import Text
 
 console = Console()
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 # Generate the logo once at import time using pyfiglet (slant font).
 # Falls back to the hand-drawn art if pyfiglet isn't installed.

@@ -1947,13 +1947,13 @@ def _list_dlp_engines(tenant, search: str = None):
         resources = (
             session.query(ZIAResource)
             .filter_by(tenant_id=tenant.id, resource_type="dlp_engine", is_deleted=False)
-            .order_by(ZIAResource.name)
             .all()
         )
         rows = [
             {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}, "synced_at": r.synced_at}
             for r in resources
         ]
+    rows.sort(key=lambda r: int(r["zia_id"]) if r["zia_id"].isdigit() else float("inf"))
 
     if search:
         search_lower = search.lower()
@@ -2168,13 +2168,13 @@ def _list_dlp_dictionaries(tenant, search: str = None):
         resources = (
             session.query(ZIAResource)
             .filter_by(tenant_id=tenant.id, resource_type="dlp_dictionary", is_deleted=False)
-            .order_by(ZIAResource.name)
             .all()
         )
         rows = [
             {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}, "synced_at": r.synced_at}
             for r in resources
         ]
+    rows.sort(key=lambda r: int(r["zia_id"]) if r["zia_id"].isdigit() else float("inf"))
 
     if search:
         search_lower = search.lower()

@@ -34,6 +34,7 @@ class ZDXClient:
                 "grant_type": "client_credentials",
                 "client_id": self.auth.client_id,
                 "client_secret": self.auth.client_secret,
+                "audience": "https://api.zscaler.com",
             },
             timeout=15,
         )
