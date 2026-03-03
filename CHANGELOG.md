@@ -4,6 +4,120 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.8.1] - 2026-03-02
+
+### Added
+
+#### Credential verification on tenant add and switch
+- `ZscalerAuth.get_token()` — direct OAuth2 `client_credentials` POST to
+  `{zidentity_base_url}/oauth2/v1/token`; raises on failure (also fixes a latent
+  bug where `conf_writer.test_credentials` called this method before it existed)
+- **Add Tenant**: immediately tests credentials after saving; shows ✓ on success
+  or ✗ with a pointer to Settings → Edit Tenant on failure (tenant is saved either way)
+- **Switch Tenant**: verifies token with a spinner before activating the session;
+  on failure offers three options — Edit credentials / Switch anyway / Cancel
+- **Settings → Edit Tenant** (new): pick a tenant, edit vanity subdomain, client ID,
+  and/or client secret (blank = keep existing); live token test before saving;
+  "Save anyway?" offered if test fails
+
+---
+
+## [0.8.0] - 2026-02-27
+
+### Fixed
+
+#### ZIA — Apply Baseline: skip `ZSCALER_PROXY_NW_SERVICES`
+- Added `SKIP_NAMED` constant — a per-type dict of resource names that are system-managed
+  but lack a `predefined:true` flag in their API response (e.g. `ZSCALER_PROXY_NW_SERVICES`
+  returns a 403 `EDIT_INTERNAL_DATA_NOT_ALLOWED` on any write attempt)
+- `_is_predefined()` now checks `SKIP_NAMED` in addition to the `predefined` boolean and
+  the `url_category` type-field heuristics; these resources are silently skipped during
+  classification and never queued for push
+
+### Changed
+
+#### ZIA — Apply Baseline: dry-run comparison before push
+- `classify_baseline()` is now a standalone phase: runs a full import of the target tenant
+  and classifies each baseline entry as **create / update / skip** — no API writes
+- `push_classified()` accepts the `DryRunResult` returned by `classify_baseline()` and
+  executes the actual multi-pass push
+- `apply_baseline_menu()` now shows a **Comparison Result** table after classification
+  (type | Create | Update | Skip) plus a per-resource list of pending creates and updates
+  (capped at 30 each), then asks for confirmation before issuing any API calls
+- If the target is already in sync (0 creates, 0 updates), the user is informed and the
+  menu returns without making any API calls
+
+#### ZIA — Apply Baseline: delta-only push strategy
+- Before pushing anything, a full ZIA import is now run against the target tenant
+  to capture its current state
+- Each baseline entry is compared (after stripping read-only fields such as
+  `id`, `lastModifiedTime`, etc.) to the freshly imported record:
+  - **Identical** → skipped; no API call made
+  - **Changed** → updated directly using the known target ID
+  - **Not found** → created
+- Eliminates redundant pushes of unchanged resources (e.g. all 110 predefined
+  URL categories that exist in every tenant were previously pushed and 409'd on
+  every run)
+- `SKIP_IF_PREDEFINED` covers `url_category`, `dlp_engine`, `dlp_dictionary`,
+  `network_service` — predefined resources in these types are always skipped
+  regardless of content; Zscaler manages their lifecycle independently
+- Push classification is now done upfront; `_push_one` no longer uses speculative
+  create → 409 → name-lookup for known resources (409 fallback kept as safety net
+  for edge cases where the import snapshot is stale)
+- Menu prompt updated: "Import target state + push deltas" — shows import progress
+  (`Syncing: <type> N/M`) followed by push progress (`[Pass N] <type> — <name>`)
+  in a single combined status display
+
+### Added
+
+#### ZIA — Import Gaps Filled (27 → 35 resource types)
+- `dlp_web_rule` — DLP Web Rules via `zia.dlp_web_rules.list_rules()`
+- `nat_control_rule` — NAT Control Policy via `zia.nat_control_policy.list_rules()`
+- `bandwidth_class` — Bandwidth Classes via `zia.bandwidth_classes.list_classes()`
+- `bandwidth_control_rule` — Bandwidth Control Rules via `zia.bandwidth_control_rules.list_rules()`
+- `traffic_capture_rule` — Traffic Capture Rules via `zia.traffic_capture.list_rules()`
+- `workload_group` — Workload Groups via `zia.workload_groups.list_groups()`
+- `network_app` — Network Apps (read-only) via `zia.cloud_firewall.list_network_apps()`
+- `network_app_group` — Network App Groups via `zia.cloud_firewall.list_network_app_groups()`
+
+#### ZIA — DLP Web Rules submenu
+- New **DLP Web Rules** entry under the `── DLP ──` section
+- Submenu: List All (ordered by policy order), Search by Name, View Details (JSON scroll view)
+
+#### ZIA — Apply Baseline from JSON (Push)
+- New `── Baseline ──` section in the ZIA menu with **Apply Baseline from JSON**
+- Reads a ZIA snapshot export JSON (must have `product: "ZIA"` and `resources` key)
+- Shows a summary table (resource type | count) before pushing
+- Runs ordered passes with retry until the error set stabilises
+- On HTTP 409: looks up existing resource by name in the target env and updates it
+- ID remapping: as objects are created/located, a `source_id → target_id` table is
+  built and applied to all subsequent payloads, handling cross-environment references
+- Push order: rule_label → time_interval → workload_group → bandwidth_class → URL/firewall
+  objects → locations → all rule types → allowlist/denylist
+- Skips env-specific types: `user`, `group`, `department`, `admin_user`, `admin_role`,
+  `location_group`, `network_app`, `cloud_app_policy`, `cloud_app_ssl_policy`
+- Skips predefined/system resources within `dlp_engine`, `dlp_dictionary`,
+  `url_category`, `network_service`
+- Allowlist/denylist: merge only (add entries, never replace existing list)
+- Final results table: type | created | updated | skipped | failed
+- Failure detail list for any resources that could not be pushed
+- Prompts to activate ZIA changes if anything was created or updated
+
+#### ZIA Client — write methods (~40 new)
+New `create_*` / `update_*` / `delete_*` methods for: `rule_label`, `time_interval`,
+`location`, `url_filtering_rule`, `firewall_rule`, `firewall_dns_rule`, `firewall_ips_rule`,
+`ssl_inspection_rule`, `forwarding_rule`, `ip_destination_group`, `ip_source_group`,
+`network_service`, `network_svc_group`, `network_app_group`, `dlp_web_rule`,
+`nat_control_rule`, `bandwidth_class`, `bandwidth_control_rule`, `traffic_capture_rule`,
+`workload_group`
+
+#### New file: `services/zia_push_service.py`
+- `ZIAPushService` — push engine with multi-pass retry, ID remapping, and per-record reporting
+- `PushRecord` dataclass — tracks per-resource outcome (created / updated / skipped / failed)
+- `PUSH_ORDER`, `SKIP_TYPES`, `SKIP_IF_PREDEFINED`, `READONLY_FIELDS` constants
+
+---
+
 ## [0.7.0] - 2026-02-27
 
 ### Added

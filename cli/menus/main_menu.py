@@ -62,10 +62,20 @@ def main_menu():
             break
 
 
+def _test_token(zidentity_url: str, client_id: str, client_secret: str):
+    """Return (True, None) on success or (False, error_str) on failure."""
+    from lib.auth import ZscalerAuth
+    try:
+        ZscalerAuth(zidentity_url, client_id, client_secret).get_token()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def _switch_tenant():
     from cli.menus import select_tenant
     from cli.session import set_active_tenant
-    from services.config_service import list_tenants
+    from services.config_service import decrypt_secret, list_tenants
 
     if not list_tenants():
         console.print("[yellow]No tenants configured yet.[/yellow]")
@@ -74,10 +84,36 @@ def _switch_tenant():
         return
 
     tenant = select_tenant()
-    if tenant:
+    if not tenant:
+        return
+
+    with console.status(f"[cyan]Verifying credentials for {tenant.name}...[/cyan]"):
+        ok, err = _test_token(
+            tenant.zidentity_base_url,
+            tenant.client_id,
+            decrypt_secret(tenant.client_secret_enc),
+        )
+
+    if ok:
         set_active_tenant(tenant)
         console.print(f"[green]✓ Active tenant: [bold]{tenant.name}[/bold][/green]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
+    else:
+        console.print(f"[red]✗ Token failed for {tenant.name}:[/red] {err}")
+        action = questionary.select(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("Edit credentials", value="edit"),
+                questionary.Choice("Switch anyway (credentials may be transient issue)", value="force"),
+                questionary.Choice("Cancel", value="cancel"),
+            ],
+        ).ask()
+        if action == "edit":
+            _edit_tenant_credentials(tenant.name)
+        elif action == "force":
+            set_active_tenant(tenant)
+            console.print(f"[yellow]⚠ Active tenant set to [bold]{tenant.name}[/bold] (token unverified)[/yellow]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 # ------------------------------------------------------------------
@@ -91,6 +127,7 @@ def settings_menu():
             "Settings",
             choices=[
                 questionary.Choice("Add Tenant", value="add"),
+                questionary.Choice("Edit Tenant", value="edit"),
                 questionary.Choice("List Tenants", value="list"),
                 questionary.Choice("Remove Tenant", value="remove"),
                 questionary.Separator(),
@@ -102,6 +139,8 @@ def settings_menu():
 
         if choice == "add":
             _add_tenant()
+        elif choice == "edit":
+            _pick_and_edit_tenant()
         elif choice == "list":
             _list_tenants()
         elif choice == "remove":
@@ -154,7 +193,92 @@ def _add_tenant():
         console.print(f"[green]✓ Tenant '[bold]{name}[/bold]' added.[/green]")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
 
+    with console.status("[cyan]Verifying credentials...[/cyan]"):
+        ok, err = _test_token(zidentity_url, client_id, client_secret)
+
+    if ok:
+        console.print("[green]✓ Token obtained — credentials verified.[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+    else:
+        console.print(f"[red]✗ Token failed:[/red] {err}")
+        console.print("[dim]Tenant was saved. You can edit credentials from Settings → Edit Tenant.[/dim]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _pick_and_edit_tenant():
+    from services.config_service import list_tenants
+
+    tenants = list_tenants()
+    if not tenants:
+        console.print("[yellow]No tenants configured.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    tenant = questionary.select(
+        "Select tenant to edit:",
+        choices=[questionary.Choice(t.name, value=t) for t in tenants],
+    ).ask()
+    if tenant:
+        _edit_tenant_credentials(tenant.name)
+
+
+def _edit_tenant_credentials(tenant_name: str):
+    from services.config_service import decrypt_secret, get_tenant, update_tenant
+
+    tenant = get_tenant(tenant_name)
+    if not tenant:
+        console.print(f"[red]Tenant '{tenant_name}' not found.[/red]")
+        return
+
+    current_subdomain = tenant.zidentity_base_url.split("//")[-1].split(".")[0]
+
+    console.print(f"\n[bold]Edit Credentials — {tenant.name}[/bold]")
+    console.print(f"  [dim]Current ZIdentity URL: {tenant.zidentity_base_url}[/dim]")
+    console.print(f"  [dim]Current Client ID:     {tenant.client_id}[/dim]")
+    console.print("[dim]Press Enter to keep the current value for each field.[/dim]\n")
+
+    subdomain = questionary.text(
+        "Vanity subdomain:",
+        default=current_subdomain,
+    ).ask()
+    if subdomain is None:
+        return
+    subdomain = subdomain.strip().lower() or current_subdomain
+    zidentity_url = f"https://{subdomain}.zslogin.net"
+
+    client_id = questionary.text("Client ID:", default=tenant.client_id).ask()
+    if client_id is None:
+        return
+    client_id = client_id.strip() or tenant.client_id
+
+    client_secret = questionary.password(
+        "Client Secret (leave blank to keep existing):"
+    ).ask()
+    if client_secret is None:
+        return
+
+    test_secret = client_secret if client_secret else decrypt_secret(tenant.client_secret_enc)
+
+    with console.status("[cyan]Verifying credentials...[/cyan]"):
+        ok, err = _test_token(zidentity_url, client_id, test_secret)
+
+    if ok:
+        console.print("[green]✓ Token obtained — credentials verified.[/green]")
+    else:
+        console.print(f"[red]✗ Token failed:[/red] {err}")
+        if not questionary.confirm("Save credentials anyway?", default=False).ask():
+            return
+
+    update_tenant(
+        name=tenant_name,
+        zidentity_base_url=zidentity_url,
+        client_id=client_id,
+        client_secret=client_secret if client_secret else None,
+    )
+    console.print(f"[green]✓ Credentials updated for '[bold]{tenant_name}[/bold]'.[/green]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 

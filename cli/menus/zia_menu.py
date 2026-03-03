@@ -34,9 +34,12 @@ def zia_menu():
                 questionary.Separator("── DLP ──"),
                 questionary.Choice("DLP Engines", value="dlp_engines"),
                 questionary.Choice("DLP Dictionaries", value="dlp_dictionaries"),
+                questionary.Choice("DLP Web Rules", value="dlp_web_rules"),
                 questionary.Separator("── Cloud Apps ──"),
                 questionary.Choice("Cloud Applications", value="cloud_applications"),
                 questionary.Choice("Cloud App Control", value="cloud_app_control"),
+                questionary.Separator("── Baseline ──"),
+                questionary.Choice("Apply Baseline from JSON", value="apply_baseline"),
                 questionary.Separator(),
                 questionary.Choice("Activation", value="activation"),
                 questionary.Choice("Import Config", value="import"),
@@ -69,6 +72,8 @@ def zia_menu():
             dlp_engines_menu(client, tenant)
         elif choice == "dlp_dictionaries":
             dlp_dictionaries_menu(client, tenant)
+        elif choice == "dlp_web_rules":
+            dlp_web_rules_menu(client, tenant)
         elif choice == "cloud_applications":
             cloud_applications_menu(client, tenant)
         elif choice == "cloud_app_control":
@@ -79,6 +84,8 @@ def zia_menu():
             _import_zia_config(client, tenant)
         elif choice == "snapshots":
             snapshots_menu(tenant, "ZIA")
+        elif choice == "apply_baseline":
+            apply_baseline_menu(client, tenant)
         elif choice == "reset_na":
             _reset_zia_na_resources(client, tenant)
         elif choice in ("back", None):
@@ -2492,6 +2499,133 @@ def _delete_dlp_dictionary(client, tenant):
 
 
 # ------------------------------------------------------------------
+# DLP Web Rules (read-only view)
+# ------------------------------------------------------------------
+
+def dlp_web_rules_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "DLP Web Rules",
+            choices=[
+                questionary.Choice("List All", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("View Details", value="view"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_dlp_web_rules(tenant)
+        elif choice == "search":
+            _search_dlp_web_rules(tenant)
+        elif choice == "view":
+            _view_dlp_web_rule(tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_dlp_web_rules(tenant, search: str = None):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="dlp_web_rule", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}, "synced_at": r.synced_at}
+            for r in resources
+        ]
+    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+
+    if search:
+        search_lower = search.lower()
+        rows = [r for r in rows if search_lower in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No DLP web rules matching '{search}'.[/yellow]" if search
+            else "[yellow]No DLP web rules in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"DLP Web Rules ({len(rows)} total)", show_lines=False)
+    table.add_column("Order", justify="right")
+    table.add_column("Name")
+    table.add_column("Action")
+    table.add_column("State")
+    table.add_column("Last Synced", style="dim")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        order = str(cfg.get("order") or cfg.get("rank") or "—")
+        action = str(cfg.get("action") or "—")
+        state_val = cfg.get("state") or "—"
+        state_str = (
+            f"[green]{state_val}[/green]" if state_val == "ENABLED"
+            else f"[red]{state_val}[/red]" if state_val == "DISABLED"
+            else state_val
+        )
+        synced = r["synced_at"].strftime("%Y-%m-%d %H:%M") if r["synced_at"] else "—"
+        table.add_row(order, r["name"] or "—", action, state_str, synced)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_dlp_web_rules(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_dlp_web_rules(tenant, search=search.strip())
+
+
+def _pick_dlp_web_rule(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="dlp_web_rule", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print("[yellow]No DLP web rules in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+
+    return questionary.select(
+        "Select DLP web rule:",
+        choices=[
+            questionary.Choice(f"{r['name']} (ID: {r['zia_id']})", value=r)
+            for r in rows
+        ],
+    ).ask()
+
+
+def _view_dlp_web_rule(tenant):
+    chosen = _pick_dlp_web_rule(tenant)
+    if not chosen:
+        return
+    _view_raw_json(f"DLP Web Rule — {chosen['name']}", chosen["raw_config"])
+
+
+# ------------------------------------------------------------------
 # Cloud Applications
 # ------------------------------------------------------------------
 
@@ -2874,4 +3008,199 @@ def _delete_cloud_app_rule(client, tenant, rule_type: str):
         _sync_cloud_app_resource(client, tenant)
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Apply Baseline from JSON
+# ------------------------------------------------------------------
+
+def apply_baseline_menu(client, tenant):
+    import json
+    from collections import defaultdict
+    from services.zia_push_service import SKIP_TYPES, ZIAPushService
+
+    render_banner()
+    console.print("\n[bold]Apply Baseline from JSON[/bold]")
+    console.print("[dim]Reads a ZIA snapshot export file and pushes only deltas to the live tenant.[/dim]\n")
+
+    path = questionary.text("Path to baseline JSON file:").ask()
+    if not path:
+        return
+
+    try:
+        with open(path.strip()) as fh:
+            baseline = json.load(fh)
+    except Exception as e:
+        console.print(f"[red]✗ Could not read file: {e}[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    if baseline.get("product") != "ZIA":
+        console.print("[red]✗ Invalid baseline file — 'product' must be 'ZIA'.[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    resources = baseline.get("resources")
+    if not resources:
+        console.print("[red]✗ Baseline file has no 'resources' key.[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    # ── Step 1: show what's in the file ───────────────────────────────────
+    file_table = Table(title="Baseline File Contents", show_lines=False)
+    file_table.add_column("Resource Type")
+    file_table.add_column("In File", justify="right")
+    pushable_types = 0
+    for rtype, entries in sorted(resources.items()):
+        count = len(entries) if isinstance(entries, list) else 1
+        skipped_note = "  [dim](env-specific, skipped)[/dim]" if rtype in SKIP_TYPES else ""
+        file_table.add_row(rtype + skipped_note, str(count))
+        if rtype not in SKIP_TYPES:
+            pushable_types += 1
+    console.print(file_table)
+
+    confirmed = questionary.confirm(
+        f"Compare {pushable_types} resource types against current state of {tenant.name}?",
+        default=True,
+    ).ask()
+    if not confirmed:
+        return
+
+    # ── Step 2: import + classify (dry run) ───────────────────────────────
+    service = ZIAPushService(client, tenant_id=tenant.id)
+    console.print()
+
+    with console.status(f"[cyan]Syncing current state from {tenant.name}...[/cyan]") as status:
+        def _import_progress(rtype, done, total):
+            status.update(f"[cyan]Comparing: {rtype} ({done}/{total})[/cyan]")
+
+        dry_run = service.classify_baseline(baseline, import_progress_callback=_import_progress)
+
+    creates, updates = dry_run.changes_by_action()
+    total_changes = len(creates) + len(updates)
+
+    # ── Step 3: show dry-run summary ──────────────────────────────────────
+    console.print()
+    summary = dry_run.type_summary()
+    delta_table = Table(title="Comparison Result (dry run)", show_lines=False)
+    delta_table.add_column("Resource Type")
+    delta_table.add_column("Create", justify="right", style="green")
+    delta_table.add_column("Update", justify="right", style="cyan")
+    delta_table.add_column("Skip", justify="right", style="dim")
+    for rtype in sorted(summary):
+        counts = summary[rtype]
+        delta_table.add_row(
+            rtype,
+            str(counts["create"]) if counts["create"] else "—",
+            str(counts["update"]) if counts["update"] else "—",
+            str(counts["skip"])   if counts["skip"]   else "—",
+        )
+    console.print(delta_table)
+
+    if total_changes == 0:
+        console.print("\n[green]✓ Nothing to push — target is already in sync with the baseline.[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    # Show per-resource detail for creates and updates (cap at 30 each)
+    _MAX_DETAIL = 30
+    if creates:
+        console.print(f"\n[green]To create ({len(creates)}):[/green]")
+        for rtype, name in creates[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(creates) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(creates) - _MAX_DETAIL} more[/dim]")
+
+    if updates:
+        console.print(f"\n[cyan]To update ({len(updates)}):[/cyan]")
+        for rtype, name in updates[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(updates) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(updates) - _MAX_DETAIL} more[/dim]")
+
+    console.print()
+    confirmed = questionary.confirm(
+        f"Push {len(creates)} create(s) and {len(updates)} update(s) to {tenant.name}?",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    # ── Step 4: push the delta ────────────────────────────────────────────
+    push_records = []
+    current_pass = [0]
+
+    console.print()
+    with console.status("[cyan]Pushing...[/cyan]") as status:
+        def _push_progress(pass_num, rtype, rec):
+            if pass_num != current_pass[0]:
+                current_pass[0] = pass_num
+            status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+
+        push_records = service.push_classified(dry_run, progress_callback=_push_progress)
+
+    all_records = dry_run.skipped + push_records
+    created  = sum(1 for r in push_records if r.is_created)
+    updated  = sum(1 for r in push_records if r.is_updated)
+    skipped  = sum(1 for r in all_records  if r.is_skipped)
+    failed   = sum(1 for r in push_records if r.is_failed)
+    passes   = current_pass[0] or 1
+
+    console.print(f"\n[bold]Push complete[/bold] — {passes} pass(es)")
+    console.print(f"  [green]Created:[/green]  {created}")
+    console.print(f"  [cyan]Updated:[/cyan]  {updated}")
+    console.print(f"  [dim]Skipped:[/dim]  {skipped}")
+    console.print(f"  [red]Failed:[/red]   {failed}")
+
+    # Results table by type (push records only — skips are uninteresting here)
+    if push_records:
+        by_type = defaultdict(lambda: {"created": 0, "updated": 0, "failed": 0})
+        for r in push_records:
+            if r.is_created:
+                by_type[r.resource_type]["created"] += 1
+            elif r.is_updated:
+                by_type[r.resource_type]["updated"] += 1
+            elif r.is_failed:
+                by_type[r.resource_type]["failed"] += 1
+
+        results_table = Table(title="Push Results by Type", show_lines=False)
+        results_table.add_column("Resource Type")
+        results_table.add_column("Created", justify="right", style="green")
+        results_table.add_column("Updated", justify="right", style="cyan")
+        results_table.add_column("Failed",  justify="right", style="red")
+        for rtype, counts in sorted(by_type.items()):
+            results_table.add_row(
+                rtype,
+                str(counts["created"]) if counts["created"] else "—",
+                str(counts["updated"]) if counts["updated"] else "—",
+                str(counts["failed"])  if counts["failed"]  else "—",
+            )
+        console.print(results_table)
+
+    # Failure detail
+    failures = [r for r in push_records if r.is_failed]
+    if failures:
+        console.print("\n[bold red]Failures:[/bold red]")
+        fail_table = Table(show_lines=False)
+        fail_table.add_column("Type")
+        fail_table.add_column("Name")
+        fail_table.add_column("Reason")
+        for r in failures:
+            fail_table.add_row(r.resource_type, r.name, r.failure_reason[:80])
+        console.print(fail_table)
+
+    # Offer activation
+    if created > 0 or updated > 0:
+        activate_now = questionary.confirm(
+            "Activate changes in ZIA now?", default=True
+        ).ask()
+        if activate_now:
+            try:
+                result = client.activate()
+                state = result.get("status", "UNKNOWN") if result else "UNKNOWN"
+                console.print(f"[green]✓ Activated — status: {state}[/green]")
+            except Exception as e:
+                console.print(f"[red]✗ Activation failed: {e}[/red]")
+
     questionary.press_any_key_to_continue("Press any key to continue...").ask()

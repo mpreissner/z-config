@@ -447,3 +447,319 @@ class ZIAClient:
     def duplicate_cloud_app_rule(self, rule_type: str, rule_id: str, name: str) -> Dict:
         result, resp, err = self._sdk.zia.cloudappcontrol.add_duplicate_rule(rule_type, rule_id, name)
         return _to_dict(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # DLP Web Rules
+    # ------------------------------------------------------------------
+
+    def list_dlp_web_rules(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.dlp_web_rules.list_rules()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_dlp_web_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_web_rules.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_dlp_web_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.dlp_web_rules.update_rule(rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_dlp_web_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.dlp_web_rules.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # NAT Control Policy
+    # ------------------------------------------------------------------
+
+    def list_nat_control_rules(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.nat_control_policy.list_rules()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_nat_control_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.nat_control_policy.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_nat_control_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.nat_control_policy.update_rule(rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_nat_control_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.nat_control_policy.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Bandwidth Classes
+    # ------------------------------------------------------------------
+
+    def list_bandwidth_classes(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.bandwidth_classes.list_classes()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_bandwidth_class(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.bandwidth_classes.add_class(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_bandwidth_class(self, class_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.bandwidth_classes.update_class(class_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_bandwidth_class(self, class_id: str) -> None:
+        result, resp, err = self._sdk.zia.bandwidth_classes.delete_class(class_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Bandwidth Control Rules
+    # ------------------------------------------------------------------
+
+    def list_bandwidth_control_rules(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.bandwidth_control_rules.list_rules()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_bandwidth_control_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.bandwidth_control_rules.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_bandwidth_control_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.bandwidth_control_rules.update_rule(rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Traffic Capture Rules
+    # ------------------------------------------------------------------
+
+    def list_traffic_capture_rules(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.traffic_capture.list_rules()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_traffic_capture_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.traffic_capture.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_traffic_capture_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.traffic_capture.update_rule(rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Workload Groups
+    # ------------------------------------------------------------------
+
+    def list_workload_groups(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.workload_groups.list_groups()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_workload_group(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.workload_groups.add_group(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_workload_group(self, group_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.workload_groups.update_group(group_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_workload_group(self, group_id: str) -> None:
+        result, resp, err = self._sdk.zia.workload_groups.delete_group(group_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Network Apps (read-only) and Network App Groups
+    # ------------------------------------------------------------------
+
+    def list_network_apps(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.cloud_firewall.list_network_apps()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def list_network_app_groups(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.cloud_firewall.list_network_app_groups()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_network_app_group(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.add_network_app_group(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_network_app_group(self, group_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.update_network_app_group(group_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_network_app_group(self, group_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall.delete_network_app_group(group_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Rule Labels — write methods
+    # ------------------------------------------------------------------
+
+    def create_rule_label(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.rule_labels.add_label(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_rule_label(self, label_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.rule_labels.update_label(label_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_rule_label(self, label_id: str) -> None:
+        result, resp, err = self._sdk.zia.rule_labels.delete_label(label_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Time Intervals — write methods
+    # ------------------------------------------------------------------
+
+    def create_time_interval(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.time_intervals.add_time_interval(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_time_interval(self, interval_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.time_intervals.update_time_interval(interval_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_time_interval(self, interval_id: str) -> None:
+        result, resp, err = self._sdk.zia.time_intervals.delete_time_interval(interval_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # URL Filtering — create/delete (update already exists)
+    # ------------------------------------------------------------------
+
+    def create_url_filtering_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.url_filtering.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_url_filtering_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.url_filtering.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Firewall Rules — create/delete (update already exists)
+    # ------------------------------------------------------------------
+
+    def create_firewall_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall_rules.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_firewall_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall_rules.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Firewall DNS Rules — create/delete (update already exists)
+    # ------------------------------------------------------------------
+
+    def create_firewall_dns_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall_dns.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_firewall_dns_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall_dns.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Firewall IPS Rules — create/update/delete
+    # ------------------------------------------------------------------
+
+    def create_firewall_ips_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall_ips.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_firewall_ips_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall_ips.update_rule(rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_firewall_ips_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall_ips.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # SSL Inspection Rules — create/delete (update already exists)
+    # ------------------------------------------------------------------
+
+    def create_ssl_inspection_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.ssl_inspection_rules.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_ssl_inspection_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.ssl_inspection_rules.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Forwarding Control — create/delete
+    # ------------------------------------------------------------------
+
+    def create_forwarding_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.forwarding_control.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_forwarding_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.forwarding_control.update_rule(rule_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_forwarding_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.forwarding_control.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Firewall Supporting Objects — write methods
+    # ------------------------------------------------------------------
+
+    def create_ip_destination_group(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.add_ip_destination_group(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_ip_destination_group(self, group_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.update_ip_destination_group(group_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_ip_destination_group(self, group_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall.delete_ip_destination_group(group_id)
+        _unwrap(result, resp, err)
+
+    def create_ip_source_group(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.add_ip_source_group(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_ip_source_group(self, group_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.update_ip_source_group(group_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_ip_source_group(self, group_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall.delete_ip_source_group(group_id)
+        _unwrap(result, resp, err)
+
+    def create_network_service(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.add_network_service(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_network_service(self, service_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.update_network_service(service_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_network_service(self, service_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall.delete_network_service(service_id)
+        _unwrap(result, resp, err)
+
+    def create_network_svc_group(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.add_network_svc_group(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_network_svc_group(self, group_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_firewall.update_network_svc_group(group_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_network_svc_group(self, group_id: str) -> None:
+        result, resp, err = self._sdk.zia.cloud_firewall.delete_network_svc_group(group_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Locations — write methods
+    # ------------------------------------------------------------------
+
+    def create_location(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.locations.add_location(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_location(self, location_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.locations.update_location(location_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_location(self, location_id: str) -> None:
+        result, resp, err = self._sdk.zia.locations.delete_location(location_id)
+        _unwrap(result, resp, err)

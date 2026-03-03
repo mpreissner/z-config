@@ -62,7 +62,15 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("cloud_app_ssl_policy",  "list_cloud_app_ssl_policy", id_field="app",  name_field="app_name"),
     ResourceDef("cloud_app_control_rule","list_all_cloud_app_rules",  id_field="id",   name_field="name"),
     ResourceDef("allowlist",             "list_allowlist",      id_field="id", name_field="name"),
-    ResourceDef("denylist",              "list_denylist",       id_field="id", name_field="name"),
+    ResourceDef("denylist",             "list_denylist",       id_field="id", name_field="name"),
+    ResourceDef("dlp_web_rule",          "list_dlp_web_rules"),
+    ResourceDef("nat_control_rule",      "list_nat_control_rules"),
+    ResourceDef("bandwidth_class",       "list_bandwidth_classes"),
+    ResourceDef("bandwidth_control_rule","list_bandwidth_control_rules"),
+    ResourceDef("traffic_capture_rule",  "list_traffic_capture_rules"),
+    ResourceDef("workload_group",        "list_workload_groups"),
+    ResourceDef("network_app",           "list_network_apps"),
+    ResourceDef("network_app_group",     "list_network_app_groups"),
 ]
 
 
