@@ -24,6 +24,7 @@ Automation toolset for Zscaler OneAPI — interactive TUI with a local DB cache 
 - **Config Snapshots** — save, compare (field-level diff), export, and delete point-in-time snapshots for ZPA and ZIA
 - **Audit Log** — immutable record of every operation with local-timezone timestamps
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
+- **Auto-update** — silently checks PyPI on startup; shows changelog for new versions and upgrades in-place via pipx or pip on confirmation
 
 ---
 

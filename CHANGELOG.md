@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.8.2] - 2026-03-04
+
+### Added
+
+#### Auto-update checker
+- On startup (after the banner), zs-config silently checks PyPI for a newer version
+- If an update is available, a yellow panel shows the version delta (`v0.8.1 → v0.8.2`)
+- Relevant CHANGELOG sections are fetched from GitHub and rendered inline so you can review what changed before upgrading
+- A `questionary.confirm` prompt (default: Yes) offers to upgrade immediately using the detected install method (`pipx upgrade zs-config` or `pip install --upgrade zs-config`)
+- If confirmed, the upgrade runs live in the terminal; on success a green panel is shown and the process exits so you re-launch the updated binary
+- If declined or if the upgrade fails, the tool continues normally; a red panel with the manual upgrade command is shown on failure
+- All network requests use a 4-second timeout — startup is unaffected on slow or offline networks
+- New file: `cli/update_checker.py`
+
+---
+
 ## [0.8.1] - 2026-03-02
 
 ### Added
