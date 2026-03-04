@@ -9,7 +9,6 @@ from typing import Optional
 
 import requests
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 
 import questionary
@@ -100,8 +99,8 @@ def check_for_updates() -> None:
     if changelog:
         sections = _extract_changelog_sections(changelog, VERSION, latest)
         if sections:
-            console.print("\n[bold]Changes in this update:[/bold]")
-            console.print(Markdown(sections))
+            from cli.scroll_view import render_rich_to_lines, scroll_view
+            scroll_view(render_rich_to_lines(Markdown(sections)))
 
     method, cmd = _detect_install_method()
     cmd_str = " ".join(str(c) for c in cmd)
