@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.9.0] - 2026-03-04
+
+### Added
+
+#### ZCC — App Profiles (web policies)
+- **App Profiles** added to the `── Configuration ──` section of the ZCC menu
+- **List App Profiles** — table shows Name, ID, Platform (Windows / macOS / iOS / Android / Linux), and Active state; data from local DB after Import Config
+- **Search by Name** — partial name match
+- **View Details** — full JSON scroll view of the stored policy record
+- **Manage Custom Bypass Apps** — select a profile to view its currently assigned bypass app services; add or remove services via checkbox multi-select; change is applied immediately via `web/policy/edit` API and the local DB is refreshed
+- **Activate / Deactivate** — checkbox multi-select across profiles; choose target platform; activates or deactivates each selected profile via `web/policy/activate`
+- **Delete** — select profile, confirm (default No), delete via API, and re-import to refresh DB
+
+#### ZCC — Bypass App Definitions (web app services)
+- **Bypass App Definitions** added to the `── Configuration ──` section of the ZCC menu (renamed from "Custom App Bypasses" to clarify this is a library of available definitions, not what is actively bypassed per profile)
+- **List All** — table shows Name, Type (Zscaler vs Custom), Svc ID, Active, Version; Type is determined by `createdBy` — numeric values indicate Zscaler-managed definitions
+- **Search by Name** — partial name match
+- **View Details** — full JSON scroll view
+
+#### ZCC Import — new resource types
+- `web_app_service` — bypass app service definitions synced via `webAppService/listByCompany`
+- `web_policy` — app profiles synced per platform (Windows / macOS / iOS / Android / Linux) and deduplicated; stored in camelCase (API-native) format for round-trip edit compatibility
+
+#### ZCC Client (`lib/zcc_client.py`)
+- `_to_camel_dict()` — recursive helper that converts SDK `ZscalerObject` instances to camelCase plain dicts using `request_format()`; avoids the `ZscalerCollection.form_list` in-place mutation bug that causes `resp.get_body()` to contain non-JSON-serialisable SDK model objects
+- `list_web_app_services()` — lists bypass app service definitions
+- `list_web_policies()` — fetches policies for all 5 platforms, deduplicates by ID, injects `device_type` for display
+- `edit_web_policy(**kwargs)` — PUT to `web/policy/edit`
+- `activate_web_policy(policy_id, device_type)` — PUT to `web/policy/activate`
+- `delete_web_policy(policy_id)` — DELETE to `web/policy/{id}/delete`
+
+#### ZCC Service (`services/zcc_service.py`)
+- Audit-logged wrappers for all five new client methods above
+
+### Fixed
+
+#### ZCC menu — "← Back" crash in selection prompts
+- `questionary.select` with `value=None` returns the title string in some versions rather than `None`; replaced `if not selected` guards with `if not isinstance(selected, dict)` in all affected detail/delete/manage prompts
+
+---
+
 ## [0.8.5] - 2026-03-04
 
 ### Fixed

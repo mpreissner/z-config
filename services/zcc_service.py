@@ -147,6 +147,88 @@ class ZCCService:
     # Label helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Web App Services (Custom App Bypass definitions)
+    # ------------------------------------------------------------------
+
+    def list_web_app_services(self) -> List[Dict]:
+        result = self.client.list_web_app_services()
+        audit_service.log(
+            product="ZCC",
+            operation="list_web_app_services",
+            action="READ",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="web_app_service",
+            details={"count": len(result)},
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # Web Policies (App Profiles)
+    # ------------------------------------------------------------------
+
+    def list_web_policies(self) -> List[Dict]:
+        result = self.client.list_web_policies()
+        audit_service.log(
+            product="ZCC",
+            operation="list_web_policies",
+            action="READ",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="web_policy",
+            details={"count": len(result)},
+        )
+        return result
+
+    def edit_web_policy(self, **kwargs) -> Dict:
+        result = self.client.edit_web_policy(**kwargs)
+        policy_id = kwargs.get("id") or kwargs.get("policy_id")
+        policy_name = kwargs.get("name", "")
+        audit_service.log(
+            product="ZCC",
+            operation="edit_web_policy",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="web_policy",
+            resource_id=str(policy_id) if policy_id else None,
+            resource_name=policy_name,
+        )
+        return result
+
+    def activate_web_policy(self, policy_id: int, device_type: str, name: str = "") -> Dict:
+        result = self.client.activate_web_policy(policy_id=policy_id, device_type=device_type)
+        audit_service.log(
+            product="ZCC",
+            operation="activate_web_policy",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="web_policy",
+            resource_id=str(policy_id),
+            resource_name=name,
+            details={"device_type": device_type},
+        )
+        return result
+
+    def delete_web_policy(self, policy_id: int, name: str = "") -> None:
+        self.client.delete_web_policy(policy_id=policy_id)
+        audit_service.log(
+            product="ZCC",
+            operation="delete_web_policy",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="web_policy",
+            resource_id=str(policy_id),
+            resource_name=name,
+        )
+
+    # ------------------------------------------------------------------
+    # Label helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def os_label(os_type: int) -> str:
         return OS_TYPE_LABELS.get(os_type, str(os_type))

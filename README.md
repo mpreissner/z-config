@@ -15,8 +15,8 @@ Automation toolset for Zscaler OneAPI — interactive TUI with a local DB cache 
 - **ZIA** — URL Filtering (list/search/enable-disable), URL Categories (list/search/add-remove URLs), Security Policy Settings (allowlist/denylist view and edit), URL Lookup, Firewall Policy (L4 rules, DNS filter rules, IPS rules), SSL Inspection (list/search/enable-disable), Traffic Forwarding (list/search), Locations (list/search), Users (list/search), DLP Engines (full CRUD + JSON import), DLP Dictionaries (full CRUD + JSON/CSV import), DLP Web Rules (list/search/view), Cloud Applications (list/search policy and SSL-policy apps), Cloud App Control (full CRUD by rule type), **Apply Baseline from JSON** (fresh import → delta detection → push only changed/new resources; ID remapping for cross-tenant pushes), Policy Activation
 - **ZIA Config Import** — pull a full snapshot of 35 resource types into a local SQLite cache
 - **ZCC Device Management** — list, search, and view enrolled devices; soft and force remove; OTP lookup; app profile password lookup; CSV exports for devices and service status
-- **ZCC Config Import** — sync devices, trusted networks, forwarding profiles, and admin users into a local SQLite cache
-- **ZCC Configuration** — Trusted Networks (list/search), Forwarding Profiles (list/search), Admin Users (list/search), Entitlements (view and manage ZPA and ZDX group access)
+- **ZCC Config Import** — sync devices, trusted networks, forwarding profiles, admin users, app profiles, and bypass app definitions into a local SQLite cache
+- **ZCC Configuration** — Trusted Networks (list/search), Forwarding Profiles (list/search), Admin Users (list/search), Entitlements (view and manage ZPA and ZDX group access), App Profiles (list/search/view/manage bypass apps/activate/delete), Bypass App Definitions (list/search/view — shows Zscaler-managed vs custom)
 - **ZDX** — Device lookup and health metrics, app performance on device, user lookup, application scores, deep trace management (list/start/view/stop)
 - **ZIdentity User Management** — list and search users; full profile with group membership and service entitlements; reset password, set password, and skip MFA
 - **ZIdentity Group Management** — list and search groups; view members; add and remove users
@@ -360,6 +360,8 @@ Entries are grouped into labeled sections.
 | Forwarding Profiles | List and search forwarding profiles |
 | Admin Users | List and search ZCC admin users |
 | Entitlements | View and manage ZPA and ZDX group access entitlements |
+| App Profiles | List, search, view details, manage bypass apps, activate/deactivate, delete |
+| Bypass App Definitions | List, search, and view bypass app service definitions (Zscaler-managed and custom) |
 
 **Bottom section**
 

@@ -40,6 +40,8 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("trusted_network",    "list_trusted_networks",  name_field="network_name"),
     ResourceDef("forwarding_profile", "list_forwarding_profiles"),
     ResourceDef("admin_user",         "list_admin_users",       name_field="username"),
+    ResourceDef("web_app_service",    "list_web_app_services",  name_field="app_name"),
+    ResourceDef("web_policy",         "list_web_policies",      name_field="name"),
 ]
 
 

@@ -46,6 +46,8 @@ def zcc_menu():
                 questionary.Choice("Forwarding Profiles", value="forwarding_profiles"),
                 questionary.Choice("Admin Users", value="admin_users"),
                 questionary.Choice("Entitlements", value="entitlements"),
+                questionary.Choice("App Profiles", value="app_profiles"),
+                questionary.Choice("Bypass App Definitions", value="custom_bypasses"),
                 questionary.Separator(),
                 questionary.Choice("Export Devices CSV", value="export_devices"),
                 questionary.Choice("Export Service Status CSV", value="export_status"),
@@ -72,6 +74,10 @@ def zcc_menu():
             admin_users_menu(tenant)
         elif choice == "entitlements":
             entitlements_menu(client, tenant)
+        elif choice == "app_profiles":
+            _app_profiles_menu(client, tenant)
+        elif choice == "custom_bypasses":
+            _custom_app_bypasses_menu(tenant)
         elif choice == "export_devices":
             _export_devices(client, tenant)
         elif choice == "export_status":
@@ -1005,4 +1011,515 @@ def _manage_entitlements(client, tenant, product: str):
         )
     except Exception as e:
         console.print(f"[red]✗ Error updating entitlements: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Custom App Bypasses (web_app_service, read-only from DB cache)
+# ------------------------------------------------------------------
+
+def _custom_app_bypasses_menu(tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Bypass App Definitions",
+            choices=[
+                questionary.Choice("List All", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("View Details", value="details"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_web_app_services(tenant)
+        elif choice == "search":
+            _search_web_app_services(tenant)
+        elif choice == "details":
+            _view_web_app_service_details(tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _load_web_app_service_rows(tenant, search: str = None) -> list:
+    from db.database import get_session
+    from db.models import ZCCResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZCCResource)
+            .filter_by(tenant_id=tenant.id, resource_type="web_app_service", is_deleted=False)
+            .order_by(ZCCResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zcc_id": r.zcc_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if search:
+        sl = search.lower()
+        rows = [r for r in rows if sl in (r["raw_config"].get("app_name") or r["name"] or "").lower()]
+
+    return rows
+
+
+def _list_web_app_services(tenant, search: str = None):
+    rows = _load_web_app_service_rows(tenant, search)
+
+    if not rows:
+        msg = (
+            f"[yellow]No custom app bypasses matching '{search}'.[/yellow]" if search
+            else "[yellow]No custom app bypasses in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Bypass App Definitions ({len(rows)} found)", show_lines=False)
+    table.add_column("Name", style="cyan")
+    table.add_column("Type")
+    table.add_column("Svc ID")
+    table.add_column("Active")
+    table.add_column("Version")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        name = cfg.get("app_name") or r["name"] or "—"
+        # Zscaler-managed definitions have a numeric created_by (e.g. "0", "23971")
+        created_by = str(cfg.get("created_by") or "")
+        is_zscaler = not created_by or created_by.isdigit()
+        type_str = "[dim]Zscaler[/dim]" if is_zscaler else "[cyan]Custom[/cyan]"
+        svc_id = str(cfg.get("app_svc_id") or "—")
+        active = cfg.get("active")
+        active_str = "[green]Yes[/green]" if active else "[red]No[/red]"
+        v = cfg.get("version")
+        version = str(v) if v is not None else "—"
+        table.add_row(name, type_str, svc_id, active_str, version)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_web_app_services(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_web_app_services(tenant, search=search.strip())
+
+
+def _view_web_app_service_details(tenant):
+    rows = _load_web_app_service_rows(tenant)
+    if not rows:
+        console.print("[yellow]No custom app bypasses in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    choices = [
+        questionary.Choice(
+            title=r["raw_config"].get("app_name") or r["name"] or r["zcc_id"],
+            value=r,
+        )
+        for r in rows
+    ]
+    choices.append(questionary.Choice("← Back", value=None))
+
+    selected = questionary.select("Select service to view:", choices=choices, use_indicator=True).ask()
+    if not isinstance(selected, dict):
+        return
+
+    import json
+    from rich.syntax import Syntax
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+
+    syntax = Syntax(json.dumps(selected["raw_config"], indent=2, default=str), "json", theme="monokai")
+    scroll_view(render_rich_to_lines(syntax), header_ansi=capture_banner())
+
+
+# ------------------------------------------------------------------
+# App Profiles (web_policy, with edit/activate/delete from DB cache)
+# ------------------------------------------------------------------
+
+def _app_profiles_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "App Profiles",
+            choices=[
+                questionary.Choice("List App Profiles", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("View Details", value="details"),
+                questionary.Choice("Manage Custom Bypass Apps", value="bypass"),
+                questionary.Choice("Activate / Deactivate", value="activate"),
+                questionary.Choice("Delete", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_web_policies(tenant)
+        elif choice == "search":
+            _search_web_policies(tenant)
+        elif choice == "details":
+            _view_web_policy_details(tenant)
+        elif choice == "bypass":
+            _select_policy_for_bypass(client, tenant)
+        elif choice == "activate":
+            _activate_web_policies(client, tenant)
+        elif choice == "delete":
+            _delete_web_policy(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _load_web_policy_rows(tenant, search: str = None) -> list:
+    from db.database import get_session
+    from db.models import ZCCResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZCCResource)
+            .filter_by(tenant_id=tenant.id, resource_type="web_policy", is_deleted=False)
+            .order_by(ZCCResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zcc_id": r.zcc_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if search:
+        sl = search.lower()
+        rows = [r for r in rows if sl in (r["name"] or "").lower()]
+
+    return rows
+
+
+def _list_web_policies(tenant, search: str = None):
+    rows = _load_web_policy_rows(tenant, search)
+
+    if not rows:
+        msg = (
+            f"[yellow]No app profiles matching '{search}'.[/yellow]" if search
+            else "[yellow]No app profiles in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"App Profiles ({len(rows)} found)", show_lines=False)
+    table.add_column("Name", style="cyan")
+    table.add_column("ID")
+    table.add_column("Platform")
+    table.add_column("Active")
+
+    _platform_labels = {
+        "windows": "Windows",
+        "macos": "macOS",
+        "ios": "iOS",
+        "android": "Android",
+        "linux": "Linux",
+    }
+
+    for r in rows:
+        cfg = r["raw_config"]
+        name = r["name"] or cfg.get("name") or "—"
+        pid = str(cfg.get("id") or r["zcc_id"] or "—")
+        platform = _platform_labels.get(cfg.get("device_type", ""), cfg.get("device_type") or "—")
+        active = cfg.get("active")
+        active_str = "[green]Yes[/green]" if active else "[red]No[/red]"
+        table.add_row(name, pid, platform, active_str)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_web_policies(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_web_policies(tenant, search=search.strip())
+
+
+def _view_web_policy_details(tenant):
+    rows = _load_web_policy_rows(tenant)
+    if not rows:
+        console.print("[yellow]No app profiles in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    choices = [
+        questionary.Choice(title=r["name"] or r["zcc_id"], value=r)
+        for r in rows
+    ]
+    choices.append(questionary.Choice("← Back", value=None))
+
+    selected = questionary.select("Select profile to view:", choices=choices, use_indicator=True).ask()
+    if not isinstance(selected, dict):
+        return
+
+    import json
+    from rich.syntax import Syntax
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+
+    syntax = Syntax(json.dumps(selected["raw_config"], indent=2, default=str), "json", theme="monokai")
+    scroll_view(render_rich_to_lines(syntax), header_ansi=capture_banner())
+
+
+def _select_policy_for_bypass(client, tenant):
+    rows = _load_web_policy_rows(tenant)
+    if not rows:
+        console.print("[yellow]No app profiles in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    choices = [
+        questionary.Choice(title=r["name"] or r["zcc_id"], value=r)
+        for r in rows
+    ]
+    choices.append(questionary.Choice("← Back", value=None))
+
+    selected = questionary.select(
+        "Select app profile to manage bypass apps:", choices=choices, use_indicator=True
+    ).ask()
+    if not isinstance(selected, dict):
+        return
+
+    _manage_bypass_apps(selected, client, tenant)
+
+
+def _manage_bypass_apps(policy_row: dict, client, tenant):
+    from services.zcc_service import ZCCService
+    from services.zcc_import_service import ZCCImportService
+
+    service = ZCCService(client, tenant_id=tenant.id)
+    policy_raw = policy_row["raw_config"]
+    policy_name = policy_row["name"] or policy_raw.get("name", "")
+    policy_id = policy_raw.get("id") or int(policy_row["zcc_id"])
+
+    # raw_config for web_policy uses the API's native camelCase keys
+    raw_bypass_ids = policy_raw.get("bypassCustomAppIds") or policy_raw.get("bypass_custom_app_ids") or []
+    current_ids = {int(x) for x in raw_bypass_ids if x is not None}
+
+    svc_rows = _load_web_app_service_rows(tenant)
+    if not svc_rows:
+        console.print("[yellow]No custom app bypass services in DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    assigned = [r for r in svc_rows if r["raw_config"].get("id") in current_ids]
+    unassigned = [r for r in svc_rows if r["raw_config"].get("id") not in current_ids]
+
+    console.print(f"\n[bold]Manage Custom Bypass Apps — {policy_name}[/bold]")
+    if assigned:
+        console.print(f"\n[dim]Currently assigned ({len(assigned)}):[/dim]")
+        for r in assigned:
+            cfg = r["raw_config"]
+            console.print(f"  [cyan]{cfg.get('app_name') or r['name']}[/cyan]  [dim](id: {cfg.get('id')})[/dim]")
+    else:
+        console.print("\n[dim]No custom bypass apps currently assigned.[/dim]")
+
+    action = questionary.select(
+        "Action:",
+        choices=[
+            questionary.Choice("Add bypass apps", value="add"),
+            questionary.Choice("Remove bypass apps", value="remove"),
+            questionary.Choice("← Back", value="back"),
+        ],
+    ).ask()
+
+    if action in ("back", None):
+        return
+
+    if action == "add":
+        if not unassigned:
+            console.print("[yellow]All available services are already assigned.[/yellow]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+        add_choices = [
+            questionary.Choice(
+                title=r["raw_config"].get("app_name") or r["name"],
+                value=r["raw_config"].get("id"),
+            )
+            for r in unassigned
+        ]
+        to_add = questionary.checkbox("Select services to add:", choices=add_choices).ask()
+        if not to_add:
+            return
+        new_ids = sorted(current_ids | {int(x) for x in to_add})
+        change_desc = f"added {len(to_add)} service(s)"
+
+    else:  # remove
+        if not assigned:
+            console.print("[yellow]No assigned services to remove.[/yellow]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+        remove_choices = [
+            questionary.Choice(
+                title=r["raw_config"].get("app_name") or r["name"],
+                value=r["raw_config"].get("id"),
+            )
+            for r in assigned
+        ]
+        to_remove = questionary.checkbox("Select services to remove:", choices=remove_choices).ask()
+        if not to_remove:
+            return
+        new_ids = sorted(current_ids - {int(x) for x in to_remove})
+        change_desc = f"removed {len(to_remove)} service(s)"
+
+    # Keep the full raw policy dict; update bypassCustomAppIds (API native camelCase)
+    updated_policy = dict(policy_raw)
+    updated_policy["bypassCustomAppIds"] = new_ids
+    # Remove fields not expected by the API
+    updated_policy.pop("bypass_custom_app_ids", None)
+    updated_policy.pop("device_type", None)
+
+    console.print(
+        f"\n[bold]Pending:[/bold] {change_desc} "
+        f"({len(current_ids)} → {len(new_ids)} total)"
+    )
+    confirmed = questionary.confirm("Apply changes?", default=True).ask()
+    if not confirmed:
+        return
+
+    with console.status("Updating app profile..."):
+        try:
+            service.edit_web_policy(**updated_policy)
+        except Exception as e:
+            console.print(f"[red]✗ {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+    console.print(f"[green]✓ App profile updated ({change_desc}).[/green]")
+
+    with console.status("Refreshing local DB..."):
+        try:
+            imp = ZCCImportService(client, tenant_id=tenant.id)
+            imp.run(resource_types=["web_policy"])
+        except Exception:
+            pass
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _activate_web_policies(client, tenant):
+    from services.zcc_service import ZCCService
+
+    service = ZCCService(client, tenant_id=tenant.id)
+    rows = _load_web_policy_rows(tenant)
+    if not rows:
+        console.print("[yellow]No app profiles in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    choices = [
+        questionary.Choice(
+            title=f"{r['name'] or r['zcc_id']}  [{'active' if r['raw_config'].get('active') else 'inactive'}]",
+            value=r,
+        )
+        for r in rows
+    ]
+
+    selected = questionary.checkbox(
+        "Select profiles to toggle (activate if inactive, deactivate if active):",
+        choices=choices,
+    ).ask()
+    if not selected:
+        return
+
+    device_type = questionary.select(
+        "Device type for activation:",
+        choices=[
+            questionary.Choice("Windows", value="windows"),
+            questionary.Choice("macOS", value="macos"),
+            questionary.Choice("iOS", value="ios"),
+            questionary.Choice("Android", value="android"),
+            questionary.Choice("Linux", value="linux"),
+        ],
+    ).ask()
+    if not device_type:
+        return
+
+    confirmed = questionary.confirm(
+        f"Apply activate/deactivate to {len(selected)} profile(s)?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    errors = []
+    for r in selected:
+        cfg = r["raw_config"]
+        pid = cfg.get("id") or int(r["zcc_id"])
+        name = r["name"] or ""
+        with console.status(f"Activating {name}..."):
+            try:
+                service.activate_web_policy(policy_id=pid, device_type=device_type, name=name)
+                console.print(f"[green]✓ {name}[/green]")
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+                console.print(f"[red]✗ {name}: {e}[/red]")
+
+    if errors:
+        console.print(f"\n[yellow]{len(errors)} error(s) occurred.[/yellow]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_web_policy(client, tenant):
+    from services.zcc_service import ZCCService
+    from services.zcc_import_service import ZCCImportService
+
+    service = ZCCService(client, tenant_id=tenant.id)
+    rows = _load_web_policy_rows(tenant)
+    if not rows:
+        console.print("[yellow]No app profiles in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    choices = [
+        questionary.Choice(title=r["name"] or r["zcc_id"], value=r)
+        for r in rows
+    ]
+    choices.append(questionary.Choice("← Back", value=None))
+
+    selected = questionary.select(
+        "Select profile to delete:", choices=choices, use_indicator=True
+    ).ask()
+    if not isinstance(selected, dict):
+        return
+
+    cfg = selected["raw_config"]
+    pid = cfg.get("id") or int(selected["zcc_id"])
+    name = selected["name"] or ""
+
+    console.print(f"\n[red]This will permanently delete:[/red] [bold]{name}[/bold] (id: {pid})")
+    confirmed = questionary.confirm("Are you sure?", default=False).ask()
+    if not confirmed:
+        return
+
+    with console.status("Deleting app profile..."):
+        try:
+            service.delete_web_policy(policy_id=pid, name=name)
+        except Exception as e:
+            console.print(f"[red]✗ {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+    console.print(f"[green]✓ Deleted {name}.[/green]")
+
+    with console.status("Refreshing local DB..."):
+        try:
+            imp = ZCCImportService(client, tenant_id=tenant.id)
+            imp.run(resource_types=["web_policy"])
+        except Exception:
+            pass
+
     questionary.press_any_key_to_continue("Press any key to continue...").ask()

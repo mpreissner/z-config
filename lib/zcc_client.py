@@ -68,6 +68,26 @@ def _to_dict(item) -> dict:
     return vars(item)
 
 
+def _to_camel_dict(obj) -> dict:
+    """Recursively convert a SDK ZscalerObject to a camelCase plain dict.
+
+    Uses request_format() (camelCase keys) rather than as_dict() (snake_case).
+    This avoids the ZscalerCollection.form_list mutation side-effect that
+    contaminates resp.get_body() with non-serialisable SDK model instances.
+    """
+    if hasattr(obj, "request_format"):
+        return {
+            k: _to_camel_dict(v)
+            for k, v in obj.request_format().items()
+            if v is not None
+        }
+    if isinstance(obj, dict):
+        return {k: _to_camel_dict(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_to_camel_dict(i) for i in obj]
+    return obj
+
+
 class ZCCClient:
     """SDK adapter for the Zscaler Client Connector (ZCC) API.
 
@@ -289,3 +309,54 @@ class ZCCClient:
 
     def update_zdx_entitlements(self, payload: Dict) -> Dict:
         return self._direct_put("updateZdxGroupEntitlement", json=payload)
+
+    # ------------------------------------------------------------------
+    # Web App Services (Custom App Bypass definitions)
+    # ------------------------------------------------------------------
+
+    def list_web_app_services(self) -> List[Dict]:
+        result, resp, err = self._sdk.zcc.web_app_service.list_by_company()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Web Policies (App Profiles)
+    # ------------------------------------------------------------------
+
+    def list_web_policies(self) -> List[Dict]:
+        # The API returns nothing without device_type; fetch per-OS and combine.
+        # Use _to_camel_dict(wp) on each WebPolicy result object to get a
+        # camelCase plain dict — avoids the ZscalerCollection.form_list mutation
+        # side-effect that makes resp.get_body() non-JSON-serialisable.
+        device_types = ["windows", "macos", "ios", "android", "linux"]
+        seen_ids: set = set()
+        all_policies: List[Dict] = []
+        for dt in device_types:
+            result, _, err = self._sdk.zcc.web_policy.list_by_company(
+                query_params={"device_type": dt}
+            )
+            if err:
+                continue
+            for wp in (result or []):
+                item = _to_camel_dict(wp)
+                pid = item.get("id")
+                if pid is None or pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                item["device_type"] = dt  # injected so the DB record is self-describing
+                all_policies.append(item)
+        return all_policies
+
+    def edit_web_policy(self, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zcc.web_policy.web_policy_edit(**kwargs)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def activate_web_policy(self, policy_id: int, device_type: str) -> Dict:
+        result, resp, err = self._sdk.zcc.web_policy.activate_web_policy(
+            policy_id=policy_id, device_type=device_type
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_web_policy(self, policy_id: int) -> None:
+        _, _, err = self._sdk.zcc.web_policy.delete_web_policy(policy_id)
+        if err:
+            raise Exception(str(err))
