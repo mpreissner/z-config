@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.8.5] - 2026-03-04
+
+### Fixed
+
+#### Update checker — changelog prompt UX
+- Added a `Press any key to view changelog...` pause between the update panel and the scroll viewer so the notification is readable before the alternate screen opens
+
+---
+
 ## [0.8.4] - 2026-03-04
 
 ### Fixed
