@@ -99,6 +99,7 @@ def check_for_updates() -> None:
     if changelog:
         sections = _extract_changelog_sections(changelog, VERSION, latest)
         if sections:
+            from rich.markdown import Markdown
             from cli.scroll_view import render_rich_to_lines, scroll_view
             scroll_view(render_rich_to_lines(Markdown(sections)))
 
