@@ -12,9 +12,11 @@ def main():
     from cli.menus import select_tenant
     from cli.menus.main_menu import main_menu
     from cli.session import set_active_tenant
+    from cli.update_checker import check_for_updates
 
     init_db()
     render_banner()
+    check_for_updates()
 
     # Select active tenant at startup (skipped if none are configured yet)
     from services.config_service import list_tenants
