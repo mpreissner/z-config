@@ -34,3 +34,6 @@ reference/
 
 # Claude notes
 .claude/
+
+# Internal notes / research (not for the repo)
+notes/
