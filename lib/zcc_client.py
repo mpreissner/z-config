@@ -95,7 +95,13 @@ class ZCCClient:
     decorator handles conversion to the camelCase names the API expects.
     """
 
-    def __init__(self, auth: ZscalerAuth, oneapi_base_url: str = "https://api.zsapi.net"):
+    def __init__(
+        self,
+        auth: ZscalerAuth,
+        oneapi_base_url: str = "https://api.zsapi.net",
+        zia_cloud: Optional[str] = None,
+        zia_tenant_id: Optional[str] = None,
+    ):
         self.auth = auth
         self._sdk = ZscalerClient({
             "clientId": auth.client_id,
@@ -103,6 +109,8 @@ class ZCCClient:
             "vanityDomain": auth.vanity_domain,
         })
         self._zcc_base = f"{oneapi_base_url}/zcc/papi/public/v1"
+        self._zia_cloud = zia_cloud
+        self._zia_tenant_id = zia_tenant_id
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
 
@@ -360,3 +368,4 @@ class ZCCClient:
         _, _, err = self._sdk.zcc.web_policy.delete_web_policy(policy_id)
         if err:
             raise Exception(str(err))
+

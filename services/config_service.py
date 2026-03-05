@@ -13,8 +13,9 @@ On first launch the key is generated automatically — no manual setup required.
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from cryptography.fernet import Fernet, InvalidToken
 
 from db.database import get_session
@@ -80,6 +81,54 @@ def decrypt_secret(value: str) -> str:
         ) from e
 
 
+def fetch_org_info(
+    zidentity_base_url: str,
+    client_id: str,
+    client_secret: str,
+    oneapi_base_url: str = "https://api.zsapi.net",
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
+    """Fetch orgInformation and subscriptions from the ZIA API.
+
+    Returns (org_info, subscriptions, error_message).
+    On success, error_message is None. On failure, org_info and/or subscriptions may be None.
+    """
+    try:
+        token_resp = requests.post(
+            f"{zidentity_base_url.rstrip('/')}/oauth2/v1/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "audience": "https://api.zscaler.com",
+            },
+            timeout=15,
+        )
+        token_resp.raise_for_status()
+        token = token_resp.json()["access_token"]
+    except Exception as e:
+        return None, None, f"Token error: {e}"
+
+    headers = {"Authorization": f"Bearer {token}"}
+    base = oneapi_base_url.rstrip("/")
+
+    try:
+        org_resp = requests.get(f"{base}/zia/api/v1/orgInformation", headers=headers, timeout=15)
+        org_resp.raise_for_status()
+        org_info = org_resp.json()
+    except Exception as e:
+        return None, None, f"orgInformation error: {e}"
+
+    subscriptions = None
+    try:
+        sub_resp = requests.get(f"{base}/zia/api/v1/subscriptions", headers=headers, timeout=15)
+        sub_resp.raise_for_status()
+        subscriptions = sub_resp.json()
+    except Exception:
+        pass  # subscriptions failure is non-fatal
+
+    return org_info, subscriptions, None
+
+
 def add_tenant(
     name: str,
     zidentity_base_url: str,
@@ -87,6 +136,10 @@ def add_tenant(
     client_secret: str,
     oneapi_base_url: str = "https://api.zsapi.net",
     zpa_customer_id: Optional[str] = None,
+    zpa_tenant_cloud: Optional[str] = None,
+    zia_tenant_id: Optional[str] = None,
+    zia_cloud: Optional[str] = None,
+    zia_subscriptions: Optional[Any] = None,
     notes: Optional[str] = None,
 ) -> TenantConfig:
     """Add a new tenant configuration to the database."""
@@ -98,6 +151,10 @@ def add_tenant(
             client_id=client_id,
             client_secret_enc=encrypt_secret(client_secret),
             zpa_customer_id=zpa_customer_id or None,
+            zpa_tenant_cloud=zpa_tenant_cloud or None,
+            zia_tenant_id=zia_tenant_id or None,
+            zia_cloud=zia_cloud or None,
+            zia_subscriptions=zia_subscriptions or None,
             notes=notes,
         )
         session.add(tenant)
@@ -125,6 +182,10 @@ def update_tenant(
     client_secret: Optional[str] = None,
     oneapi_base_url: Optional[str] = None,
     zpa_customer_id: Optional[str] = None,
+    zpa_tenant_cloud: Optional[str] = None,
+    zia_tenant_id: Optional[str] = None,
+    zia_cloud: Optional[str] = None,
+    zia_subscriptions: Optional[Any] = None,
     notes: Optional[str] = None,
 ) -> Optional[TenantConfig]:
     """Update fields on an existing tenant. Only provided fields are changed."""
@@ -142,11 +203,56 @@ def update_tenant(
             tenant.client_secret_enc = encrypt_secret(client_secret)
         if zpa_customer_id is not None:
             tenant.zpa_customer_id = zpa_customer_id
+        if zpa_tenant_cloud is not None:
+            tenant.zpa_tenant_cloud = zpa_tenant_cloud
+        if zia_tenant_id is not None:
+            tenant.zia_tenant_id = zia_tenant_id
+        if zia_cloud is not None:
+            tenant.zia_cloud = zia_cloud
+        if zia_subscriptions is not None:
+            tenant.zia_subscriptions = zia_subscriptions
         if notes is not None:
             tenant.notes = notes
         session.flush()
         session.refresh(tenant)
         return tenant
+
+
+def get_tenants_needing_org_backfill() -> List[TenantConfig]:
+    """Return active tenants that are missing org info (zia_tenant_id IS NULL)."""
+    with get_session() as session:
+        return (
+            session.query(TenantConfig)
+            .filter_by(is_active=True)
+            .filter(TenantConfig.zia_tenant_id.is_(None))
+            .all()
+        )
+
+
+def backfill_org_info_for_tenant(tenant: TenantConfig) -> Tuple[bool, Optional[str]]:
+    """Fetch and store orgInformation + subscriptions for a single tenant.
+
+    Returns (success, error_message). error_message is None on success.
+    """
+    try:
+        secret = decrypt_secret(tenant.client_secret_enc)
+        org_info, subscriptions, err = fetch_org_info(
+            tenant.zidentity_base_url, tenant.client_id, secret, tenant.oneapi_base_url
+        )
+        if err or not org_info:
+            return False, err or "empty response"
+        pdomain_raw = org_info.get("pdomain") or ""
+        update_tenant(
+            name=tenant.name,
+            zpa_customer_id=str(org_info.get("zpaTenantId", "")) or None,
+            zpa_tenant_cloud=org_info.get("zpaTenantCloud") or None,
+            zia_tenant_id=pdomain_raw.split(".")[0] or None,
+            zia_cloud=org_info.get("cloudName") or None,
+            zia_subscriptions=subscriptions,
+        )
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def deactivate_tenant(name: str) -> bool:

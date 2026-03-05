@@ -1015,7 +1015,8 @@ def _manage_entitlements(client, tenant, product: str):
 
 
 # ------------------------------------------------------------------
-# Custom App Bypasses (web_app_service, read-only from DB cache)
+# Bypass App Definitions
+# Zscaler-managed (web_app_service) + user-created (custom_app_service)
 # ------------------------------------------------------------------
 
 def _custom_app_bypasses_menu(tenant):
@@ -1034,45 +1035,64 @@ def _custom_app_bypasses_menu(tenant):
         ).ask()
 
         if choice == "list":
-            _list_web_app_services(tenant)
+            _list_bypass_app_definitions(tenant)
         elif choice == "search":
-            _search_web_app_services(tenant)
+            _search_bypass_app_definitions(tenant)
         elif choice == "details":
-            _view_web_app_service_details(tenant)
+            _view_bypass_app_definition_details(tenant)
         elif choice in ("back", None):
             break
 
 
-def _load_web_app_service_rows(tenant, search: str = None) -> list:
+def _load_bypass_app_rows(tenant, search: str = None) -> list:
+    """Load Zscaler-managed bypass app definitions (web_app_service) from DB."""
     from db.database import get_session
     from db.models import ZCCResource
 
     with get_session() as session:
         resources = (
             session.query(ZCCResource)
-            .filter_by(tenant_id=tenant.id, resource_type="web_app_service", is_deleted=False)
+            .filter(
+                ZCCResource.tenant_id == tenant.id,
+                ZCCResource.resource_type == "web_app_service",
+                ZCCResource.is_deleted == False,
+            )
             .order_by(ZCCResource.name)
             .all()
         )
         rows = [
-            {"name": r.name, "zcc_id": r.zcc_id, "raw_config": r.raw_config or {}}
+            {
+                "name": r.name,
+                "zcc_id": r.zcc_id,
+                "resource_type": r.resource_type,
+                "raw_config": r.raw_config or {},
+            }
             for r in resources
         ]
 
     if search:
         sl = search.lower()
-        rows = [r for r in rows if sl in (r["raw_config"].get("app_name") or r["name"] or "").lower()]
+        rows = [
+            r for r in rows
+            if sl in (r["raw_config"].get("app_name") or r["raw_config"].get("name") or r["name"] or "").lower()
+        ]
 
     return rows
 
 
-def _list_web_app_services(tenant, search: str = None):
-    rows = _load_web_app_service_rows(tenant, search)
+def _bypass_row_display_name(r: dict) -> str:
+    cfg = r["raw_config"]
+    # web_app_service (SDK, snake_case): app_name; custom_app_service (raw API, camelCase): appName
+    return cfg.get("appName") or cfg.get("app_name") or r["name"] or r["zcc_id"]
+
+
+def _list_bypass_app_definitions(tenant, search: str = None):
+    rows = _load_bypass_app_rows(tenant, search)
 
     if not rows:
         msg = (
-            f"[yellow]No custom app bypasses matching '{search}'.[/yellow]" if search
-            else "[yellow]No custom app bypasses in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
+            f"[yellow]No bypass app definitions matching '{search}'.[/yellow]" if search
+            else "[yellow]No bypass app definitions in local DB. Run [bold]Import Config[/bold] first.[/yellow]"
         )
         console.print(msg)
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
@@ -1081,53 +1101,60 @@ def _list_web_app_services(tenant, search: str = None):
     table = Table(title=f"Bypass App Definitions ({len(rows)} found)", show_lines=False)
     table.add_column("Name", style="cyan")
     table.add_column("Type")
-    table.add_column("Svc ID")
+    table.add_column("ID")
+    table.add_column("Protocol")
+    table.add_column("Port")
     table.add_column("Active")
-    table.add_column("Version")
 
     for r in rows:
         cfg = r["raw_config"]
-        name = cfg.get("app_name") or r["name"] or "—"
-        # Zscaler-managed definitions have a numeric created_by (e.g. "0", "23971")
-        created_by = str(cfg.get("created_by") or "")
-        is_zscaler = not created_by or created_by.isdigit()
-        type_str = "[dim]Zscaler[/dim]" if is_zscaler else "[cyan]Custom[/cyan]"
-        svc_id = str(cfg.get("app_svc_id") or "—")
+        name = _bypass_row_display_name(r)
+        if r["resource_type"] == "custom_app_service":
+            type_str = "[cyan]Custom[/cyan]"
+        else:
+            created_by = str(cfg.get("created_by") or "")
+            type_str = "[dim]Zscaler[/dim]" if (not created_by or created_by.isdigit()) else "[cyan]Custom[/cyan]"
+        row_id = str(cfg.get("id") or cfg.get("app_svc_id") or r["zcc_id"] or "—")
+        # web_app_service: proto/port in appDataBlob (SDK snake_case: app_data_blob)
+        # custom_app_service: proto/port in appData (camelCase, raw API)
+        blob = cfg.get("appData") or cfg.get("appDataBlob") or cfg.get("app_data_blob") or []
+        first = blob[0] if blob and isinstance(blob, list) else None
+        if isinstance(first, dict):
+            proto = first.get("proto") or "—"
+            port = first.get("port") or "—"
+        else:
+            proto = cfg.get("protocol") or "—"
+            port = cfg.get("port") or "—"
         active = cfg.get("active")
         active_str = "[green]Yes[/green]" if active else "[red]No[/red]"
-        v = cfg.get("version")
-        version = str(v) if v is not None else "—"
-        table.add_row(name, type_str, svc_id, active_str, version)
+        table.add_row(name, type_str, row_id, proto, port, active_str)
 
     from cli.banner import capture_banner
     from cli.scroll_view import render_rich_to_lines, scroll_view
     scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
 
 
-def _search_web_app_services(tenant):
+def _search_bypass_app_definitions(tenant):
     search = questionary.text("Search (name or partial):").ask()
     if not search:
         return
-    _list_web_app_services(tenant, search=search.strip())
+    _list_bypass_app_definitions(tenant, search=search.strip())
 
 
-def _view_web_app_service_details(tenant):
-    rows = _load_web_app_service_rows(tenant)
+def _view_bypass_app_definition_details(tenant):
+    rows = _load_bypass_app_rows(tenant)
     if not rows:
-        console.print("[yellow]No custom app bypasses in local DB. Run Import Config first.[/yellow]")
+        console.print("[yellow]No bypass app definitions in local DB. Run Import Config first.[/yellow]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
     choices = [
-        questionary.Choice(
-            title=r["raw_config"].get("app_name") or r["name"] or r["zcc_id"],
-            value=r,
-        )
+        questionary.Choice(title=_bypass_row_display_name(r), value=r)
         for r in rows
     ]
     choices.append(questionary.Choice("← Back", value=None))
 
-    selected = questionary.select("Select service to view:", choices=choices, use_indicator=True).ask()
+    selected = questionary.select("Select definition to view:", choices=choices, use_indicator=True).ask()
     if not isinstance(selected, dict):
         return
 

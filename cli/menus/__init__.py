@@ -90,7 +90,7 @@ def get_zcc_client(tenant=None):
         return None, None
 
     auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc))
-    return ZCCClient(auth, tenant.oneapi_base_url), tenant
+    return ZCCClient(auth, tenant.oneapi_base_url, tenant.zia_cloud, tenant.zia_tenant_id), tenant
 
 
 def get_zidentity_client(tenant=None):

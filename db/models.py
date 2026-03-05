@@ -25,6 +25,10 @@ class TenantConfig(Base):
     client_id = Column(String(512), nullable=False)
     client_secret_enc = Column(Text, nullable=False)       # Fernet-encrypted
     zpa_customer_id = Column(String(255), nullable=True)
+    zpa_tenant_cloud = Column(String(255), nullable=True)  # e.g. "zscalertwo.net"; from orgInformation.zpaTenantCloud
+    zia_tenant_id = Column(String(255), nullable=True)     # numeric tenant ID; from orgInformation.pdomain
+    zia_cloud = Column(String(255), nullable=True)          # e.g. "zscalertwo.net"; from orgInformation.cloudName
+    zia_subscriptions = Column(JSON, nullable=True)         # full response from GET /subscriptions
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     zpa_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401

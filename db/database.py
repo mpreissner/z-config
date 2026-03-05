@@ -64,14 +64,18 @@ def _migrate(engine) -> None:
         "ALTER TABLE tenant_configs ADD COLUMN zpa_disabled_resources JSON",
         "ALTER TABLE tenant_configs ADD COLUMN zia_disabled_resources JSON",
         "ALTER TABLE tenant_configs ADD COLUMN zcc_disabled_resources JSON",
+        "ALTER TABLE tenant_configs ADD COLUMN zpa_tenant_cloud VARCHAR(255)",
+        "ALTER TABLE tenant_configs ADD COLUMN zia_tenant_id VARCHAR(255)",
+        "ALTER TABLE tenant_configs ADD COLUMN zia_cloud VARCHAR(255)",
+        "ALTER TABLE tenant_configs ADD COLUMN zia_subscriptions JSON",
     ]
-    with engine.connect() as conn:
-        for stmt in migrations:
+    for stmt in migrations:
+        with engine.connect() as conn:
             try:
                 conn.execute(text(stmt))
                 conn.commit()
             except Exception:
-                pass  # Column already exists
+                conn.rollback()  # reset transaction state; column already exists
 
 
 def _ensure_init() -> None:

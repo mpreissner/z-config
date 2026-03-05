@@ -87,18 +87,12 @@ def _switch_tenant():
     if not tenant:
         return
 
-    with console.status(f"[cyan]Verifying credentials for {tenant.name}...[/cyan]"):
-        ok, err = _test_token(
-            tenant.zidentity_base_url,
-            tenant.client_id,
-            decrypt_secret(tenant.client_secret_enc),
-        )
+    secret = decrypt_secret(tenant.client_secret_enc)
 
-    if ok:
-        set_active_tenant(tenant)
-        console.print(f"[green]✓ Active tenant: [bold]{tenant.name}[/bold][/green]")
-        questionary.press_any_key_to_continue("Press any key to continue...").ask()
-    else:
+    with console.status(f"[cyan]Verifying credentials for {tenant.name}...[/cyan]"):
+        ok, err = _test_token(tenant.zidentity_base_url, tenant.client_id, secret)
+
+    if not ok:
         console.print(f"[red]✗ Token failed for {tenant.name}:[/red] {err}")
         action = questionary.select(
             "What would you like to do?",
@@ -114,6 +108,34 @@ def _switch_tenant():
             set_active_tenant(tenant)
             console.print(f"[yellow]⚠ Active tenant set to [bold]{tenant.name}[/bold] (token unverified)[/yellow]")
             questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print("[green]✓ Credentials verified.[/green]")
+
+    _, subs_changed = _fetch_and_apply_org_info(
+        tenant.name,
+        tenant.zidentity_base_url,
+        tenant.client_id,
+        secret,
+        old_tenant=tenant,
+    )
+
+    # Reload from DB so the active tenant reflects the freshly written org info fields
+    from services.config_service import get_tenant as _reload_tenant
+    set_active_tenant(_reload_tenant(tenant.name) or tenant)
+    console.print(f"[green]✓ Active tenant: [bold]{tenant.name}[/bold][/green]")
+
+    if subs_changed:
+        console.print(Panel(
+            "[yellow]Subscription changes detected for this tenant.[/yellow]\n"
+            "Features or products may have been added or removed.\n\n"
+            "[bold]Recommendation:[/bold] Run [cyan]Import Config[/cyan] for ZIA, ZPA, and ZCC "
+            "to ensure your local database reflects the current tenant state.",
+            title="[bold yellow]⚠ Subscriptions Changed[/bold yellow]",
+            border_style="yellow",
+        ))
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 # ------------------------------------------------------------------
@@ -152,6 +174,81 @@ def settings_menu():
 
 
 
+def _fetch_and_apply_org_info(
+    tenant_name: str,
+    zidentity_url: str,
+    client_id: str,
+    client_secret: str,
+    old_tenant=None,
+) -> tuple:
+    """Fetch orgInformation + subscriptions and persist to DB.
+
+    Returns (success: bool, subscriptions_changed: bool).
+
+    Prints a summary table when any field is first populated or has changed.
+    Pass old_tenant (TenantConfig) to enable change detection; omit for add/edit flows
+    where the summary should always be shown.
+    """
+    import json
+    from services.config_service import fetch_org_info, update_tenant
+
+    with console.status("[cyan]Fetching org information...[/cyan]"):
+        org_info, subscriptions, err = fetch_org_info(zidentity_url, client_id, client_secret)
+
+    if err or not org_info:
+        console.print(f"[yellow]⚠ Could not fetch org information: {err or 'empty response'}[/yellow]")
+        console.print("[dim]Tenant saved without org metadata. Re-run Edit Tenant to retry.[/dim]")
+        return False, False
+
+    zpa_customer_id = str(org_info.get("zpaTenantId", "")) or None
+    zpa_tenant_cloud = org_info.get("zpaTenantCloud") or None
+    # pdomain arrives as "<numericId>.<cloud>" — store only the numeric prefix
+    pdomain_raw = org_info.get("pdomain") or ""
+    zia_tenant_id = pdomain_raw.split(".")[0] or None
+    zia_cloud = org_info.get("cloudName") or None
+
+    old_subs = old_tenant.zia_subscriptions if old_tenant else None
+    subscriptions_changed = (
+        old_subs is not None
+        and subscriptions is not None
+        and json.dumps(old_subs, sort_keys=True) != json.dumps(subscriptions, sort_keys=True)
+    )
+
+    # Show summary when called from add/edit (no old_tenant) or when anything is new/changed
+    first_time = old_tenant is None or old_tenant.zia_tenant_id is None
+    org_changed = old_tenant is not None and (
+        old_tenant.zia_tenant_id != zia_tenant_id
+        or old_tenant.zia_cloud != zia_cloud
+        or old_tenant.zpa_customer_id != zpa_customer_id
+        or old_tenant.zpa_tenant_cloud != zpa_tenant_cloud
+    )
+    show_summary = first_time or org_changed or subscriptions_changed
+
+    update_tenant(
+        name=tenant_name,
+        zpa_customer_id=zpa_customer_id,
+        zpa_tenant_cloud=zpa_tenant_cloud,
+        zia_tenant_id=zia_tenant_id,
+        zia_cloud=zia_cloud,
+        zia_subscriptions=subscriptions,
+    )
+
+    if show_summary:
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="dim")
+        table.add_column()
+        table.add_row("ZIA Cloud", zia_cloud or "[dim]—[/dim]")
+        table.add_row("ZIA Tenant ID", zia_tenant_id or "[dim]—[/dim]")
+        table.add_row("ZPA Customer ID", zpa_customer_id or "[dim]—[/dim]")
+        table.add_row("ZPA Cloud", zpa_tenant_cloud or "[dim]—[/dim]")
+        if subscriptions is not None:
+            sub_label = "[yellow]changed[/yellow]" if subscriptions_changed else "[green]stored[/green]"
+            table.add_row("Subscriptions", sub_label)
+        console.print(table)
+
+    return True, subscriptions_changed
+
+
 def _add_tenant():
     console.print("\n[bold]Add Tenant[/bold]")
     name = questionary.text("Friendly name (e.g. prod, staging):").ask()
@@ -170,9 +267,6 @@ def _add_tenant():
 
     client_id = questionary.text("Client ID:").ask()
     client_secret = questionary.password("Client Secret:").ask()
-    customer_id = questionary.text(
-        "ZPA Customer ID (leave blank if not using ZPA):"
-    ).ask()
     notes = questionary.text("Notes (optional):").ask()
 
     if not all([name, zidentity_url, client_id, client_secret]):
@@ -187,7 +281,6 @@ def _add_tenant():
             client_id=client_id,
             client_secret=client_secret,
             oneapi_base_url="https://api.zsapi.net",
-            zpa_customer_id=customer_id or None,
             notes=notes or None,
         )
         console.print(f"[green]✓ Tenant '[bold]{name}[/bold]' added.[/green]")
@@ -199,13 +292,15 @@ def _add_tenant():
     with console.status("[cyan]Verifying credentials...[/cyan]"):
         ok, err = _test_token(zidentity_url, client_id, client_secret)
 
-    if ok:
-        console.print("[green]✓ Token obtained — credentials verified.[/green]")
-        questionary.press_any_key_to_continue("Press any key to continue...").ask()
-    else:
+    if not ok:
         console.print(f"[red]✗ Token failed:[/red] {err}")
         console.print("[dim]Tenant was saved. You can edit credentials from Settings → Edit Tenant.[/dim]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print("[green]✓ Token obtained — credentials verified.[/green]")
+    _fetch_and_apply_org_info(name, zidentity_url, client_id, client_secret)
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 def _pick_and_edit_tenant():
@@ -265,9 +360,7 @@ def _edit_tenant_credentials(tenant_name: str):
     with console.status("[cyan]Verifying credentials...[/cyan]"):
         ok, err = _test_token(zidentity_url, client_id, test_secret)
 
-    if ok:
-        console.print("[green]✓ Token obtained — credentials verified.[/green]")
-    else:
+    if not ok:
         console.print(f"[red]✗ Token failed:[/red] {err}")
         if not questionary.confirm("Save credentials anyway?", default=False).ask():
             return
@@ -279,6 +372,10 @@ def _edit_tenant_credentials(tenant_name: str):
         client_secret=client_secret if client_secret else None,
     )
     console.print(f"[green]✓ Credentials updated for '[bold]{tenant_name}[/bold]'.[/green]")
+
+    if ok:
+        _fetch_and_apply_org_info(tenant_name, zidentity_url, client_id, test_secret, old_tenant=tenant)
+
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -294,16 +391,22 @@ def _list_tenants():
     table = Table(title="Configured Tenants", show_lines=True)
     table.add_column("Name", style="bold cyan")
     table.add_column("ZIdentity URL")
-    table.add_column("OneAPI URL")
+    table.add_column("ZIA Cloud")
+    table.add_column("ZIA Tenant ID")
     table.add_column("ZPA Customer ID")
+    table.add_column("ZPA Cloud")
     table.add_column("Notes")
 
     for t in tenants:
+        # zia_tenant_id is stored as the numeric prefix; guard against legacy full-domain values
+        zia_id = (t.zia_tenant_id or "").split(".")[0] or None
         table.add_row(
             t.name,
             t.zidentity_base_url,
-            t.oneapi_base_url,
+            t.zia_cloud or "[dim]—[/dim]",
+            zia_id or "[dim]—[/dim]",
             t.zpa_customer_id or "[dim]—[/dim]",
+            t.zpa_tenant_cloud or "[dim]—[/dim]",
             t.notes or "[dim]—[/dim]",
         )
 
