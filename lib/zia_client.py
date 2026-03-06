@@ -54,7 +54,7 @@ class ZIAClient:
     # ------------------------------------------------------------------
 
     def get_activation_status(self) -> Dict:
-        result, resp, err = self._sdk.zia.activate.get_activation_status()
+        result, resp, err = self._sdk.zia.activate.status()
         return _to_dict(_unwrap(result, resp, err))
 
     def activate(self) -> Dict:

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.2] - 2026-03-06
+
+### Fixed
+
+#### ZIA — Activation
+- `get_activation_status()` was calling the wrong SDK method (`get_activation_status` → `status()`), causing the Activation menu to immediately show an error and return without activating
+- Removed the intermediate `questionary.confirm` in the activation flow — it was silently consuming the buffered Enter keypress from the preceding menu selection, causing activation to be skipped with no feedback
+- Removed `console.status()` spinner from the activation call — output printed inside the context manager was being wiped when the spinner exited
+- Activation result is now stored and displayed on the next render loop (after the status re-fetch) so it cannot be cleared by `render_banner()`
+
+#### ZIA — Pending activation tracking
+- `_zia_pending` session flag per tenant ID — set on every ZIA mutation, cleared on successful activation
+- `⚠ Changes pending activation` shown at the top of the ZIA menu and Activation submenu when flag is set
+- Main menu ZIA entry shows `⚠` in the label when changes are pending
+- Exit and Switch Tenant prompt with a yellow panel and "proceed anyway?" (default: No) when pending changes exist
+
+---
+
 ## [0.10.1] - 2026-03-06
 
 ### Added

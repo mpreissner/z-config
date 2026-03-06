@@ -9,6 +9,15 @@ from cli.menus.snapshots_menu import snapshots_menu
 console = Console()
 
 
+def _zia_changed():
+    """Mark the active tenant's ZIA config as having unactivated changes."""
+    from cli.session import get_active_tenant, mark_zia_pending
+    t = get_active_tenant()
+    if t:
+        mark_zia_pending(t.id)
+    console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+
+
 def zia_menu():
     client, tenant = get_zia_client()
     if client is None:
@@ -16,6 +25,9 @@ def zia_menu():
 
     while True:
         render_banner()
+        from cli.session import has_zia_pending
+        if has_zia_pending(tenant.id):
+            console.print("[yellow]⚠  Changes pending activation[/yellow]\n")
         choice = questionary.select(
             "ZIA",
             choices=[
@@ -99,18 +111,32 @@ def zia_menu():
 def activation_menu(client, tenant):
     from services.zia_service import ZIAService
     service = ZIAService(client, tenant_id=tenant.id)
+    last_result = None  # ("ok", state) or ("err", msg)
+
     while True:
         render_banner()
-        with console.status("Checking activation status..."):
-            try:
-                status = service.get_activation_status()
-            except Exception as e:
-                console.print(f"[red]✗ Could not fetch status: {e}[/red]")
-                return
+        from cli.session import has_zia_pending
+        if has_zia_pending(tenant.id):
+            console.print("[yellow]⚠  Changes pending activation[/yellow]\n")
+
+        try:
+            status = service.get_activation_status()
+        except Exception as e:
+            console.print(f"[red]✗ Could not fetch status: {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
 
         state = status.get("status", "UNKNOWN")
         state_colour = "green" if state == "ACTIVE" else "yellow"
-        console.print(f"\nActivation status: [{state_colour}][bold]{state}[/bold][/{state_colour}]")
+        console.print(f"Activation status: [{state_colour}][bold]{state}[/bold][/{state_colour}]")
+
+        if last_result is not None:
+            kind, msg = last_result
+            if kind == "ok":
+                console.print(f"[green]✓ Activation complete — {msg}[/green]")
+            else:
+                console.print(f"[red]✗ Activation failed: {msg}[/red]")
+            last_result = None
 
         choice = questionary.select(
             "Activation",
@@ -123,32 +149,16 @@ def activation_menu(client, tenant):
         ).ask()
 
         if choice == "activate":
-            _activate(client, tenant)
-        elif choice == "refresh":
-            continue
+            try:
+                result = service.activate()
+                activated_state = result.get("status", "UNKNOWN") if result else "UNKNOWN"
+                last_result = ("ok", f"status: {activated_state}")
+                from cli.session import clear_zia_pending
+                clear_zia_pending(tenant.id)
+            except Exception as e:
+                last_result = ("err", str(e))
         elif choice in ("back", None):
             break
-
-
-def _activate(client, tenant):
-    confirmed = questionary.confirm(
-        "Activate all pending ZIA configuration changes?", default=True
-    ).ask()
-    if not confirmed:
-        return
-
-    from services.zia_service import ZIAService
-
-    service = ZIAService(client, tenant_id=tenant.id)
-    with console.status("Activating..."):
-        try:
-            result = service.activate()
-            state = result.get("status", "UNKNOWN") if result else "UNKNOWN"
-            console.print(f"[green]✓ Activation complete — status: {state}[/green]")
-        except Exception as e:
-            console.print(f"[red]✗ Activation failed: {e}[/red]")
-
-    questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 # ------------------------------------------------------------------
@@ -511,7 +521,8 @@ def _toggle_firewall_rules(client, tenant):
             )
 
     if ok:
-        console.print(f"[green]✓ {ok} rule(s) updated. Remember to activate changes.[/green]")
+        console.print(f"[green]✓ {ok} rule(s) updated.[/green]")
+        _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -672,8 +683,478 @@ def _sync_firewall_rules(client, tenant):
         from services.zia_import_service import ZIAImportService
         with console.status("Syncing changes to local DB..."):
             ZIAImportService(client, tenant.id).run(resource_types=["firewall_rule"])
-        console.print("[green]✓ Local DB updated. Remember to activate changes in ZIA.[/green]")
+        console.print("[green]✓ Local DB updated.[/green]")
+        _zia_changed()
 
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Source IPv4 Groups — full CRUD submenu
+# ------------------------------------------------------------------
+
+def ip_source_group_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Source IPv4 Group Management",
+            choices=[
+                questionary.Choice("List All", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Separator(),
+                questionary.Choice("Create", value="create"),
+                questionary.Choice("Edit", value="edit"),
+                questionary.Choice("Delete", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("Bulk Create from CSV", value="bulk_csv"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_ip_source_groups(tenant)
+        elif choice == "search":
+            _search_ip_source_groups(tenant)
+        elif choice == "create":
+            _create_ip_source_group_single(client, tenant)
+        elif choice == "edit":
+            _edit_ip_source_group(client, tenant)
+        elif choice == "delete":
+            _delete_ip_source_group(client, tenant)
+        elif choice == "bulk_csv":
+            _create_ip_source_groups(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_ip_source_groups(tenant, search=None):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="ip_source_group", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+    rows.sort(key=lambda r: (r["name"] or "").lower())
+
+    if search:
+        search_lower = search.lower()
+        rows = [r for r in rows if search_lower in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No source groups matching '{search}'.[/yellow]" if search
+            else "[yellow]No source IP groups in local DB. Run Import Config first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Source IPv4 Groups ({len(rows)} total)", show_lines=False)
+    table.add_column("ID", style="dim")
+    table.add_column("Name")
+    table.add_column("IPs", justify="right", style="dim")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        ips = cfg.get("ip_addresses") or []
+        table.add_row(
+            r["zia_id"],
+            r["name"] or "—",
+            str(len(ips)),
+            (cfg.get("description") or "")[:60] or "[dim]—[/dim]",
+        )
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_ip_source_groups(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_ip_source_groups(tenant, search=search.strip())
+
+
+def _pick_ip_source_group(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="ip_source_group", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print("[yellow]No source IP groups in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+
+    chosen = questionary.select(
+        "Select group:",
+        choices=[
+            questionary.Choice(f"{r['name']} (ID: {r['zia_id']})", value=r)
+            for r in rows
+        ] + [questionary.Choice("← Cancel", value="cancel")],
+    ).ask()
+    if chosen in (None, "cancel"):
+        return None
+    return chosen
+
+
+def _create_ip_source_group_single(client, tenant):
+    console.print("\n[bold]Create Source IPv4 Group[/bold]")
+    name = questionary.text("Name:").ask()
+    if not name or not name.strip():
+        return
+    description = questionary.text("Description (optional):").ask() or ""
+    ips_raw = questionary.text("IP addresses / CIDRs (semicolon-separated):").ask()
+    if not ips_raw or not ips_raw.strip():
+        console.print("[red]At least one IP address is required.[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+    ip_list = [ip.strip() for ip in ips_raw.split(";") if ip.strip()]
+    try:
+        result = client.create_ip_source_group({
+            "name": name.strip(),
+            "description": description.strip(),
+            "ip_addresses": ip_list,
+        })
+        console.print(f"[green]✓ Created source group '{result.get('name', name)}' (ID: {result.get('id', '?')}).[/green]")
+        _zia_changed()
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_source_group"])
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _edit_ip_source_group(client, tenant):
+    chosen = _pick_ip_source_group(tenant)
+    if not chosen:
+        return
+    cfg = chosen["raw_config"]
+    current_name = cfg.get("name") or chosen["name"] or ""
+    current_desc = cfg.get("description") or ""
+    current_ips = cfg.get("ip_addresses") or []
+    current_ips_str = ";".join(current_ips)
+
+    console.print(f"\n[bold]Edit Source IPv4 Group — {chosen['name']}[/bold]")
+    console.print("[dim]Leave blank to keep current value.[/dim]\n")
+
+    name = questionary.text(f"Name [{current_name}]:").ask()
+    if name is None:
+        return
+    description = questionary.text(f"Description [{current_desc or '(none)'}]:").ask()
+    if description is None:
+        return
+    ips_raw = questionary.text(f"IP addresses [{current_ips_str}]:").ask()
+    if ips_raw is None:
+        return
+
+    new_name = name.strip() or current_name
+    new_desc = description.strip() if description.strip() else current_desc
+    new_ips = [ip.strip() for ip in ips_raw.split(";") if ip.strip()] if ips_raw.strip() else current_ips
+
+    confirmed = questionary.confirm(
+        f"Update group '{chosen['name']}' (ID: {chosen['zia_id']})?", default=True
+    ).ask()
+    if not confirmed:
+        return
+    try:
+        client.update_ip_source_group(chosen["zia_id"], {
+            "name": new_name, "description": new_desc, "ip_addresses": new_ips
+        })
+        console.print("[green]✓ Source group updated.[/green]")
+        _zia_changed()
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_source_group"])
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_ip_source_group(client, tenant):
+    chosen = _pick_ip_source_group(tenant)
+    if not chosen:
+        return
+    confirmed = questionary.confirm(
+        f"Delete source group '{chosen['name']}' (ID: {chosen['zia_id']})? This cannot be undone.",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+    try:
+        client.delete_ip_source_group(chosen["zia_id"])
+        console.print("[green]✓ Source group deleted.[/green]")
+        _zia_changed()
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_source_group"])
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Destination IPv4 Groups — full CRUD submenu
+# ------------------------------------------------------------------
+
+def ip_dest_group_menu(client, tenant):
+    while True:
+        render_banner()
+        choice = questionary.select(
+            "Dest IPv4 Group Management",
+            choices=[
+                questionary.Choice("List All", value="list"),
+                questionary.Choice("Search by Name", value="search"),
+                questionary.Separator(),
+                questionary.Choice("Create", value="create"),
+                questionary.Choice("Edit", value="edit"),
+                questionary.Choice("Delete", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("Bulk Create from CSV", value="bulk_csv"),
+                questionary.Separator(),
+                questionary.Choice("← Back", value="back"),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if choice == "list":
+            _list_ip_dest_groups(tenant)
+        elif choice == "search":
+            _search_ip_dest_groups(tenant)
+        elif choice == "create":
+            _create_ip_dest_group_single(client, tenant)
+        elif choice == "edit":
+            _edit_ip_dest_group(client, tenant)
+        elif choice == "delete":
+            _delete_ip_dest_group(client, tenant)
+        elif choice == "bulk_csv":
+            _create_ip_dest_groups(client, tenant)
+        elif choice in ("back", None):
+            break
+
+
+def _list_ip_dest_groups(tenant, search=None):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="ip_destination_group", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+    rows.sort(key=lambda r: (r["name"] or "").lower())
+
+    if search:
+        search_lower = search.lower()
+        rows = [r for r in rows if search_lower in (r["name"] or "").lower()]
+
+    if not rows:
+        msg = (
+            f"[yellow]No destination groups matching '{search}'.[/yellow]" if search
+            else "[yellow]No destination IP groups in local DB. Run Import Config first.[/yellow]"
+        )
+        console.print(msg)
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"Destination IPv4 Groups ({len(rows)} total)", show_lines=False)
+    table.add_column("ID", style="dim")
+    table.add_column("Name")
+    table.add_column("Type", style="dim")
+    table.add_column("Addresses", justify="right", style="dim")
+    table.add_column("Description")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        addrs = cfg.get("addresses") or []
+        table.add_row(
+            r["zia_id"],
+            r["name"] or "—",
+            cfg.get("type") or "—",
+            str(len(addrs)),
+            (cfg.get("description") or "")[:60] or "[dim]—[/dim]",
+        )
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _search_ip_dest_groups(tenant):
+    search = questionary.text("Search (name or partial):").ask()
+    if not search:
+        return
+    _list_ip_dest_groups(tenant, search=search.strip())
+
+
+def _pick_ip_dest_group(tenant):
+    from db.database import get_session
+    from db.models import ZIAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="ip_destination_group", is_deleted=False)
+            .order_by(ZIAResource.name)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print("[yellow]No destination IP groups in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return None
+
+    chosen = questionary.select(
+        "Select group:",
+        choices=[
+            questionary.Choice(f"{r['name']} (ID: {r['zia_id']})", value=r)
+            for r in rows
+        ] + [questionary.Choice("← Cancel", value="cancel")],
+    ).ask()
+    if chosen in (None, "cancel"):
+        return None
+    return chosen
+
+
+_DSTN_TYPES = ["DSTN_IP", "DSTN_FQDN", "DSTN_DOMAIN", "DSTN_OTHER"]
+
+
+def _create_ip_dest_group_single(client, tenant):
+    console.print("\n[bold]Create Destination IPv4 Group[/bold]")
+    name = questionary.text("Name:").ask()
+    if not name or not name.strip():
+        return
+    grp_type = questionary.select("Type:", choices=_DSTN_TYPES).ask()
+    if not grp_type:
+        return
+    description = questionary.text("Description (optional):").ask() or ""
+    addrs_raw = questionary.text("Addresses (semicolon-separated IPs/FQDNs/CIDRs):").ask()
+    if not addrs_raw or not addrs_raw.strip():
+        console.print("[red]At least one address is required.[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+    addr_list = [a.strip() for a in addrs_raw.split(";") if a.strip()]
+    try:
+        result = client.create_ip_destination_group({
+            "name": name.strip(),
+            "type": grp_type,
+            "description": description.strip(),
+            "addresses": addr_list,
+        })
+        console.print(f"[green]✓ Created destination group '{result.get('name', name)}' (ID: {result.get('id', '?')}).[/green]")
+        _zia_changed()
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_destination_group"])
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _edit_ip_dest_group(client, tenant):
+    chosen = _pick_ip_dest_group(tenant)
+    if not chosen:
+        return
+    cfg = chosen["raw_config"]
+    current_name = cfg.get("name") or chosen["name"] or ""
+    current_type = cfg.get("type") or "DSTN_IP"
+    current_desc = cfg.get("description") or ""
+    current_addrs = cfg.get("addresses") or []
+    current_addrs_str = ";".join(current_addrs)
+
+    console.print(f"\n[bold]Edit Destination IPv4 Group — {chosen['name']}[/bold]")
+    console.print("[dim]Leave blank to keep current value.[/dim]\n")
+
+    name = questionary.text(f"Name [{current_name}]:").ask()
+    if name is None:
+        return
+    grp_type = questionary.select(
+        f"Type [{current_type}]:",
+        choices=_DSTN_TYPES,
+        default=current_type if current_type in _DSTN_TYPES else _DSTN_TYPES[0],
+    ).ask()
+    if grp_type is None:
+        return
+    description = questionary.text(f"Description [{current_desc or '(none)'}]:").ask()
+    if description is None:
+        return
+    addrs_raw = questionary.text(f"Addresses [{current_addrs_str}]:").ask()
+    if addrs_raw is None:
+        return
+
+    new_name = name.strip() or current_name
+    new_desc = description.strip() if description.strip() else current_desc
+    new_addrs = [a.strip() for a in addrs_raw.split(";") if a.strip()] if addrs_raw.strip() else current_addrs
+
+    confirmed = questionary.confirm(
+        f"Update group '{chosen['name']}' (ID: {chosen['zia_id']})?", default=True
+    ).ask()
+    if not confirmed:
+        return
+    try:
+        client.update_ip_destination_group(chosen["zia_id"], {
+            "name": new_name, "type": grp_type, "description": new_desc, "addresses": new_addrs
+        })
+        console.print("[green]✓ Destination group updated.[/green]")
+        _zia_changed()
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_destination_group"])
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_ip_dest_group(client, tenant):
+    chosen = _pick_ip_dest_group(tenant)
+    if not chosen:
+        return
+    confirmed = questionary.confirm(
+        f"Delete destination group '{chosen['name']}' (ID: {chosen['zia_id']})? This cannot be undone.",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+    try:
+        client.delete_ip_destination_group(chosen["zia_id"])
+        console.print("[green]✓ Destination group deleted.[/green]")
+        _zia_changed()
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_destination_group"])
+    except Exception as e:
+        console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -1222,7 +1703,8 @@ def _create_ip_source_groups(client, tenant):
         from services.zia_import_service import ZIAImportService
         with console.status("Updating local DB..."):
             ZIAImportService(client, tenant.id).run(resource_types=["ip_source_group"])
-        console.print("[green]✓ Local DB updated. Remember to activate changes in ZIA.[/green]")
+        console.print("[green]✓ Local DB updated.[/green]")
+        _zia_changed()
 
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
@@ -1303,7 +1785,8 @@ def _create_ip_dest_groups(client, tenant):
         from services.zia_import_service import ZIAImportService
         with console.status("Updating local DB..."):
             ZIAImportService(client, tenant.id).run(resource_types=["ip_destination_group"])
-        console.print("[green]✓ Local DB updated. Remember to activate changes in ZIA.[/green]")
+        console.print("[green]✓ Local DB updated.[/green]")
+        _zia_changed()
 
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
@@ -1492,7 +1975,8 @@ def _toggle_dns_rules(client, tenant):
             )
 
     if ok:
-        console.print(f"[green]✓ {ok} rule(s) updated. Remember to activate changes.[/green]")
+        console.print(f"[green]✓ {ok} rule(s) updated.[/green]")
+        _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -2008,7 +2492,8 @@ def _toggle_ssl_rules(client, tenant):
             )
 
     if ok:
-        console.print(f"[green]✓ {ok} rule(s) updated. Remember to activate changes.[/green]")
+        console.print(f"[green]✓ {ok} rule(s) updated.[/green]")
+        _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -2145,7 +2630,8 @@ def _add_urls_to_list(client, tenant, list_type: str):
         status="SUCCESS", tenant_id=tenant.id,
         resource_type=label, details={"urls_added": urls},
     )
-    console.print(f"[green]✓ {len(urls)} URL(s) added. Remember to activate changes.[/green]")
+    console.print(f"[green]✓ {len(urls)} URL(s) added.[/green]")
+    _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -2199,7 +2685,8 @@ def _remove_urls_from_list(client, tenant, list_type: str):
         status="SUCCESS", tenant_id=tenant.id,
         resource_type=label, details={"urls_removed": selected},
     )
-    console.print(f"[green]✓ {len(selected)} URL(s) removed. Remember to activate changes.[/green]")
+    console.print(f"[green]✓ {len(selected)} URL(s) removed.[/green]")
+    _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -2356,7 +2843,8 @@ def _modify_category_urls(client, tenant, add: bool):
         resource_id=cat["zia_id"], resource_name=cat["name"],
         details={"urls": urls},
     )
-    console.print(f"[green]✓ {len(urls)} URL(s) {'added to' if add else 'removed from'} '{cat['name']}'. Remember to activate changes.[/green]")
+    console.print(f"[green]✓ {len(urls)} URL(s) {'added to' if add else 'removed from'} '{cat['name']}'.[/green]")
+    _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -2529,7 +3017,8 @@ def _toggle_url_filtering_rules(client, tenant):
             )
 
     if ok:
-        console.print(f"[green]✓ {ok} rule(s) updated. Remember to activate changes.[/green]")
+        console.print(f"[green]✓ {ok} rule(s) updated.[/green]")
+        _zia_changed()
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -2874,7 +3363,7 @@ def _create_dlp_engine(client, tenant):
     try:
         result = client.create_dlp_engine(config)
         console.print(f"[green]✓ Created DLP engine ID {result.get('id', '?')}.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_engine")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -2911,7 +3400,7 @@ def _edit_dlp_engine(client, tenant):
     try:
         client.update_dlp_engine(chosen["zia_id"], config)
         console.print("[green]✓ DLP engine updated.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_engine")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -2933,7 +3422,7 @@ def _delete_dlp_engine(client, tenant):
     try:
         client.delete_dlp_engine(chosen["zia_id"])
         console.print("[green]✓ DLP engine deleted.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_engine")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -3117,7 +3606,7 @@ def _create_dlp_dictionary_json(client, tenant):
     try:
         result = client.create_dlp_dictionary(config)
         console.print(f"[green]✓ Created DLP dictionary ID {result.get('id', '?')}.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_dictionary")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -3182,7 +3671,7 @@ def _create_dlp_dictionary_csv(client, tenant):
     try:
         result = client.create_dlp_dictionary(payload)
         console.print(f"[green]✓ Created DLP dictionary ID {result.get('id', '?')} with {len(entries)} entries.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_dictionary")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -3219,7 +3708,7 @@ def _edit_dlp_dictionary(client, tenant):
     try:
         client.update_dlp_dictionary(chosen["zia_id"], config)
         console.print("[green]✓ DLP dictionary updated.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_dictionary")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -3274,7 +3763,7 @@ def _edit_dlp_dictionary_csv(client, tenant):
     try:
         client.update_dlp_dictionary(chosen["zia_id"], updated_cfg)
         console.print(f"[green]✓ DLP dictionary updated with {len(entries)} {entry_type}.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_dictionary")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -3296,7 +3785,7 @@ def _delete_dlp_dictionary(client, tenant):
     try:
         client.delete_dlp_dictionary(chosen["zia_id"])
         console.print("[green]✓ DLP dictionary deleted.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         _sync_dlp_resource(client, tenant, "dlp_dictionary")
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
@@ -3713,7 +4202,7 @@ def _create_cloud_app_rule(client, tenant, rule_type: str):
     try:
         result = client.create_cloud_app_rule(rule_type, config)
         console.print(f"[green]✓ Created rule ID {result.get('id', '?')}.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         audit_service.log(
             product="ZIA", operation="create_cloud_app_rule", action="CREATE",
             status="SUCCESS", tenant_id=tenant.id,
@@ -3748,7 +4237,7 @@ def _edit_cloud_app_rule(client, tenant, rule_type: str):
     try:
         client.update_cloud_app_rule(rule_type, chosen["zia_id"], config)
         console.print("[green]✓ Rule updated.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         audit_service.log(
             product="ZIA", operation="update_cloud_app_rule", action="UPDATE",
             status="SUCCESS", tenant_id=tenant.id,
@@ -3776,7 +4265,7 @@ def _duplicate_cloud_app_rule(client, tenant, rule_type: str):
     try:
         result = client.duplicate_cloud_app_rule(rule_type, chosen["zia_id"], new_name)
         console.print(f"[green]✓ Duplicated as '{new_name}' (ID {result.get('id', '?')}).[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         audit_service.log(
             product="ZIA", operation="duplicate_cloud_app_rule", action="CREATE",
             status="SUCCESS", tenant_id=tenant.id,
@@ -3804,7 +4293,7 @@ def _delete_cloud_app_rule(client, tenant, rule_type: str):
     try:
         client.delete_cloud_app_rule(rule_type, chosen["zia_id"])
         console.print("[green]✓ Rule deleted.[/green]")
-        console.print("[yellow]Remember to activate changes in ZIA.[/yellow]")
+        _zia_changed()
         audit_service.log(
             product="ZIA", operation="delete_cloud_app_rule", action="DELETE",
             status="SUCCESS", tenant_id=tenant.id,

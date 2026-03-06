@@ -15,13 +15,21 @@ def _active_tenant_label() -> str:
     return f"  Switch Tenant  (active: {t.name})" if t else "  Switch Tenant"
 
 
+def _zia_label() -> str:
+    from cli.session import get_active_tenant, has_zia_pending
+    t = get_active_tenant()
+    if t and has_zia_pending(t.id):
+        return "  ZIA ⚠  Zscaler Internet Access"
+    return "  ZIA   Zscaler Internet Access"
+
+
 def main_menu():
     while True:
         render_banner()
         choice = questionary.select(
             "Main Menu",
             choices=[
-                questionary.Choice("  ZIA   Zscaler Internet Access", value="zia"),
+                questionary.Choice(_zia_label(), value="zia"),
                 questionary.Choice("  ZPA   Zscaler Private Access", value="zpa"),
                 questionary.Choice("  ZCC   Zscaler Client Connector", value="zcc"),
                 questionary.Choice("  ZDX   Zscaler Digital Experience", value="zdx"),
@@ -58,6 +66,17 @@ def main_menu():
         elif choice == "audit":
             audit_menu()
         elif choice in ("exit", None):
+            from cli.session import get_active_tenant, has_zia_pending
+            t = get_active_tenant()
+            if t and has_zia_pending(t.id):
+                console.print(Panel(
+                    "[yellow]You have unactivated ZIA changes.[/yellow]\n"
+                    "Go to [bold]ZIA → Activation[/bold] to push them before exiting.",
+                    border_style="yellow",
+                    title="Pending Activation",
+                ))
+                if not questionary.confirm("Exit anyway?", default=False).ask():
+                    continue
             console.print("[dim]Goodbye.[/dim]")
             break
 
@@ -74,8 +93,19 @@ def _test_token(zidentity_url: str, client_id: str, client_secret: str):
 
 def _switch_tenant():
     from cli.menus import select_tenant
-    from cli.session import set_active_tenant
+    from cli.session import set_active_tenant, get_active_tenant, has_zia_pending
     from services.config_service import decrypt_secret, list_tenants
+
+    current = get_active_tenant()
+    if current and has_zia_pending(current.id):
+        console.print(Panel(
+            "[yellow]You have unactivated ZIA changes for the current tenant.[/yellow]\n"
+            "Go to [bold]ZIA → Activation[/bold] to push them first.",
+            border_style="yellow",
+            title="Pending Activation",
+        ))
+        if not questionary.confirm("Switch tenant anyway?", default=False).ask():
+            return
 
     if not list_tenants():
         console.print("[yellow]No tenants configured yet.[/yellow]")

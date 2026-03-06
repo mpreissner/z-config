@@ -9,6 +9,21 @@ from typing import Optional
 
 _active_tenant = None
 
+# Tenant IDs with ZIA mutations that have not yet been activated
+_zia_pending: set = set()
+
+
+def mark_zia_pending(tenant_id: int) -> None:
+    _zia_pending.add(tenant_id)
+
+
+def clear_zia_pending(tenant_id: int) -> None:
+    _zia_pending.discard(tenant_id)
+
+
+def has_zia_pending(tenant_id: int) -> bool:
+    return tenant_id in _zia_pending
+
 
 def get_active_tenant():
     """Return the currently selected TenantConfig, or None."""
