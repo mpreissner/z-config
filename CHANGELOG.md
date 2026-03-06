@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.1] - 2026-03-06
+
+### Added
+
+#### ZIA — Source and Destination IPv4 Group CRUD
+- **Source IPv4 Group Management** and **Dest IPv4 Group Management** are now full submenus replacing the previous bulk-CSV-only entry
+- **List All** — scrollable table showing ID, Name, IP/address count, and Description
+- **Search by Name** — partial match filter
+- **Create** — prompted fields: name, description, and semicolon-separated addresses; type selector (DSTN_IP / DSTN_FQDN / DSTN_DOMAIN / DSTN_OTHER) for destination groups
+- **Edit** — pick from local DB; blank input keeps the current value; updates via API and re-syncs DB
+- **Delete** — confirmation prompt (default: No)
+- **Bulk Create from CSV** — existing CSV import functionality retained, now nested inside each submenu
+
+---
+
 ## [0.10.0] - 2026-03-06
 
 ### Added
