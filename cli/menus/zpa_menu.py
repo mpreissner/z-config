@@ -2714,6 +2714,11 @@ def access_policy_menu(client, tenant):
             choices=[
                 questionary.Choice("List Rules", value="list"),
                 questionary.Choice("Search by Name", value="search"),
+                questionary.Choice("Delete Rule", value="delete"),
+                questionary.Separator(),
+                questionary.Choice("Export Existing Rules to CSV", value="export"),
+                questionary.Choice("Import / Sync from CSV", value="sync"),
+                questionary.Choice("Export Blank CSV Template", value="template"),
                 questionary.Separator(),
                 questionary.Choice("← Back", value="back"),
             ],
@@ -2724,6 +2729,14 @@ def access_policy_menu(client, tenant):
             _list_access_policy_rules(tenant)
         elif choice == "search":
             _search_access_policy_rules(tenant)
+        elif choice == "delete":
+            _delete_access_rule(client, tenant)
+        elif choice == "export":
+            _export_policy_rules_to_csv(tenant)
+        elif choice == "sync":
+            _sync_policy_rules(client, tenant)
+        elif choice == "template":
+            _export_policy_template()
         elif choice in ("back", None):
             break
 
@@ -2736,7 +2749,6 @@ def _list_access_policy_rules(tenant):
         resources = (
             session.query(ZPAResource)
             .filter_by(tenant_id=tenant.id, resource_type="policy_access", is_deleted=False)
-            .order_by(ZPAResource.name)
             .all()
         )
         rows = [
@@ -2752,16 +2764,20 @@ def _list_access_policy_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
+    rows.sort(key=lambda r: int(r["raw_config"].get("rule_order") or 0))
+
     table = Table(title=f"Access Policy Rules ({len(rows)} total)", show_lines=False)
+    table.add_column("#", style="dim", width=5)
     table.add_column("Name")
     table.add_column("Action")
     table.add_column("Description")
 
     for r in rows:
         cfg = r["raw_config"]
+        order = str(cfg.get("rule_order") or "—")
         action = cfg.get("action", "—") or "—"
         desc = (cfg.get("description") or "")[:60]
-        table.add_row(r["name"], action, desc)
+        table.add_row(order, r["name"], action, desc)
 
     from cli.banner import capture_banner
     from cli.scroll_view import render_rich_to_lines, scroll_view
@@ -2797,20 +2813,552 @@ def _search_access_policy_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
+    rows.sort(key=lambda r: int(r["raw_config"].get("rule_order") or 0))
+
     table = Table(title=f"Matching Access Policy Rules ({len(rows)})", show_lines=False)
+    table.add_column("#", style="dim", width=5)
     table.add_column("Name")
     table.add_column("Action")
     table.add_column("Description")
 
     for r in rows:
         cfg = r["raw_config"]
+        order = str(cfg.get("rule_order") or "—")
         action = cfg.get("action", "—") or "—"
         desc = (cfg.get("description") or "")[:60]
-        table.add_row(r["name"], action, desc)
+        table.add_row(order, r["name"], action, desc)
 
     from cli.banner import capture_banner
     from cli.scroll_view import render_rich_to_lines, scroll_view
     scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _toggle_access_rules(client, tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+    from services import audit_service
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="policy_access", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {
+                "name": r.name,
+                "zpa_id": r.zpa_id,
+                "disabled": (r.raw_config or {}).get("disabled", False),
+                "raw_config": r.raw_config or {},
+            }
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No access policy rules in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    selected = questionary.checkbox(
+        "Select rules:",
+        choices=[
+            questionary.Choice(
+                f"{'✓' if not r['disabled'] else '✗'}  {r['name']}",
+                value=r,
+            )
+            for r in rows
+        ],
+        instruction="(Space to select, Enter to confirm, Ctrl+C to cancel)",
+    ).ask()
+
+    if not selected:
+        return
+
+    action = questionary.select(
+        f"Action for {len(selected)} rule(s):",
+        choices=[
+            questionary.Choice("Enable", value="enable"),
+            questionary.Choice("Disable", value="disable"),
+        ],
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+    if action is None:
+        return
+
+    confirmed = questionary.confirm(
+        f"{action.title()} {len(selected)} rule(s)?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    new_disabled = action == "disable"
+    success_count = 0
+    fail_count = 0
+
+    for rule in selected:
+        try:
+            config = dict(rule["raw_config"])
+            config["disabled"] = new_disabled
+            client.update_policy_rule("access", rule["zpa_id"], config)
+            _update_access_rule_disabled_in_db(tenant.id, rule["zpa_id"], new_disabled)
+            console.print(f"  [green]✓ {rule['name']}[/green]")
+            audit_service.log(
+                product="ZPA",
+                operation="toggle_access_rule",
+                action="UPDATE",
+                status="SUCCESS",
+                tenant_id=tenant.id,
+                resource_type="policy_access",
+                resource_id=rule["zpa_id"],
+                resource_name=rule["name"],
+                details={"disabled": new_disabled},
+            )
+            success_count += 1
+        except Exception as exc:
+            console.print(f"  [red]✗ {rule['name']}: {exc}[/red]")
+            audit_service.log(
+                product="ZPA",
+                operation="toggle_access_rule",
+                action="UPDATE",
+                status="FAILURE",
+                tenant_id=tenant.id,
+                resource_type="policy_access",
+                resource_id=rule["zpa_id"],
+                resource_name=rule["name"],
+                error_message=str(exc),
+            )
+            fail_count += 1
+
+    console.print(
+        f"\n[green]✓ {success_count} succeeded[/green]"
+        + (f"  [red]✗ {fail_count} failed[/red]" if fail_count else "")
+    )
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _update_access_rule_disabled_in_db(tenant_id: int, zpa_id: str, disabled: bool) -> None:
+    from sqlalchemy.orm.attributes import flag_modified
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        rec = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant_id, resource_type="policy_access", zpa_id=zpa_id)
+            .first()
+        )
+        if rec:
+            cfg = dict(rec.raw_config or {})
+            cfg["disabled"] = disabled
+            rec.raw_config = cfg
+            flag_modified(rec, "raw_config")
+
+
+def _export_policy_rules_to_csv(tenant):
+    import csv as _csv
+    from db.database import get_session
+    from db.models import ZPAResource
+    from services.zpa_policy_service import CSV_FIELDNAMES
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="policy_access", is_deleted=False)
+            .all()
+        )
+        rows = [
+            {"name": r.name, "zpa_id": r.zpa_id, "raw_config": r.raw_config or {}}
+            for r in resources
+        ]
+
+    if not rows:
+        console.print("[yellow]No access policy rules in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rows.sort(key=lambda r: int(r["raw_config"].get("rule_order") or 0))
+
+    default_path = os.path.expanduser(f"~/access_policy_{tenant.name}.csv")
+    out_path = questionary.path("Output path:", default=default_path).ask()
+    if not out_path:
+        return
+    out_path = os.path.expanduser(out_path)
+
+    from services.zpa_policy_service import _decode_conditions
+    csv_rows = []
+    for r in rows:
+        cfg = r["raw_config"]
+        cond = _decode_conditions(cfg)
+        csv_rows.append({
+            "id":               r["zpa_id"] or cfg.get("id") or "",
+            "name":             r["name"],
+            "action":           cfg.get("action") or "ALLOW",
+            "description":      cfg.get("description") or "",
+            "rule_order":       cfg.get("rule_order") or "",
+            "app_groups":       cond["app_groups"],
+            "applications":     cond["applications"],
+            "saml_attributes":  cond["saml_attributes"],
+            "scim_groups":      cond["scim_groups"],
+            "client_types":     cond["client_types"],
+            "machine_groups":   cond["machine_groups"],
+            "trusted_networks": cond["trusted_networks"],
+            "platforms":        cond["platforms"],
+            "country_codes":    cond["country_codes"],
+            "idp_names":        cond["idp_names"],
+        })
+
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(csv_rows)
+
+    console.print(f"[green]✓ {len(csv_rows)} rule(s) exported to {out_path}[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _export_policy_template():
+    from services.zpa_policy_service import CSV_FIELDNAMES, TEMPLATE_ROWS
+
+    default_path = os.path.expanduser("~/access_policy_template.csv")
+    out_path = questionary.path("Output path:", default=default_path).ask()
+    if not out_path:
+        return
+    out_path = os.path.expanduser(out_path)
+
+    import csv as _csv
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(TEMPLATE_ROWS)
+
+    console.print(f"[green]✓ Template written to {out_path}[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _bulk_create_policy_rules(client, tenant):
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from services.zpa_policy_service import parse_csv, dry_run, bulk_create
+
+    console.print("\n[bold]Bulk Create Access Policy Rules from CSV[/bold]\n")
+
+    csv_path = questionary.path("Path to CSV file:").ask()
+    if not csv_path:
+        return
+    csv_path = os.path.expanduser(csv_path)
+
+    try:
+        rows = parse_csv(csv_path)
+    except ValueError as exc:
+        console.print(f"\n[red]CSV validation errors:[/red]\n{exc}")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"\n[dim]Validating {len(rows)} rows...[/dim]")
+    annotated = dry_run(tenant.id, rows)
+
+    dry_table = Table(title="Dry Run", show_lines=False)
+    dry_table.add_column("#", style="dim", width=4)
+    dry_table.add_column("Name")
+    dry_table.add_column("Action")
+    dry_table.add_column("App Groups")
+    dry_table.add_column("Applications")
+    dry_table.add_column("Status")
+
+    for idx, row in enumerate(annotated, start=1):
+        status = row.get("_status", "")
+        status_cell = "[green]READY[/green]" if status == "READY" else "[yellow]MISSING_DEP[/yellow]"
+        dry_table.add_row(
+            str(idx),
+            row.get("name", ""),
+            row.get("action", ""),
+            row.get("app_groups", "") or "—",
+            row.get("applications", "") or "—",
+            status_cell,
+        )
+
+    console.print(dry_table)
+
+    for row in annotated:
+        for issue in row.get("_issues", []):
+            console.print(f"  [yellow]⚠ {row['name']}:[/yellow] {issue}")
+
+    ready = [r for r in annotated if r.get("_status") == "READY"]
+    not_ready = [r for r in annotated if r.get("_status") != "READY"]
+
+    if not ready:
+        console.print("\n[yellow]No READY rows — nothing to create.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    confirmed = questionary.confirm(
+        f"\nCreate {len(ready)} rule(s)? ({len(not_ready)} will be skipped)",
+        default=True,
+    ).ask()
+    if not confirmed:
+        return
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Creating rules...", total=len(ready))
+
+        def on_progress(done, total):
+            progress.update(task, completed=done)
+
+        result = bulk_create(client, tenant.id, annotated, progress_callback=on_progress)
+
+    console.print(
+        f"\n[green]✓ Created {result.created}[/green]  "
+        f"[red]✗ Failed {result.failed}[/red]  "
+        f"[dim]— Skipped {result.skipped}[/dim]"
+    )
+
+    for detail in result.rows_detail:
+        if detail["status"] == "FAILED":
+            console.print(f"  [red]{detail['name']}:[/red] {detail['error']}")
+
+    if result.created:
+        from services.zpa_import_service import ZPAImportService
+        with console.status(f"Syncing {result.created} new rule(s) to local DB..."):
+            ZPAImportService(client, tenant.id).run(resource_types=["policy_access"])
+        console.print("[green]✓ Local DB updated.[/green]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _sync_policy_rules(client, tenant):
+    """Import / Sync access policy rules from CSV (Option C full-mirror)."""
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from services.zpa_policy_service import parse_csv, classify_sync, sync_policy
+
+    console.print("\n[bold]Import / Sync Access Policy Rules from CSV[/bold]\n")
+
+    csv_path = questionary.path("Path to CSV file:").ask()
+    if not csv_path:
+        return
+    csv_path = os.path.expanduser(csv_path)
+
+    try:
+        rows = parse_csv(csv_path)
+    except ValueError as exc:
+        console.print(f"\n[red]CSV validation errors:[/red]\n{exc}")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"\n[dim]Classifying {len(rows)} row(s) against tenant...[/dim]")
+    classification = classify_sync(tenant.id, rows)
+
+    # Dry-run table
+    dry_table = Table(title="Sync Preview (Dry Run)", show_lines=False)
+    dry_table.add_column("Action", width=8)
+    dry_table.add_column("Name")
+    dry_table.add_column("Detail")
+
+    ACTION_STYLE = {
+        "UPDATE":      "[yellow]UPDATE[/yellow]",
+        "CREATE":      "[green]CREATE[/green]",
+        "SKIP":        "[dim]SKIP[/dim]",
+        "MISSING_DEP": "[red]MISSING[/red]",
+    }
+
+    for item in classification.csv_rows:
+        action_label = ACTION_STYLE.get(item["action"], item["action"])
+        name = item["row"].get("name", "")
+        if item["action"] == "UPDATE":
+            detail = "; ".join(item.get("changes", [])) or "—"
+        elif item["action"] == "CREATE":
+            detail = item.get("warn", "(new)")
+        elif item["action"] == "MISSING_DEP":
+            detail = "; ".join(item.get("issues", []))
+        else:
+            detail = "unchanged"
+        dry_table.add_row(action_label, name, detail)
+
+    for item in classification.to_delete:
+        dry_table.add_row("[red]DELETE[/red]", item["name"], f"id {item['zpa_id']} not in CSV")
+
+    if classification.reorder_needed:
+        total_rules = len([e for e in classification.csv_rows if e.get("zpa_id") or e["action"] == "CREATE"])
+        dry_table.add_row("[blue]REORDER[/blue]", f"({total_rules} rules)", "sequence will change")
+
+    console.print(dry_table)
+
+    n_missing = len([e for e in classification.csv_rows if e["action"] == "MISSING_DEP"])
+    if n_missing:
+        console.print(f"\n[red]⚠ {n_missing} row(s) have unresolved dependencies and will be skipped.[/red]")
+
+    # Warn on stale IDs
+    for item in classification.csv_rows:
+        if item.get("warn"):
+            console.print(f"  [yellow]⚠ {item['row'].get('name', '')}:[/yellow] {item['warn']}")
+
+    n_update = len(classification.to_update)
+    n_create = len(classification.to_create)
+    n_delete = len(classification.to_delete)
+    n_skip = len(classification.unchanged)
+
+    if n_update + n_create + n_delete == 0 and not classification.reorder_needed:
+        console.print("\n[green]Everything is up to date — no changes needed.[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    parts = []
+    if n_update:
+        parts.append(f"{n_update} update(s)")
+    if n_create:
+        parts.append(f"{n_create} create(s)")
+    if n_delete:
+        parts.append(f"{n_delete} delete(s)")
+    if classification.reorder_needed:
+        parts.append("reorder")
+    if n_skip:
+        parts.append(f"{n_skip} skip(s)")
+
+    confirmed = questionary.confirm(
+        f"\nApply: {', '.join(parts)}?",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    total_ops = n_update + n_delete + n_create + (1 if classification.reorder_needed else 0)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Syncing...", total=total_ops)
+
+        def on_progress(label, done, total):
+            progress.update(task, completed=done, description=label)
+
+        result = sync_policy(client, tenant.id, classification, progress_callback=on_progress)
+
+    console.print(
+        f"\n[green]✓ Updated {result.updated}[/green]  "
+        f"[green]✓ Created {result.created}[/green]  "
+        f"[red]✗ Deleted {result.deleted}[/red]  "
+        f"[dim]— Skipped {result.skipped}[/dim]"
+        + (f"  [blue]↕ Reordered[/blue]" if result.reordered else "")
+    )
+
+    for err in result.errors:
+        console.print(f"  [red]Error:[/red] {err}")
+
+    if result.updated or result.created or result.deleted:
+        from services.zpa_import_service import ZPAImportService
+        with console.status("Syncing changes to local DB..."):
+            ZPAImportService(client, tenant.id).run(resource_types=["policy_access"])
+        console.print("[green]✓ Local DB updated.[/green]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _delete_access_rule(client, tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+    from services import audit_service
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="policy_access", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [
+            {
+                "name": r.name,
+                "zpa_id": r.zpa_id,
+                "action": (r.raw_config or {}).get("action", "—"),
+            }
+            for r in resources
+        ]
+
+    if not rows:
+        console.print(
+            "[yellow]No access policy rules in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    rule = questionary.select(
+        "Select rule to delete:",
+        choices=[
+            questionary.Choice(f"{r['name']}  [{r['action']}]", value=r)
+            for r in rows
+        ] + [questionary.Separator(), questionary.Choice("← Cancel", value=None)],
+        instruction="(Ctrl+C to cancel)",
+    ).ask()
+
+    if not rule:
+        return
+
+    confirmed = questionary.confirm(
+        f"Permanently delete '{rule['name']}'? This cannot be undone.",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    try:
+        client.delete_access_rule(rule["zpa_id"])
+
+        with get_session() as session:
+            rec = (
+                session.query(ZPAResource)
+                .filter_by(
+                    tenant_id=tenant.id,
+                    resource_type="policy_access",
+                    zpa_id=rule["zpa_id"],
+                )
+                .first()
+            )
+            if rec:
+                rec.is_deleted = True
+
+        audit_service.log(
+            product="ZPA",
+            operation="delete_access_rule",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=tenant.id,
+            resource_type="policy_access",
+            resource_id=rule["zpa_id"],
+            resource_name=rule["name"],
+        )
+        console.print(f"[green]✓ '{rule['name']}' deleted.[/green]")
+    except Exception as exc:
+        audit_service.log(
+            product="ZPA",
+            operation="delete_access_rule",
+            action="DELETE",
+            status="FAILURE",
+            tenant_id=tenant.id,
+            resource_type="policy_access",
+            resource_id=rule["zpa_id"],
+            resource_name=rule["name"],
+            error_message=str(exc),
+        )
+        console.print(f"[red]✗ Delete failed: {exc}[/red]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 # ------------------------------------------------------------------

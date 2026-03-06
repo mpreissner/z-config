@@ -127,6 +127,34 @@ READONLY_FIELDS: set = {
 # SDK method dispatch tables
 # ---------------------------------------------------------------------------
 
+# Resource types that can be deleted during baseline enforcement.
+# Only types listed here will ever have DELETE actions generated.
+# cloud_app_control_rule is handled specially (needs rule_type from raw_config).
+_DELETE_METHODS: Dict[str, str] = {
+    "rule_label":             "delete_rule_label",
+    "time_interval":          "delete_time_interval",
+    "bandwidth_class":        "delete_bandwidth_class",
+    "url_category":           "delete_url_category",
+    "ip_destination_group":   "delete_ip_destination_group",
+    "ip_source_group":        "delete_ip_source_group",
+    "network_service":        "delete_network_service",
+    "network_svc_group":      "delete_network_svc_group",
+    "network_app_group":      "delete_network_app_group",
+    "url_filtering_rule":     "delete_url_filtering_rule",
+    "firewall_rule":          "delete_firewall_rule",
+    "firewall_dns_rule":      "delete_firewall_dns_rule",
+    "firewall_ips_rule":      "delete_firewall_ips_rule",
+    "ssl_inspection_rule":    "delete_ssl_inspection_rule",
+    "nat_control_rule":       "delete_nat_control_rule",
+    "forwarding_rule":        "delete_forwarding_rule",
+    "dlp_web_rule":           "delete_dlp_web_rule",
+    "bandwidth_control_rule": "delete_bandwidth_control_rule",
+    "traffic_capture_rule":   "delete_traffic_capture_rule",
+    "cloud_app_control_rule": None,   # handled via delete_cloud_app_rule(rule_type, id)
+    "workload_group":         "delete_workload_group",
+    "location":               "delete_location",
+}
+
 _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
     "rule_label":             ("create_rule_label",             "update_rule_label"),
     "time_interval":          ("create_time_interval",          "update_time_interval"),
@@ -161,7 +189,7 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
 class PushRecord:
     resource_type: str
     name: str
-    status: str   # "created" | "updated" | "skipped" | "failed:<reason>"
+    status: str   # "created" | "updated" | "deleted" | "skipped" | "failed:<reason>"
 
     @property
     def is_created(self) -> bool:
@@ -170,6 +198,10 @@ class PushRecord:
     @property
     def is_updated(self) -> bool:
         return self.status == "updated"
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.status == "deleted"
 
     @property
     def is_skipped(self) -> bool:
@@ -203,6 +235,8 @@ class DryRunResult:
     # Entries queued to push, keyed by resource_type; each entry dict has
     # __action ("create"|"update"), __target_id, __display_name
     pending: Dict[str, List[dict]]
+    # Resources present in the tenant but absent from the baseline — to be deleted
+    to_delete: List[PushRecord]
     # ID remap populated during classification (preserved for push_classified)
     id_remap: Dict[str, str]
 
@@ -220,22 +254,29 @@ class DryRunResult:
     def skip_count(self) -> int:
         return len(self.skipped)
 
+    @property
+    def delete_count(self) -> int:
+        return len(self.to_delete)
+
     def type_summary(self) -> Dict[str, Dict[str, int]]:
-        """Return {rtype: {"create": N, "update": N, "skip": N}} across all types."""
+        """Return {rtype: {"create": N, "update": N, "skip": N, "delete": N}} across all types."""
         out: Dict[str, Dict[str, int]] = {}
         for r in self.skipped:
-            out.setdefault(r.resource_type, {"create": 0, "update": 0, "skip": 0})
+            out.setdefault(r.resource_type, {"create": 0, "update": 0, "skip": 0, "delete": 0})
             out[r.resource_type]["skip"] += 1
         for rtype, entries in self.pending.items():
-            out.setdefault(rtype, {"create": 0, "update": 0, "skip": 0})
+            out.setdefault(rtype, {"create": 0, "update": 0, "skip": 0, "delete": 0})
             for e in entries:
                 key = "create" if e.get("__action") == "create" else "update"
                 out[rtype][key] += 1
+        for r in self.to_delete:
+            out.setdefault(r.resource_type, {"create": 0, "update": 0, "skip": 0, "delete": 0})
+            out[r.resource_type]["delete"] += 1
         return out
 
-    def changes_by_action(self) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
-        """Return (creates, updates) as lists of (resource_type, display_name) tuples."""
-        creates, updates = [], []
+    def changes_by_action(self) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+        """Return (creates, updates, deletes) as lists of (resource_type, display_name) tuples."""
+        creates, updates, deletes = [], [], []
         for rtype, entries in self.pending.items():
             for e in entries:
                 dname = e.get("__display_name") or e.get("name") or "?"
@@ -243,7 +284,9 @@ class DryRunResult:
                     creates.append((rtype, dname))
                 else:
                     updates.append((rtype, dname))
-        return creates, updates
+        for r in self.to_delete:
+            deletes.append((r.resource_type, r.name))
+        return creates, updates, deletes
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +384,43 @@ class ZIAPushService:
 
                 pending.setdefault(rtype, []).append(queued)
 
+        # Step 4: Identify extraneous resources — present in tenant but absent from baseline.
+        # Only generate deletes for resource types that appear in the baseline file;
+        # types not covered by the snapshot are left untouched.
+        to_delete: List[PushRecord] = []
+        for rtype in ordered_types:
+            if rtype in SKIP_TYPES or rtype not in _DELETE_METHODS:
+                continue
+            if rtype in ("allowlist", "denylist"):
+                continue
+
+            baseline_entries = resources.get(rtype) or []
+            baseline_ids = {str(e.get("id", "")) for e in baseline_entries if e.get("id")}
+            baseline_names = {e.get("name", "") for e in baseline_entries if e.get("name")}
+
+            for zia_id, entry in (existing.get(rtype) or {}).items():
+                name = entry.get("name", "")
+                raw = entry.get("raw_config", {})
+
+                # Skip if this entry was matched during classification
+                if zia_id in baseline_ids or name in baseline_names:
+                    continue
+                # Skip predefined/system resources
+                if rtype in SKIP_IF_PREDEFINED and _is_predefined(rtype, raw):
+                    continue
+                if name in SKIP_NAMED.get(rtype, set()):
+                    continue
+
+                to_delete.append(PushRecord(
+                    resource_type=rtype,
+                    name=name or zia_id,
+                    status=f"pending_delete:{zia_id}",
+                ))
+
         return DryRunResult(
             skipped=skipped,
             pending=pending,
+            to_delete=to_delete,
             id_remap=dict(self._id_remap),
         )
 
@@ -392,6 +469,15 @@ class ZIAPushService:
                             status=f"failed:{last_err} (stable, no progress)",
                         ))
                 break
+
+        # Execute deletes after all creates/updates are done
+        for rec in dry_run.to_delete:
+            # Extract the zia_id stored in status field as "pending_delete:<id>"
+            zia_id = rec.status.partition(":")[2]
+            delete_rec = self._delete_one(rec.resource_type, rec.name, zia_id)
+            if progress_callback:
+                progress_callback(pass_num, rec.resource_type, delete_rec)
+            all_records.append(delete_rec)
 
         return all_records
 
@@ -644,6 +730,36 @@ class ZIAPushService:
                     status=f"failed:permanent:{exc}",
                 ))
         return records
+
+    def _delete_one(self, resource_type: str, name: str, zia_id: str) -> PushRecord:
+        """Delete a single resource from the live tenant."""
+        method_name = _DELETE_METHODS.get(resource_type)
+
+        try:
+            if resource_type == "cloud_app_control_rule":
+                # Need rule_type — look it up from DB raw_config
+                from db.database import get_session
+                from db.models import ZIAResource
+                with get_session() as session:
+                    rec = (
+                        session.query(ZIAResource)
+                        .filter_by(tenant_id=self._tenant_id,
+                                   resource_type=resource_type,
+                                   zia_id=zia_id)
+                        .first()
+                    )
+                    rule_type = (rec.raw_config or {}).get("type") if rec else None
+                if not rule_type:
+                    return PushRecord(resource_type, name,
+                                      "failed:permanent:cloud_app_rule missing type in DB")
+                self._client.delete_cloud_app_rule(rule_type, zia_id)
+            elif method_name:
+                getattr(self._client, method_name)(zia_id)
+            else:
+                return PushRecord(resource_type, name, "skipped")
+            return PushRecord(resource_type, name, "deleted")
+        except Exception as exc:
+            return self._classify_error(resource_type, name, exc)
 
     def _classify_error(self, resource_type: str, name: str, exc: Exception) -> PushRecord:
         """Classify an exception as permanent (4xx) or transient."""

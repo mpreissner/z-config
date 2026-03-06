@@ -279,6 +279,10 @@ def firewall_policy_menu(client, tenant):
                 questionary.Choice("List Firewall Rules", value="list_fw"),
                 questionary.Choice("Search Firewall Rules", value="search_fw"),
                 questionary.Choice("Enable / Disable Firewall Rules", value="toggle_fw"),
+                questionary.Choice("Export Firewall Rules to CSV", value="export_fw"),
+                questionary.Choice("Import / Sync Firewall Rules", value="sync_fw"),
+                questionary.Choice("Source IPv4 Group Management", value="create_src_groups"),
+                questionary.Choice("Dest IPv4 Group Management", value="create_dst_groups"),
                 questionary.Separator(),
                 questionary.Choice("List DNS Filter Rules", value="list_dns"),
                 questionary.Choice("Search DNS Filter Rules", value="search_dns"),
@@ -299,6 +303,14 @@ def firewall_policy_menu(client, tenant):
             _search_firewall_rules(tenant)
         elif choice == "toggle_fw":
             _toggle_firewall_rules(client, tenant)
+        elif choice == "export_fw":
+            _export_firewall_rules_to_csv(tenant)
+        elif choice == "sync_fw":
+            _sync_firewall_rules(client, tenant)
+        elif choice == "create_src_groups":
+            _create_ip_source_groups(client, tenant)
+        elif choice == "create_dst_groups":
+            _create_ip_dest_groups(client, tenant)
         elif choice == "list_dns":
             _list_dns_rules(tenant)
         elif choice == "search_dns":
@@ -500,6 +512,330 @@ def _toggle_firewall_rules(client, tenant):
 
     if ok:
         console.print(f"[green]✓ {ok} rule(s) updated. Remember to activate changes.[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _export_firewall_rules_to_csv(tenant):
+    import csv as _csv
+    import os
+    from services.zia_firewall_service import export_rules_to_csv, CSV_FIELDNAMES
+
+    csv_rows = export_rules_to_csv(tenant.id)
+
+    if not csv_rows:
+        console.print("[yellow]No firewall rules in local DB. Run Import Config first.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    default_path = os.path.expanduser(f"~/firewall_rules_{tenant.name}.csv")
+    out_path = questionary.path("Output path:", default=default_path).ask()
+    if not out_path:
+        return
+    out_path = os.path.expanduser(out_path)
+
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(csv_rows)
+
+    console.print(f"[green]✓ {len(csv_rows)} rule(s) exported to {out_path}[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _sync_firewall_rules(client, tenant):
+    """Import / Sync cloud firewall rules from CSV."""
+    import os
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from services.zia_firewall_service import parse_csv, classify_sync, sync_rules
+
+    console.print("\n[bold]Import / Sync Cloud Firewall Rules from CSV[/bold]\n")
+
+    csv_path = questionary.path("Path to CSV file:").ask()
+    if not csv_path:
+        return
+    csv_path = os.path.expanduser(csv_path)
+
+    try:
+        rows = parse_csv(csv_path)
+    except ValueError as exc:
+        console.print(f"\n[red]CSV validation errors:[/red]\n{exc}")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    console.print(f"\n[dim]Classifying {len(rows)} row(s) against tenant...[/dim]")
+    classification = classify_sync(tenant.id, rows)
+
+    # Dry-run table
+    dry_table = Table(title="Sync Preview (Dry Run)", show_lines=False)
+    dry_table.add_column("Action", width=8)
+    dry_table.add_column("Name")
+    dry_table.add_column("Detail")
+
+    ACTION_STYLE = {
+        "UPDATE":      "[yellow]UPDATE[/yellow]",
+        "CREATE":      "[green]CREATE[/green]",
+        "SKIP":        "[dim]SKIP[/dim]",
+        "MISSING_DEP": "[red]MISSING[/red]",
+    }
+
+    for item in classification.csv_rows:
+        action_label = ACTION_STYLE.get(item["action"], item["action"])
+        name = item["row"].get("name", "")
+        if item["action"] == "UPDATE":
+            detail = "; ".join(item.get("changes", [])) or "—"
+        elif item["action"] == "CREATE":
+            detail = item.get("warn", "(new)")
+        elif item["action"] == "MISSING_DEP":
+            detail = "; ".join(item.get("issues", []))
+        else:
+            detail = "unchanged"
+        dry_table.add_row(action_label, name, detail)
+
+    for item in classification.to_delete:
+        dry_table.add_row("[red]DELETE[/red]", item["name"], f"id {item['zia_id']} not in CSV")
+
+    if classification.reorder_needed:
+        total_rules = len([e for e in classification.csv_rows if e.get("zia_id") or e["action"] == "CREATE"])
+        dry_table.add_row("[blue]REORDER[/blue]", f"({total_rules} rules)", "sequence will change")
+
+    console.print(dry_table)
+
+    n_missing = len(classification.missing_dep)
+    if n_missing:
+        console.print(f"\n[red]⚠ {n_missing} row(s) have unresolved dependencies and will be skipped.[/red]")
+        console.print("[dim]Create the referenced IP groups, services, or locations first, "
+                      "then re-run Import Config before retrying.[/dim]")
+
+    for item in classification.csv_rows:
+        if item.get("warn"):
+            console.print(f"  [yellow]⚠ {item['row'].get('name', '')}:[/yellow] {item['warn']}")
+
+    n_update = len(classification.to_update)
+    n_create = len(classification.to_create)
+    n_delete = len(classification.to_delete)
+    n_skip = len(classification.unchanged)
+
+    if n_update + n_create + n_delete == 0 and not classification.reorder_needed:
+        console.print("\n[green]Everything is up to date — no changes needed.[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    parts = []
+    if n_update:
+        parts.append(f"{n_update} update(s)")
+    if n_create:
+        parts.append(f"{n_create} create(s)")
+    if n_delete:
+        parts.append(f"{n_delete} delete(s)")
+    if classification.reorder_needed:
+        parts.append("reorder")
+    if n_skip:
+        parts.append(f"{n_skip} skip(s)")
+
+    confirmed = questionary.confirm(
+        f"\nApply: {', '.join(parts)}? (Changes will require ZIA activation)",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    total_ops = n_update + n_delete + n_create + (1 if classification.reorder_needed else 0)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Syncing...", total=total_ops)
+
+        def on_progress(label, done, total):
+            progress.update(task, completed=done, description=label)
+
+        result = sync_rules(client, tenant.id, classification, progress_callback=on_progress)
+
+    console.print(
+        f"\n[green]✓ Updated {result.updated}[/green]  "
+        f"[green]✓ Created {result.created}[/green]  "
+        f"[red]✗ Deleted {result.deleted}[/red]  "
+        f"[dim]— Skipped {result.skipped}[/dim]"
+        + (f"  [blue]↕ Reordered[/blue]" if result.reordered else "")
+    )
+
+    for err in result.errors:
+        console.print(f"  [red]Error:[/red] {err}")
+
+    if result.updated or result.created or result.deleted or result.reordered:
+        from services.zia_import_service import ZIAImportService
+        with console.status("Syncing changes to local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["firewall_rule"])
+        console.print("[green]✓ Local DB updated. Remember to activate changes in ZIA.[/green]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _create_ip_source_groups(client, tenant):
+    """Bulk-create IP source groups from a CSV file."""
+    import csv as _csv
+    import os
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from services.zia_firewall_service import (
+        parse_ip_source_group_csv, bulk_create_ip_source_groups,
+        IP_SOURCE_GROUP_FIELDNAMES, IP_SOURCE_GROUP_TEMPLATE,
+    )
+
+    console.print("\n[bold]Create Source IP Groups from CSV[/bold]\n")
+    console.print("[dim]CSV columns: name, description, ip_addresses (semicolon-separated IPs/CIDRs)[/dim]\n")
+
+    choice = questionary.select(
+        "Action:",
+        choices=[
+            questionary.Choice("Import from CSV", value="import"),
+            questionary.Choice("Export blank template", value="template"),
+            questionary.Choice("← Cancel", value="cancel"),
+        ],
+    ).ask()
+
+    if choice == "template":
+        default_path = os.path.expanduser("~/ip_source_groups_template.csv")
+        out_path = questionary.path("Output path:", default=default_path).ask()
+        if out_path:
+            out_path = os.path.expanduser(out_path)
+            with open(out_path, "w", newline="", encoding="utf-8") as fh:
+                writer = _csv.DictWriter(fh, fieldnames=IP_SOURCE_GROUP_FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(IP_SOURCE_GROUP_TEMPLATE)
+            console.print(f"[green]✓ Template written to {out_path}[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    if choice in (None, "cancel"):
+        return
+
+    csv_path = questionary.path("Path to CSV file:").ask()
+    if not csv_path:
+        return
+    csv_path = os.path.expanduser(csv_path)
+
+    try:
+        rows = parse_ip_source_group_csv(csv_path)
+    except ValueError as exc:
+        console.print(f"\n[red]CSV validation errors:[/red]\n{exc}")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    confirmed = questionary.confirm(
+        f"Create {len(rows)} IP source group(s)?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    with Progress(
+        SpinnerColumn(), TextColumn("{task.description}"),
+        BarColumn(), TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(), console=console, transient=True,
+    ) as progress:
+        task = progress.add_task("Creating groups...", total=len(rows))
+        result = bulk_create_ip_source_groups(
+            client, tenant.id, rows,
+            progress_callback=lambda done, total: progress.update(task, completed=done),
+        )
+
+    console.print(f"\n[green]✓ Created {result.created}[/green]  [red]✗ Failed {result.failed}[/red]")
+    for d in result.rows_detail:
+        if d["status"] == "FAILED":
+            console.print(f"  [red]{d['name']}:[/red] {d['error']}")
+
+    if result.created:
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_source_group"])
+        console.print("[green]✓ Local DB updated. Remember to activate changes in ZIA.[/green]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _create_ip_dest_groups(client, tenant):
+    """Bulk-create IP destination groups from a CSV file."""
+    import csv as _csv
+    import os
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from services.zia_firewall_service import (
+        parse_ip_dest_group_csv, bulk_create_ip_dest_groups,
+        IP_DEST_GROUP_FIELDNAMES, IP_DEST_GROUP_TEMPLATE,
+    )
+
+    console.print("\n[bold]Create Destination IP Groups from CSV[/bold]\n")
+    console.print("[dim]CSV columns: name, type (DSTN_IP/DSTN_FQDN/DSTN_DOMAIN/DSTN_OTHER), description, ip_addresses[/dim]\n")
+
+    choice = questionary.select(
+        "Action:",
+        choices=[
+            questionary.Choice("Import from CSV", value="import"),
+            questionary.Choice("Export blank template", value="template"),
+            questionary.Choice("← Cancel", value="cancel"),
+        ],
+    ).ask()
+
+    if choice == "template":
+        default_path = os.path.expanduser("~/ip_dest_groups_template.csv")
+        out_path = questionary.path("Output path:", default=default_path).ask()
+        if out_path:
+            out_path = os.path.expanduser(out_path)
+            with open(out_path, "w", newline="", encoding="utf-8") as fh:
+                writer = _csv.DictWriter(fh, fieldnames=IP_DEST_GROUP_FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(IP_DEST_GROUP_TEMPLATE)
+            console.print(f"[green]✓ Template written to {out_path}[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    if choice in (None, "cancel"):
+        return
+
+    csv_path = questionary.path("Path to CSV file:").ask()
+    if not csv_path:
+        return
+    csv_path = os.path.expanduser(csv_path)
+
+    try:
+        rows = parse_ip_dest_group_csv(csv_path)
+    except ValueError as exc:
+        console.print(f"\n[red]CSV validation errors:[/red]\n{exc}")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    confirmed = questionary.confirm(
+        f"Create {len(rows)} IP destination group(s)?", default=True
+    ).ask()
+    if not confirmed:
+        return
+
+    with Progress(
+        SpinnerColumn(), TextColumn("{task.description}"),
+        BarColumn(), TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(), console=console, transient=True,
+    ) as progress:
+        task = progress.add_task("Creating groups...", total=len(rows))
+        result = bulk_create_ip_dest_groups(
+            client, tenant.id, rows,
+            progress_callback=lambda done, total: progress.update(task, completed=done),
+        )
+
+    console.print(f"\n[green]✓ Created {result.created}[/green]  [red]✗ Failed {result.failed}[/red]")
+    for d in result.rows_detail:
+        if d["status"] == "FAILED":
+            console.print(f"  [red]{d['name']}:[/red] {d['error']}")
+
+    if result.created:
+        from services.zia_import_service import ZIAImportService
+        with console.status("Updating local DB..."):
+            ZIAImportService(client, tenant.id).run(resource_types=["ip_destination_group"])
+        console.print("[green]✓ Local DB updated. Remember to activate changes in ZIA.[/green]")
+
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -3077,8 +3413,8 @@ def apply_baseline_menu(client, tenant):
 
         dry_run = service.classify_baseline(baseline, import_progress_callback=_import_progress)
 
-    creates, updates = dry_run.changes_by_action()
-    total_changes = len(creates) + len(updates)
+    creates, updates, deletes = dry_run.changes_by_action()
+    total_changes = len(creates) + len(updates) + len(deletes)
 
     # ── Step 3: show dry-run summary ──────────────────────────────────────
     console.print()
@@ -3087,6 +3423,7 @@ def apply_baseline_menu(client, tenant):
     delta_table.add_column("Resource Type")
     delta_table.add_column("Create", justify="right", style="green")
     delta_table.add_column("Update", justify="right", style="cyan")
+    delta_table.add_column("Delete", justify="right", style="red")
     delta_table.add_column("Skip", justify="right", style="dim")
     for rtype in sorted(summary):
         counts = summary[rtype]
@@ -3094,6 +3431,7 @@ def apply_baseline_menu(client, tenant):
             rtype,
             str(counts["create"]) if counts["create"] else "—",
             str(counts["update"]) if counts["update"] else "—",
+            str(counts["delete"]) if counts["delete"] else "—",
             str(counts["skip"])   if counts["skip"]   else "—",
         )
     console.print(delta_table)
@@ -3103,7 +3441,7 @@ def apply_baseline_menu(client, tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    # Show per-resource detail for creates and updates (cap at 30 each)
+    # Show per-resource detail for creates, updates, and deletes (cap at 30 each)
     _MAX_DETAIL = 30
     if creates:
         console.print(f"\n[green]To create ({len(creates)}):[/green]")
@@ -3119,9 +3457,23 @@ def apply_baseline_menu(client, tenant):
         if len(updates) > _MAX_DETAIL:
             console.print(f"  [dim]... and {len(updates) - _MAX_DETAIL} more[/dim]")
 
+    if deletes:
+        console.print(f"\n[red]To delete ({len(deletes)}) — not in baseline:[/red]")
+        for rtype, name in deletes[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(deletes) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(deletes) - _MAX_DETAIL} more[/dim]")
+
     console.print()
+    action_summary = []
+    if creates:
+        action_summary.append(f"[green]{len(creates)} create(s)[/green]")
+    if updates:
+        action_summary.append(f"[cyan]{len(updates)} update(s)[/cyan]")
+    if deletes:
+        action_summary.append(f"[red]{len(deletes)} delete(s)[/red]")
     confirmed = questionary.confirm(
-        f"Push {len(creates)} create(s) and {len(updates)} update(s) to {tenant.name}?",
+        f"Apply {', '.join(action_summary)} to {tenant.name}?",
         default=False,
     ).ask()
     if not confirmed:
@@ -3143,6 +3495,7 @@ def apply_baseline_menu(client, tenant):
     all_records = dry_run.skipped + push_records
     created  = sum(1 for r in push_records if r.is_created)
     updated  = sum(1 for r in push_records if r.is_updated)
+    deleted  = sum(1 for r in push_records if r.is_deleted)
     skipped  = sum(1 for r in all_records  if r.is_skipped)
     failed   = sum(1 for r in push_records if r.is_failed)
     passes   = current_pass[0] or 1
@@ -3150,17 +3503,20 @@ def apply_baseline_menu(client, tenant):
     console.print(f"\n[bold]Push complete[/bold] — {passes} pass(es)")
     console.print(f"  [green]Created:[/green]  {created}")
     console.print(f"  [cyan]Updated:[/cyan]  {updated}")
+    console.print(f"  [red]Deleted:[/red]  {deleted}")
     console.print(f"  [dim]Skipped:[/dim]  {skipped}")
     console.print(f"  [red]Failed:[/red]   {failed}")
 
     # Results table by type (push records only — skips are uninteresting here)
     if push_records:
-        by_type = defaultdict(lambda: {"created": 0, "updated": 0, "failed": 0})
+        by_type = defaultdict(lambda: {"created": 0, "updated": 0, "deleted": 0, "failed": 0})
         for r in push_records:
             if r.is_created:
                 by_type[r.resource_type]["created"] += 1
             elif r.is_updated:
                 by_type[r.resource_type]["updated"] += 1
+            elif r.is_deleted:
+                by_type[r.resource_type]["deleted"] += 1
             elif r.is_failed:
                 by_type[r.resource_type]["failed"] += 1
 
@@ -3168,12 +3524,14 @@ def apply_baseline_menu(client, tenant):
         results_table.add_column("Resource Type")
         results_table.add_column("Created", justify="right", style="green")
         results_table.add_column("Updated", justify="right", style="cyan")
+        results_table.add_column("Deleted", justify="right", style="red")
         results_table.add_column("Failed",  justify="right", style="red")
         for rtype, counts in sorted(by_type.items()):
             results_table.add_row(
                 rtype,
                 str(counts["created"]) if counts["created"] else "—",
                 str(counts["updated"]) if counts["updated"] else "—",
+                str(counts["deleted"]) if counts["deleted"] else "—",
                 str(counts["failed"])  if counts["failed"]  else "—",
             )
         console.print(results_table)

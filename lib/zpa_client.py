@@ -285,6 +285,26 @@ class ZPAClient:
         _unwrap(result, resp, err)
         return True
 
+    def create_access_rule(self, name: str, action: str, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.add_access_rule(name=name, action=action, **kwargs)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_access_rule(self, rule_id: str, name: str, action: str, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.update_rule(
+            "access", rule_id, name=name, action=action, **kwargs
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_access_rule(self, rule_id: str) -> None:
+        _, _, err = self._sdk.zpa.policies.delete_rule("access", rule_id)
+        if err:
+            raise RuntimeError(str(err))
+
+    def bulk_reorder_access_rules(self, rule_ids: List[str]) -> None:
+        _, _, err = self._sdk.zpa.policies.bulk_reorder_rules("access", rule_ids)
+        if err:
+            raise RuntimeError(str(err))
+
     # ------------------------------------------------------------------
     # PRA Consoles
     # ------------------------------------------------------------------

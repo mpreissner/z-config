@@ -86,6 +86,10 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.url_categories.update_url_category(category_id, **config)
         return _to_dict(_unwrap(result, resp, err))
 
+    def delete_url_category(self, category_id: str) -> None:
+        result, resp, err = self._sdk.zia.url_categories.delete_category(category_id)
+        _unwrap(result, resp, err)
+
     def url_lookup(self, urls: List[str]) -> List[Dict]:
         result, err = self._sdk.zia.url_categories.lookup(urls)
         if err:
@@ -524,6 +528,10 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.bandwidth_control_rules.update_rule(rule_id, **config)
         return _to_dict(_unwrap(result, resp, err))
 
+    def delete_bandwidth_control_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.bandwidth_control_rules.delete_rule(rule_id)
+        _unwrap(result, resp, err)
+
     # ------------------------------------------------------------------
     # Traffic Capture Rules
     # ------------------------------------------------------------------
@@ -539,6 +547,10 @@ class ZIAClient:
     def update_traffic_capture_rule(self, rule_id: str, config: Dict) -> Dict:
         result, resp, err = self._sdk.zia.traffic_capture.update_rule(rule_id, **config)
         return _to_dict(_unwrap(result, resp, err))
+
+    def delete_traffic_capture_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.traffic_capture.delete_rule(rule_id)
+        _unwrap(result, resp, err)
 
     # ------------------------------------------------------------------
     # Workload Groups

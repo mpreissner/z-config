@@ -4,6 +4,58 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.0] - 2026-03-06
+
+### Added
+
+#### ZPA — Access Policy Import / Sync from CSV
+- **Export Existing Rules to CSV** — writes all `policy_access` rules to CSV with `id` as the first column; decodes all condition fields (app_groups, applications, saml_attributes, scim_groups, client_types, machine_groups, trusted_networks, platforms, country_codes, idp_names) into readable semicolon-separated values
+- **Import / Sync from CSV** (replaces "Bulk Create from CSV") — full Option C mirror sync:
+  - Rows with `id` → PUT update (config diff check; skipped if unchanged)
+  - Rows without `id` → POST create, captures returned ID
+  - Existing rules whose ID is absent from the CSV → DELETE
+  - All surviving IDs in CSV row order → `bulk_reorder_rules()` atomic reorder
+- **Dry-run preview table** — shows UPDATE / CREATE / DELETE / SKIP / MISSING_DEP / REORDER classification before any API calls; MISSING_DEP rows highlighted in red with dependency issue detail
+- **CSV scoping fields** — `machine_groups`, `trusted_networks`, `platforms`, `country_codes`, `idp_names` added to the CSV schema; all are ignore-if-empty; at least one of `app_groups` or `applications` is required per rule
+- **Validation** — platform values validated against `{ios, android, mac_os, windows, linux, chrome_os}`; unresolved machine groups, trusted networks, or IdPs are flagged as MISSING_DEP and excluded from sync
+
+#### ZIA — Firewall Rule Export and Import / Sync from CSV
+- **Export Firewall Rules to CSV** — writes all `firewall_rule` entries sorted by order; decodes group/service/location references by name from local DB; literal IPs/addresses written as-is
+- **Import / Sync Firewall Rules** — same Option C algorithm as ZPA (update / create / delete / reorder); reorder implemented as individual PUTs in descending order (no ZIA bulk-reorder endpoint)
+- **MISSING_DEP validation** — rows referencing `src_ip_groups`, `dest_ip_groups`, `nw_services`, `nw_service_groups`, or `locations` not present in the local DB are classified MISSING_DEP and excluded from sync with a hint to create missing groups first
+- **Source IPv4 Group Management** — sub-menu (Import from CSV / Export Template / Cancel); CSV columns: `name`, `description`, `ip_addresses`; bulk creates groups via ZIA API with progress bar and per-row error reporting; local DB re-synced on completion
+- **Dest IPv4 Group Management** — same pattern; CSV columns: `name`, `type`, `description`, `ip_addresses`; `type` accepts `DSTN_IP`, `DSTN_FQDN`, `DSTN_DOMAIN`, `DSTN_OTHER`
+
+#### ZPA Client (`lib/zpa_client.py`)
+- `update_access_rule(rule_id, name, action, **kwargs)` — PUT to `policies.update_rule("access", ...)`
+- `bulk_reorder_access_rules(rule_ids)` — calls `policies.bulk_reorder_rules("access", rule_ids)`
+
+#### New / updated service files
+- `services/zpa_policy_service.py` — `SyncResult`, `SyncClassification`, `classify_sync()`, `sync_policy()`, `_build_conditions()`, `_decode_conditions()`, `_is_row_unchanged()`; all 10 condition field types supported
+- `services/zia_firewall_service.py` (new) — `parse_csv()`, `export_rules_to_csv()`, `resolve_dependencies()`, `classify_sync()`, `sync_rules()`; `parse_ip_source_group_csv()`, `parse_ip_dest_group_csv()`, `bulk_create_ip_source_groups()`, `bulk_create_ip_dest_groups()`
+
+### Fixed
+
+#### ZPA — Access Policy search
+- Sort and display key corrected from `ruleOrder` (camelCase) to `rule_order` (snake_case, matching SDK storage)
+
+---
+
+## [0.9.2] - 2026-03-05
+
+### Added
+
+#### Tenant Management — org info auto-fetch
+- `TenantConfig`: 4 new columns — `zia_tenant_id` (numeric prefix from `orgInformation.pdomain`), `zia_cloud` (from `cloudName`), `zpa_tenant_cloud` (from `zpaTenantCloud`), `zia_subscriptions` (JSON from `GET /subscriptions`)
+- `fetch_org_info()` in `services/config_service.py` — calls `GET /zia/api/v1/orgInformation` and `GET /zia/api/v1/subscriptions`; populates all four columns
+- **Add Tenant / Edit Tenant**: ZPA Customer ID prompt removed — `zpa_customer_id` now auto-populated from `orgInformation.zpaTenantId`
+- **Switch Tenant**: always refreshes org info on successful auth; shows a summary table on first-time fetch or any field change; yellow subscription-change panel if subscriptions differ between tenants
+- **Startup**: `_run_data_migrations()` — runs pending data migrations with Rich progress bar and per-tenant result table; backfills org info for all tenants missing `zia_tenant_id`
+- **List Tenants**: table now includes ZIA Cloud, ZIA Tenant ID (numeric), and ZPA Cloud columns
+- DB auto-migrations for the four new `TenantConfig` columns added to `db/database.py`
+
+---
+
 ## [0.9.1] - 2026-03-04
 
 ### Fixed
