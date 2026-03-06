@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -351,10 +352,16 @@ class ZIAPushService:
 
             entries = resources.get(rtype) or []
 
-            # Allowlist/denylist bypass delta check — always merge
+            # Allowlist/denylist: only queue if there are URLs to add
             if rtype in ("allowlist", "denylist"):
-                if entries:
+                url_key = "whitelistUrls" if rtype == "allowlist" else "blacklistUrls"
+                new_urls = []
+                for entry in entries:
+                    new_urls.extend(entry.get("raw_config", {}).get(url_key) or [])
+                if new_urls:
                     pending[rtype] = list(entries)
+                else:
+                    skipped.append(PushRecord(rtype, rtype, "skipped"))
                 continue
 
             existing_for_type = existing.get(rtype) or {}
@@ -556,8 +563,27 @@ class ZIAPushService:
         return None
 
     def _configs_match(self, baseline_config: dict, existing_config: dict) -> bool:
-        """Return True if both configs are identical after stripping read-only fields."""
-        return self._strip(baseline_config) == self._strip(existing_config)
+        """Return True if both configs are semantically identical after stripping
+        read-only fields and normalizing list ordering (ZIA returns arrays like
+        port ranges in non-deterministic order between API calls)."""
+        return self._normalize(self._strip(baseline_config)) == self._normalize(self._strip(existing_config))
+
+    def _normalize(self, value):
+        """Recursively normalize a config value for stable comparison.
+
+        Lists are sorted by their canonical JSON representation so that
+        semantically equivalent configs with differently-ordered arrays
+        (e.g. port range lists) compare as equal.
+        """
+        if isinstance(value, dict):
+            return {k: self._normalize(v) for k, v in value.items()}
+        if isinstance(value, list):
+            normalized = [self._normalize(item) for item in value]
+            try:
+                return sorted(normalized, key=lambda x: json.dumps(x, sort_keys=True, default=str))
+            except TypeError:
+                return normalized
+        return value
 
     def _single_pass(
         self,
