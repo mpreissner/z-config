@@ -4372,7 +4372,7 @@ def apply_baseline_menu(client, tenant):
         dry_run = service.classify_baseline(baseline, import_progress_callback=_import_progress)
 
     creates, updates, deletes = dry_run.changes_by_action()
-    total_changes = len(creates) + len(updates) + len(deletes)
+    create_update_count = len(creates) + len(updates)
 
     # ── Step 3: show dry-run summary ──────────────────────────────────────
     console.print()
@@ -4394,12 +4394,12 @@ def apply_baseline_menu(client, tenant):
         )
     console.print(delta_table)
 
-    if total_changes == 0:
+    if create_update_count == 0 and not deletes:
         console.print("\n[green]✓ Nothing to push — target is already in sync with the baseline.[/green]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    # Show per-resource detail for creates, updates, and deletes (cap at 30 each)
+    # Show per-resource detail for creates and updates (cap at 30 each)
     _MAX_DETAIL = 30
     if creates:
         console.print(f"\n[green]To create ({len(creates)}):[/green]")
@@ -4416,54 +4416,91 @@ def apply_baseline_menu(client, tenant):
             console.print(f"  [dim]... and {len(updates) - _MAX_DETAIL} more[/dim]")
 
     if deletes:
-        console.print(f"\n[red]To delete ({len(deletes)}) — not in baseline:[/red]")
+        console.print(f"\n[red]To delete ({len(deletes)}) — present in tenant but not in baseline:[/red]")
         for rtype, name in deletes[:_MAX_DETAIL]:
             console.print(f"  [dim]{rtype}:[/dim] {name}")
         if len(deletes) > _MAX_DETAIL:
             console.print(f"  [dim]... and {len(deletes) - _MAX_DETAIL} more[/dim]")
+        if create_update_count > 0:
+            console.print("[dim]  Deletes will be confirmed separately after creates/updates complete.[/dim]")
+        else:
+            console.print("[dim]  You will be asked to confirm before any deletes are executed.[/dim]")
 
-    console.print()
-    action_summary = []
-    if creates:
-        action_summary.append(f"[green]{len(creates)} create(s)[/green]")
-    if updates:
-        action_summary.append(f"[cyan]{len(updates)} update(s)[/cyan]")
-    if deletes:
-        action_summary.append(f"[red]{len(deletes)} delete(s)[/red]")
-    confirmed = questionary.confirm(
-        f"Apply {', '.join(action_summary)} to {tenant.name}?",
-        default=False,
-    ).ask()
-    if not confirmed:
-        return
-
-    # ── Step 4: push the delta ────────────────────────────────────────────
+    # ── Step 4: push creates + updates ────────────────────────────────────
     push_records = []
     current_pass = [0]
 
-    console.print()
-    with console.status("[cyan]Pushing...[/cyan]") as status:
-        def _push_progress(pass_num, rtype, rec):
-            if pass_num != current_pass[0]:
-                current_pass[0] = pass_num
-            status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+    if create_update_count > 0:
+        console.print()
+        action_summary = []
+        if creates:
+            action_summary.append(f"[green]{len(creates)} create(s)[/green]")
+        if updates:
+            action_summary.append(f"[cyan]{len(updates)} update(s)[/cyan]")
+        confirmed = questionary.confirm(
+            f"Apply {', '.join(action_summary)} to {tenant.name}?",
+            default=False,
+        ).ask()
+        if not confirmed:
+            return
 
-        push_records = service.push_classified(dry_run, progress_callback=_push_progress)
+        console.print()
+        with console.status("[cyan]Pushing...[/cyan]") as status:
+            def _push_progress(pass_num, rtype, rec):
+                if pass_num != current_pass[0]:
+                    current_pass[0] = pass_num
+                status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+
+            push_records = service.push_classified(dry_run, progress_callback=_push_progress)
 
     all_records = dry_run.skipped + push_records
     created  = sum(1 for r in push_records if r.is_created)
     updated  = sum(1 for r in push_records if r.is_updated)
-    deleted  = sum(1 for r in push_records if r.is_deleted)
     skipped  = sum(1 for r in all_records  if r.is_skipped)
     failed   = sum(1 for r in push_records if r.is_failed)
     passes   = current_pass[0] or 1
 
-    console.print(f"\n[bold]Push complete[/bold] — {passes} pass(es)")
-    console.print(f"  [green]Created:[/green]  {created}")
-    console.print(f"  [cyan]Updated:[/cyan]  {updated}")
-    console.print(f"  [red]Deleted:[/red]  {deleted}")
-    console.print(f"  [dim]Skipped:[/dim]  {skipped}")
-    console.print(f"  [red]Failed:[/red]   {failed}")
+    if push_records:
+        console.print(f"\n[bold]Push complete[/bold] — {passes} pass(es)")
+        console.print(f"  [green]Created:[/green]  {created}")
+        console.print(f"  [cyan]Updated:[/cyan]  {updated}")
+        console.print(f"  [dim]Skipped:[/dim]  {skipped}")
+        console.print(f"  [red]Failed:[/red]   {failed}")
+
+    # ── Step 5: deferred delete confirmation ─────────────────────────────
+    delete_records: list = []
+    deleted = 0
+    if dry_run.to_delete:
+        console.print(f"\n[bold red]Proposed deletes ({len(dry_run.to_delete)})[/bold red] — these resources exist in {tenant.name} but are not in the baseline:")
+        for rec in dry_run.to_delete[:_MAX_DETAIL]:
+            zia_id = rec.status.partition(":")[2]
+            console.print(f"  [dim]{rec.resource_type}:[/dim] {rec.name}  [dim](id {zia_id})[/dim]")
+        if len(dry_run.to_delete) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(dry_run.to_delete) - _MAX_DETAIL} more[/dim]")
+
+        console.print()
+        confirm_deletes = questionary.confirm(
+            f"Delete these {len(dry_run.to_delete)} resource(s) from {tenant.name}?",
+            default=False,
+        ).ask()
+
+        if confirm_deletes:
+            console.print()
+            with console.status("[red]Deleting...[/red]") as status:
+                def _del_progress(_, rtype, rec):
+                    status.update(f"[red]Deleting {rtype} — {rec.name}[/red]")
+                delete_records = service.execute_deletes(
+                    dry_run.to_delete, progress_callback=_del_progress
+                )
+            deleted = sum(1 for r in delete_records if r.is_deleted)
+            del_failed = sum(1 for r in delete_records if r.is_failed)
+            console.print(f"  [red]Deleted:[/red]  {deleted}")
+            if del_failed:
+                console.print(f"  [red]Failed:[/red]   {del_failed}")
+        else:
+            console.print("[dim]Deletes skipped.[/dim]")
+
+    push_records = push_records + delete_records
 
     # Results table by type (push records only — skips are uninteresting here)
     if push_records:

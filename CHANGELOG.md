@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.4] - 2026-03-07
+
+### Fixed
+
+#### ZIA — Apply Baseline from JSON (cross-tenant push)
+- Replaced narrow `SKIP_IF_PREDEFINED` type gating with universal `_is_zscaler_managed()` detection applied to every resource type. Signals: `predefined:true`, `defaultRule:true`, `type:"PREDEFINED"`, and url_category-specific checks. Zscaler-managed resources now always remap IDs correctly instead of slipping through as false user-defined creates
+- Added `defaultRule:true` as a managed-resource signal — catches Zscaler's built-in default firewall, forwarding, and other rule types whose numeric IDs differ across tenants
+- Writable managed resources (`accessControl:"READ_WRITE"`) that differ from the baseline are now updated via the existing target-tenant ID rather than attempted as creates (which fail with 400/INVALID_INPUT_ARGUMENT or 409/STALE_CONFIGURATION_ERROR in cross-tenant pushes)
+- Read-only managed resources (`accessControl` absent or not `"READ_WRITE"`) are remapped and skipped — no API call issued
+
+### Changed
+
+#### ZIA — Apply Baseline from JSON — delete confirmation
+- Deletes are no longer executed automatically as part of the push. After all creates and updates complete, any resources present in the target tenant but absent from the baseline are presented as a separate list requiring explicit confirmation (default: No) before any destructive action is taken
+- `push_classified()` no longer executes deletes; new `execute_deletes()` method on `ZIAPushService` handles confirmed deletes, called only from the menu after user approval
+
+---
+
 ## [0.10.3] - 2026-03-06
 
 ### Fixed

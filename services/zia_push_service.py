@@ -15,9 +15,11 @@ Strategy:
          resources where the numeric ID differs between environments.
       Matched resources whose stripped configs are identical → skipped (no API
       call).  Changed → updated directly.  Not found → created.
-  - Predefined/system resources are always skipped:
-      dlp_engine, dlp_dictionary, network_service  — flagged by predefined:true
-      url_category — flagged by type:"ZSCALER_DEFINED" (no predefined field)
+  - Zscaler-managed resources (predefined:true, defaultRule:true, type:PREDEFINED,
+    url_category ZSCALER_DEFINED, etc.) are handled universally regardless of type:
+      - ID-remapped so cross-tenant references resolve correctly.
+      - If access_control is READ_WRITE and config differs → UPDATE only (never CREATE).
+      - Otherwise (read-only or config identical) → remapped and skipped.
   - Multi-pass retry for transient failures; permanent errors (4xx) are not
     retried.  The last actual error is preserved in the "stable" failure message
     so the cause is always visible.
@@ -89,16 +91,6 @@ SKIP_TYPES: set = {
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
-}
-
-# Types where only user-defined (non-predefined) resources are pushed.
-# Zscaler manages predefined entries in these types independently across tenants.
-SKIP_IF_PREDEFINED: set = {
-    "url_category",
-    "dlp_engine",
-    "dlp_dictionary",
-    "network_service",
-    "bandwidth_class",
 }
 
 # Specific resource names that are system-managed and must never be pushed,
@@ -376,14 +368,26 @@ class ZIAPushService:
                 raw_config = entry.get("raw_config", {})
                 display_name = name or source_id or "?"
 
-                # Skip predefined/system resources for managed types
-                if rtype in SKIP_IF_PREDEFINED and _is_predefined(rtype, raw_config):
+                # Universal Zscaler-managed detection (predefined, defaultRule, PREDEFINED type, etc.)
+                if _is_zscaler_managed(rtype, raw_config):
                     existing_entry = self._find_existing(existing_for_type, source_id, name)
-                    if existing_entry and source_id:
-                        self._register_remap(source_id, existing_entry["id"])
+                    if existing_entry:
+                        target_id = existing_entry["id"]
+                        if source_id:
+                            self._register_remap(source_id, target_id)
+                        # Writable managed resources (access_control:READ_WRITE) that differ
+                        # from the baseline are updated. Never created — they always exist.
+                        if (_is_writable(raw_config)
+                                and not self._configs_match(raw_config, existing_entry["raw_config"])):
+                            pending.setdefault(rtype, []).append(
+                                dict(entry, __action="update", __target_id=target_id,
+                                     __display_name=display_name)
+                            )
+                            continue
                     skipped.append(PushRecord(rtype, display_name, "skipped"))
                     continue
 
+                # User-defined resource — normal create/update logic
                 existing_entry = self._find_existing(existing_for_type, source_id, name)
 
                 if existing_entry:
@@ -424,7 +428,7 @@ class ZIAPushService:
                 if zia_id in baseline_ids or name in baseline_names:
                     continue
                 # Skip predefined/system resources
-                if rtype in SKIP_IF_PREDEFINED and _is_predefined(rtype, raw):
+                if _is_zscaler_managed(rtype, raw):
                     continue
                 if name in SKIP_NAMED.get(rtype, set()):
                     continue
@@ -488,16 +492,27 @@ class ZIAPushService:
                         ))
                 break
 
-        # Execute deletes after all creates/updates are done
-        for rec in dry_run.to_delete:
-            # Extract the zia_id stored in status field as "pending_delete:<id>"
+        return all_records
+
+    def execute_deletes(
+        self,
+        to_delete: List[PushRecord],
+        progress_callback: Optional[Callable] = None,
+    ) -> List[PushRecord]:
+        """Execute a confirmed delete list. Called from the menu after explicit user approval.
+
+        Deletes are intentionally separated from push_classified so the caller
+        can present the proposed deletes and require confirmation before any
+        destructive action is taken.
+        """
+        records: List[PushRecord] = []
+        for rec in to_delete:
             zia_id = rec.status.partition(":")[2]
             delete_rec = self._delete_one(rec.resource_type, rec.name, zia_id)
             if progress_callback:
-                progress_callback(pass_num, rec.resource_type, delete_rec)
-            all_records.append(delete_rec)
-
-        return all_records
+                progress_callback(0, rec.resource_type, delete_rec)
+            records.append(delete_rec)
+        return records
 
     def push_baseline(
         self,
@@ -860,16 +875,23 @@ class ZIAPushService:
 # Module-level helper
 # ---------------------------------------------------------------------------
 
-def _is_predefined(resource_type: str, raw_config: dict) -> bool:
-    """Return True if this resource is predefined/system-managed.
+def _is_zscaler_managed(resource_type: str, raw_config: dict) -> bool:
+    """Return True if this resource is owned/managed by Zscaler across all tenants.
 
-    Different resource types use different fields to signal predefined status:
-    - dlp_engine, dlp_dictionary, network_service: predefined:true boolean
-    - url_category: type:"ZSCALER_DEFINED", non-numeric id, or customCategory==False
-    - bandwidth_class: predefined:true boolean
+    Managed resources exist in every fresh tenant with the same name but potentially
+    different numeric IDs. They must never be created — only remapped and optionally
+    updated (if access_control is READ_WRITE and config differs).
+
+    Signals checked (applied universally, not gated by resource type):
+    - predefined:true  — dlp_engine, dlp_dictionary, network_service, bandwidth_class, etc.
+    - defaultRule:true — firewall/forwarding/other rule types with a "default" Zscaler rule
+    - type:"PREDEFINED" — network_service and bandwidth_class predefined entries
+    - url_category-specific: type:"ZSCALER_DEFINED", customCategory==False, non-numeric id
     - SKIP_NAMED: hardcoded names that lack the predefined flag but are still system-owned
     """
     if raw_config.get("predefined"):
+        return True
+    if raw_config.get("defaultRule"):
         return True
     name = raw_config.get("name", "")
     if name and name in SKIP_NAMED.get(resource_type, set()):
@@ -890,3 +912,13 @@ def _is_predefined(resource_type: str, raw_config: dict) -> bool:
         if cat_id and not cat_id.isdigit():
             return True
     return False
+
+
+def _is_writable(raw_config: dict) -> bool:
+    """Return True if this Zscaler-managed resource allows modifications.
+
+    Resources with accessControl:"READ_WRITE" can be updated to match the baseline
+    even though they are predefined/system-managed. Read-only managed resources
+    are remapped but never modified.
+    """
+    return raw_config.get("accessControl") == "READ_WRITE"
