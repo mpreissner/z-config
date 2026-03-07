@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.5] - 2026-03-07
+
+### Added
+
+#### ZIA — Apply Baseline from JSON — push log
+- A timestamped log file is written to `~/.local/share/zs-config/logs/zia-push-<timestamp>.log` after every baseline push (Windows: `%APPDATA%\zs-config\logs\`)
+- Log includes: tenant name/ID, baseline file path, dry-run classification counts, full push results per resource, and **untruncated** error messages for all failures (the on-screen failure table truncates at 80 characters)
+- Resources in `to_delete` that were not executed (user declined or skipped) are listed separately so they remain visible for review
+
+### Fixed
+- `pyproject.toml` `license` field changed from deprecated TOML table form (`{text = "MIT"}`) to plain SPDX string (`"MIT"`) — required by setuptools ≥ 77
+
+---
+
 ## [0.10.4] - 2026-03-07
 
 ### Fixed

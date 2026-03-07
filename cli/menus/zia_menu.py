@@ -4309,6 +4309,85 @@ def _delete_cloud_app_rule(client, tenant, rule_type: str):
 # Apply Baseline from JSON
 # ------------------------------------------------------------------
 
+def _write_push_log(baseline_path, tenant, dry_run, push_records):
+    """Write a full push log to the zs-config data directory.
+
+    Returns the path written, or None if writing failed.
+    """
+    import platform
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        if platform.system() == "Windows":
+            import os
+            log_dir = Path(os.environ.get("APPDATA", Path.home())) / "zs-config" / "logs"
+        else:
+            log_dir = Path.home() / ".local" / "share" / "zs-config" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"zia-push-{ts}.log"
+
+        lines = []
+        lines.append(f"ZIA Baseline Push Log — {datetime.now(timezone.utc).isoformat()}")
+        lines.append(f"Tenant  : {tenant.name} (id={tenant.id})")
+        lines.append(f"Baseline: {baseline_path}")
+        lines.append("")
+
+        # Dry-run summary
+        lines.append("=== Dry-Run Classification ===")
+        lines.append(f"  To create : {dry_run.create_count}")
+        lines.append(f"  To update : {dry_run.update_count}")
+        lines.append(f"  To delete : {dry_run.delete_count}")
+        lines.append(f"  Skipped   : {dry_run.skip_count}")
+        lines.append("")
+
+        # Push results
+        created  = sum(1 for r in push_records if r.is_created)
+        updated  = sum(1 for r in push_records if r.is_updated)
+        deleted  = sum(1 for r in push_records if r.is_deleted)
+        failed   = sum(1 for r in push_records if r.is_failed)
+        lines.append("=== Push Results ===")
+        lines.append(f"  Created : {created}")
+        lines.append(f"  Updated : {updated}")
+        lines.append(f"  Deleted : {deleted}")
+        lines.append(f"  Failed  : {failed}")
+        lines.append("")
+
+        # All records detail
+        lines.append("=== All Records ===")
+        for r in push_records:
+            lines.append(f"  [{r.status}] {r.resource_type} :: {r.name}")
+        lines.append("")
+
+        # Full failure detail (untruncated)
+        failures = [r for r in push_records if r.is_failed]
+        if failures:
+            lines.append("=== Failures (full detail) ===")
+            for r in failures:
+                lines.append(f"  {r.resource_type} :: {r.name}")
+                lines.append(f"    {r.failure_reason}")
+            lines.append("")
+
+        # Proposed deletes not yet executed (if any remain in to_delete)
+        pending_deletes = [
+            r for r in dry_run.to_delete
+            if not any(pr.name == r.name and pr.resource_type == r.resource_type
+                       and pr.is_deleted for pr in push_records)
+        ]
+        if pending_deletes:
+            lines.append("=== Proposed Deletes (not executed — user declined or skipped) ===")
+            for r in pending_deletes:
+                zia_id = r.status.partition(":")[2]
+                lines.append(f"  {r.resource_type} :: {r.name}  (id={zia_id})")
+            lines.append("")
+
+        log_file.write_text("\n".join(lines), encoding="utf-8")
+        return str(log_file)
+    except Exception:
+        return None
+
+
 def apply_baseline_menu(client, tenant):
     import json
     from collections import defaultdict
@@ -4542,6 +4621,11 @@ def apply_baseline_menu(client, tenant):
         for r in failures:
             fail_table.add_row(r.resource_type, r.name, r.failure_reason[:80])
         console.print(fail_table)
+
+    # Write push log
+    log_path = _write_push_log(path, tenant, dry_run, push_records)
+    if log_path:
+        console.print(f"\n[dim]Push log: {log_path}[/dim]")
 
     # Offer activation
     if created > 0 or updated > 0:
