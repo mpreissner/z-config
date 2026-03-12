@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -96,10 +97,17 @@ SKIP_TYPES: set = {
 # Specific resource names that are system-managed and must never be pushed,
 # even when the 'predefined' flag is absent from the API response.
 SKIP_NAMED: dict = {
-    "network_service": {"ZSCALER_PROXY_NW_SERVICES"},
+    "network_service":    {"ZSCALER_PROXY_NW_SERVICES"},
+    # "CIPA Compliance Rule" is a Zscaler-reserved name; the API rejects any
+    # attempt to create or rename a custom rule with this name.
+    "url_filtering_rule": {"CIPA Compliance Rule"},
 }
 
-# Fields stripped from raw_config before comparison and before push
+# Fields stripped from raw_config before comparison and before push.
+# NOTE: "rank" is intentionally NOT here — ZIA requires rank in POST/PUT for
+# all rule types (url_filtering_rule, firewall_rule, etc.).
+# NOTE: "configVersion" is intentionally NOT here — it is injected from the
+# target's existing record at push time (see __target_config_version).
 READONLY_FIELDS: set = {
     "id",
     "predefined",
@@ -115,11 +123,8 @@ READONLY_FIELDS: set = {
     "isDeleted",
     "dbCategoryIndex",
     "deleted",
-    # Computed/server-assigned ordering fields rejected by POST/PUT
-    "rank",
     "defaultRule",
     "accessControl",
-    "configVersion",
     "managedBy",
 }
 
@@ -377,11 +382,15 @@ class ZIAPushService:
                             self._register_remap(source_id, target_id)
                         # Writable managed resources (access_control:READ_WRITE) that differ
                         # from the baseline are updated. Never created — they always exist.
+                        # Exception: predefined dlp_dictionary entries appear READ_WRITE but
+                        # the API refuses pattern edits — treat them as read-only.
                         if (_is_writable(raw_config)
+                                and not (rtype == "dlp_dictionary" and raw_config.get("predefined"))
                                 and not self._configs_match(raw_config, existing_entry["raw_config"])):
                             pending.setdefault(rtype, []).append(
                                 dict(entry, __action="update", __target_id=target_id,
-                                     __display_name=display_name)
+                                     __display_name=display_name,
+                                     __target_config_version=existing_entry["raw_config"].get("configVersion"))
                             )
                             continue
                     skipped.append(PushRecord(rtype, display_name, "skipped"))
@@ -400,7 +409,8 @@ class ZIAPushService:
                         continue
 
                     queued = dict(entry, __action="update", __target_id=target_id,
-                                  __display_name=display_name)
+                                  __display_name=display_name,
+                                  __target_config_version=existing_entry["raw_config"].get("configVersion"))
                 else:
                     queued = dict(entry, __action="create", __display_name=display_name)
 
@@ -670,6 +680,11 @@ class ZIAPushService:
         config = self._apply_id_remap(config)
 
         if action == "update" and target_id:
+            # Inject the target's configVersion for optimistic-locking checks
+            # (e.g. bandwidth_control_rule requires it; harmless for others).
+            target_cv = entry.get("__target_config_version")
+            if target_cv is not None:
+                config["configVersion"] = target_cv
             try:
                 update_method(target_id, config)
                 return PushRecord(resource_type=resource_type, name=name, status="updated")
@@ -816,9 +831,17 @@ class ZIAPushService:
             return self._classify_error(resource_type, name, exc)
 
     def _classify_error(self, resource_type: str, name: str, exc: Exception) -> PushRecord:
-        """Classify an exception as permanent (4xx) or transient."""
+        """Classify an exception as permanent (4xx) or transient.
+
+        Uses the JSON "status" field ZIA returns (e.g. ``"status": 400``) rather
+        than a bare substring search, which would false-positive on resource IDs
+        that happen to contain "400", "403", or "404" (e.g. /rules/326403).
+        Non-HTTP errors (SSLError, connection reset) are always transient.
+        """
         exc_str = str(exc)
-        permanent = any(code in exc_str for code in ("400", "403", "NOT_SUBSCRIBED", "not licensed", "404"))
+        # ZIA error payloads contain: {"status": 400, ...}
+        permanent = bool(re.search(r'"status"\s*:\s*(400|403|404)', exc_str)) or \
+                    any(s in exc_str for s in ("NOT_SUBSCRIBED", "not licensed"))
         prefix = "failed:permanent:" if permanent else "failed:"
         return PushRecord(
             resource_type=resource_type,
