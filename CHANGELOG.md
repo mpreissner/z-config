@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.8] - 2026-03-12
+
+### Changed
+
+#### ZIA — Apply Baseline from JSON
+- `location` added to `SKIP_TYPES` — locations are tenant-specific (IPs must be provisioned by Zscaler per-org) and cannot be safely pushed as part of a cross-tenant golden baseline; they are now silently skipped during classification rather than attempted and failed
+
+---
+
 ## [0.10.7] - 2026-03-12
 
 ### Fixed

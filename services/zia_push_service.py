@@ -89,6 +89,7 @@ SKIP_TYPES: set = {
     "admin_user",
     "admin_role",
     "location_group",       # read-only in SDK
+    "location",             # tenant-specific; IPs must be provisioned by Zscaler per-org
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
