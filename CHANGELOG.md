@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.7] - 2026-03-12
+
+### Fixed
+- Bump version string in `cli/banner.py` and `pyproject.toml` to 0.10.7 (0.10.6 was published to PyPI without these updated)
+
+---
+
 ## [0.10.6] - 2026-03-12
 
 ### Fixed
