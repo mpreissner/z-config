@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.6] - 2026-03-12
+
+### Fixed
+
+#### ZIA — Apply Baseline from JSON
+
+- **`rank` now included in POST/PUT payloads** — `rank` was incorrectly listed in `READONLY_FIELDS` under a "server-assigned" assumption. ZIA requires it in all rule creates and updates. Removing it caused `"Rule must have a rank specified"` failures across `url_filtering_rule`, `firewall_rule`, `firewall_dns_rule`, `ssl_inspection_rule`, and `forwarding_rule` (21 failures)
+- **`configVersion` injected from target on updates** — `configVersion` is no longer stripped globally. During classification, the target tenant's `configVersion` is stored alongside each queued update and injected into the payload before the API call. Fixes `STALE_CONFIGURATION_ERROR` on `bandwidth_control_rule` (3 failures)
+- **Predefined DLP dictionaries no longer attempted as updates** — dictionaries with `predefined: true` were being queued for update when their `accessControl` was `READ_WRITE` and baseline patterns differed. The API refuses pattern edits on predefined dictionaries regardless. These are now treated as read-only and skipped (5 failures: `CUI_LEAKAGE`, `EUIBAN_LEAKAGE`, `NDIU_LEAKAGE`, `RUN_LEAKAGE`, `SSN`)
+- **`CIPA Compliance Rule` added to `SKIP_NAMED`** — Zscaler reserves this name; any create or rename attempt returns `INVALID_OPERATION`. The rule is now skipped during classification (1 failure)
+- **`_classify_error` false-positive on resource IDs containing "403"** — error classification previously used bare substring matching (`"403" in exc_str`), which matched resource IDs like `/firewallFilteringRules/326403` in SSL/connection error strings. Errors are now classified permanent only when the ZIA JSON payload contains `"status": 400/403/404`. SSL and connection errors are correctly treated as transient and retried (1 failure: `Recommended Firewall Rule`)
+
+---
+
 ## [0.10.5] - 2026-03-07
 
 ### Added
