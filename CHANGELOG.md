@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.10.9] - 2026-03-13
+
+### Added
+
+#### Settings — Edit Tenant Metadata
+- New **Edit Tenant Metadata** option in Settings menu — allows manual override of org metadata fields that are normally auto-fetched from `orgInformation`
+- Editable fields: ZPA Customer ID, ZPA Tenant Cloud, ZIA Tenant ID, ZIA Cloud
+- Pre-filled with current stored values; blank entry clears the field
+- Introduced to handle cases where `orgInformation.zpaTenantId` returns `0` for valid tenants (confirmed Zscaler API behaviour on certain new tenants)
+- `set_tenant_metadata()` added to `services/config_service.py` — unconditionally writes all four fields, unlike `update_tenant()` which skips `None` args
+
+### Fixed
+
+- `orgInformation.zpaTenantId` integer `0` was being stored as the string `"0"` rather than `None`; `str(0)` is truthy so the `or None` guard was bypassed — now evaluates the raw value before stringifying, in both `_fetch_and_apply_org_info` and `backfill_org_info_for_tenant`
+
+---
+
 ## [0.10.8] - 2026-03-12
 
 ### Changed

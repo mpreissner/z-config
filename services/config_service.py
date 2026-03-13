@@ -244,7 +244,7 @@ def backfill_org_info_for_tenant(tenant: TenantConfig) -> Tuple[bool, Optional[s
         pdomain_raw = org_info.get("pdomain") or ""
         update_tenant(
             name=tenant.name,
-            zpa_customer_id=str(org_info.get("zpaTenantId", "")) or None,
+            zpa_customer_id=str(_zpa_raw) if (_zpa_raw := org_info.get("zpaTenantId")) else None,
             zpa_tenant_cloud=org_info.get("zpaTenantCloud") or None,
             zia_tenant_id=pdomain_raw.split(".")[0] or None,
             zia_cloud=org_info.get("cloudName") or None,
@@ -253,6 +253,31 @@ def backfill_org_info_for_tenant(tenant: TenantConfig) -> Tuple[bool, Optional[s
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+def set_tenant_metadata(
+    name: str,
+    zpa_customer_id: Optional[str],
+    zpa_tenant_cloud: Optional[str],
+    zia_tenant_id: Optional[str],
+    zia_cloud: Optional[str],
+) -> Optional[TenantConfig]:
+    """Explicitly overwrite org metadata fields. Pass None to clear a field.
+
+    Unlike update_tenant (which skips None args), this always writes every field,
+    allowing manual correction when the API returns incorrect auto-fetched values.
+    """
+    with get_session() as session:
+        tenant = session.query(TenantConfig).filter_by(name=name, is_active=True).first()
+        if not tenant:
+            return None
+        tenant.zpa_customer_id = zpa_customer_id
+        tenant.zpa_tenant_cloud = zpa_tenant_cloud
+        tenant.zia_tenant_id = zia_tenant_id
+        tenant.zia_cloud = zia_cloud
+        session.flush()
+        session.refresh(tenant)
+        return tenant
 
 
 def deactivate_tenant(name: str) -> bool:

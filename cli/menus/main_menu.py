@@ -180,6 +180,7 @@ def settings_menu():
             choices=[
                 questionary.Choice("Add Tenant", value="add"),
                 questionary.Choice("Edit Tenant", value="edit"),
+                questionary.Choice("Edit Tenant Metadata", value="edit_meta"),
                 questionary.Choice("List Tenants", value="list"),
                 questionary.Choice("Remove Tenant", value="remove"),
                 questionary.Separator(),
@@ -193,6 +194,8 @@ def settings_menu():
             _add_tenant()
         elif choice == "edit":
             _pick_and_edit_tenant()
+        elif choice == "edit_meta":
+            _pick_and_edit_tenant_metadata()
         elif choice == "list":
             _list_tenants()
         elif choice == "remove":
@@ -230,7 +233,8 @@ def _fetch_and_apply_org_info(
         console.print("[dim]Tenant saved without org metadata. Re-run Edit Tenant to retry.[/dim]")
         return False, False
 
-    zpa_customer_id = str(org_info.get("zpaTenantId", "")) or None
+    _zpa_raw = org_info.get("zpaTenantId")
+    zpa_customer_id = str(_zpa_raw) if _zpa_raw else None
     zpa_tenant_cloud = org_info.get("zpaTenantCloud") or None
     # pdomain arrives as "<numericId>.<cloud>" — store only the numeric prefix
     pdomain_raw = org_info.get("pdomain") or ""
@@ -406,6 +410,76 @@ def _edit_tenant_credentials(tenant_name: str):
     if ok:
         _fetch_and_apply_org_info(tenant_name, zidentity_url, client_id, test_secret, old_tenant=tenant)
 
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _pick_and_edit_tenant_metadata():
+    from services.config_service import list_tenants
+
+    tenants = list_tenants()
+    if not tenants:
+        console.print("[yellow]No tenants configured.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    tenant = questionary.select(
+        "Select tenant to edit metadata:",
+        choices=[questionary.Choice(t.name, value=t) for t in tenants],
+    ).ask()
+    if tenant:
+        _edit_tenant_metadata(tenant.name)
+
+
+def _edit_tenant_metadata(tenant_name: str):
+    from services.config_service import get_tenant, set_tenant_metadata
+
+    tenant = get_tenant(tenant_name)
+    if not tenant:
+        console.print(f"[red]Tenant '{tenant_name}' not found.[/red]")
+        return
+
+    console.print(f"\n[bold]Edit Org Metadata — {tenant.name}[/bold]")
+    console.print("[dim]These values are normally auto-fetched. Override here if the API returned incorrect values.[/dim]")
+    console.print("[dim]Press Enter to keep the current value. Clear the field to set it to blank.[/dim]\n")
+
+    zpa_customer_id = questionary.text(
+        "ZPA Customer ID:",
+        default=tenant.zpa_customer_id or "",
+    ).ask()
+    if zpa_customer_id is None:
+        return
+
+    zpa_tenant_cloud = questionary.text(
+        "ZPA Tenant Cloud:",
+        default=tenant.zpa_tenant_cloud or "",
+        instruction="e.g. ZPATWO_NET",
+    ).ask()
+    if zpa_tenant_cloud is None:
+        return
+
+    zia_tenant_id = questionary.text(
+        "ZIA Tenant ID:",
+        default=tenant.zia_tenant_id or "",
+    ).ask()
+    if zia_tenant_id is None:
+        return
+
+    zia_cloud = questionary.text(
+        "ZIA Cloud:",
+        default=tenant.zia_cloud or "",
+        instruction="e.g. zscloud.net",
+    ).ask()
+    if zia_cloud is None:
+        return
+
+    set_tenant_metadata(
+        name=tenant_name,
+        zpa_customer_id=zpa_customer_id.strip() or None,
+        zpa_tenant_cloud=zpa_tenant_cloud.strip() or None,
+        zia_tenant_id=zia_tenant_id.strip() or None,
+        zia_cloud=zia_cloud.strip() or None,
+    )
+    console.print(f"[green]✓ Metadata updated for '[bold]{tenant_name}[/bold]'.[/green]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
