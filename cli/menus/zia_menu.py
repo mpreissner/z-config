@@ -4453,7 +4453,7 @@ def apply_baseline_menu(client, tenant):
                 value="wipe",
             ),
             questionary.Choice(
-                "Delta-only  — push creates/updates first, review deletes at the end",
+                "Delta-only  — non-destructive merge: creates and updates only, no deletes",
                 value="delta",
             ),
         ],
@@ -4523,17 +4523,16 @@ def apply_baseline_menu(client, tenant):
             console.print(f"  [dim]... and {len(updates) - _MAX_DETAIL} more[/dim]")
 
     if deletes:
-        console.print(f"\n[red]To delete ({len(deletes)}) — present in tenant but not in baseline:[/red]")
+        if mode == "wipe":
+            console.print(f"\n[red]To delete ({len(deletes)}) — present in tenant but not in baseline:[/red]")
+        else:
+            console.print(f"\n[dim]Not in baseline ({len(deletes)}) — skipped in delta mode (use wipe-first to remove):[/dim]")
         for rtype, name in deletes[:_MAX_DETAIL]:
             console.print(f"  [dim]{rtype}:[/dim] {name}")
         if len(deletes) > _MAX_DETAIL:
             console.print(f"  [dim]... and {len(deletes) - _MAX_DETAIL} more[/dim]")
         if mode == "wipe":
             console.print("[dim]  Wipe-first: deletes will execute before creates/updates.[/dim]")
-        elif create_update_count > 0:
-            console.print("[dim]  Deletes will be confirmed separately after creates/updates complete.[/dim]")
-        else:
-            console.print("[dim]  You will be asked to confirm before any deletes are executed.[/dim]")
 
     # ── Step 4a (wipe-first): delete extraneous resources before pushing ──
     delete_records: list = []
@@ -4610,37 +4609,6 @@ def apply_baseline_menu(client, tenant):
         console.print(f"  [cyan]Updated:[/cyan]  {updated}")
         console.print(f"  [dim]Skipped:[/dim]  {skipped}")
         console.print(f"  [red]Failed:[/red]   {failed}")
-
-    # ── Step 5: deferred delete confirmation (delta-only mode) ────────────
-    if mode == "delta" and dry_run.to_delete:
-        console.print(f"\n[bold red]Proposed deletes ({len(dry_run.to_delete)})[/bold red] — these resources exist in {tenant.name} but are not in the baseline:")
-        for rec in dry_run.to_delete[:_MAX_DETAIL]:
-            zia_id = rec.status.partition(":")[2]
-            console.print(f"  [dim]{rec.resource_type}:[/dim] {rec.name}  [dim](id {zia_id})[/dim]")
-        if len(dry_run.to_delete) > _MAX_DETAIL:
-            console.print(f"  [dim]... and {len(dry_run.to_delete) - _MAX_DETAIL} more[/dim]")
-
-        console.print()
-        confirm_deletes = questionary.confirm(
-            f"Delete these {len(dry_run.to_delete)} resource(s) from {tenant.name}?",
-            default=False,
-        ).ask()
-
-        if confirm_deletes:
-            console.print()
-            with console.status("[red]Deleting...[/red]") as status:
-                def _del_progress(_, rtype, rec):
-                    status.update(f"[red]Deleting {rtype} — {rec.name}[/red]")
-                delete_records = service.execute_deletes(
-                    dry_run.to_delete, progress_callback=_del_progress
-                )
-            deleted = sum(1 for r in delete_records if r.is_deleted)
-            del_failed = sum(1 for r in delete_records if r.is_failed)
-            console.print(f"  [red]Deleted:[/red]  {deleted}")
-            if del_failed:
-                console.print(f"  [red]Failed:[/red]   {del_failed}")
-        else:
-            console.print("[dim]Deletes skipped.[/dim]")
 
     push_records = push_records + delete_records
 

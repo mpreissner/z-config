@@ -1379,7 +1379,12 @@ class ZIAPushService:
         return records
 
     def _delete_one(self, resource_type: str, name: str, zia_id: str) -> PushRecord:
-        """Delete a single resource from the live tenant (legacy delta-mode path)."""
+        """Delete a single resource from the live tenant (legacy delta-mode path).
+
+        A failed delete is returned as a skipped record with a warning rather than
+        a hard failure — the push itself is unaffected and the user is informed via
+        the manual-action warnings section.
+        """
         method_name = _DELETE_METHODS.get(resource_type)
 
         try:
@@ -1396,8 +1401,8 @@ class ZIAPushService:
                     )
                     rule_type = (rec.raw_config or {}).get("type") if rec else None
                 if not rule_type:
-                    return PushRecord(resource_type, name,
-                                      "failed:permanent:cloud_app_rule missing type in DB")
+                    return PushRecord(resource_type, name, "skipped",
+                                      warnings=["could not delete — rule type not found in DB"])
                 self._client.delete_cloud_app_rule(rule_type, zia_id)
             elif method_name:
                 getattr(self._client, method_name)(zia_id)
@@ -1405,7 +1410,9 @@ class ZIAPushService:
                 return PushRecord(resource_type, name, "skipped")
             return PushRecord(resource_type, name, "deleted")
         except Exception as exc:
-            return self._classify_error(resource_type, name, exc)
+            reason = self._classify_error(resource_type, name, exc).failure_reason
+            return PushRecord(resource_type, name, "skipped",
+                              warnings=[f"could not delete — {reason} (may be Zscaler-managed or have active dependencies)"])
 
     def _classify_error(self, resource_type: str, name: str, exc: Exception) -> PushRecord:
         """Classify an exception as permanent (4xx) or transient."""

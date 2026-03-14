@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.11.1] - 2026-03-14
+
+### Changed
+
+#### ZIA — Apply Baseline from JSON
+- **Delta mode is now non-destructive** — creates and updates only; resources present in the tenant but absent from the baseline are shown in the dry-run summary as informational only, with a note to use wipe-first if removal is needed. The deferred delete confirmation step has been removed from delta mode entirely.
+- **Failed deletes surface as warnings, not failures** — if a delete fails (e.g. a Zscaler-managed resource slips through classification), the result is recorded as a manual-action warning rather than a hard failure, so it appears in the Manual Action Required section instead of the Failures table.
+
+---
+
 ## [0.11.0] - 2026-03-14
 
 ### Added
