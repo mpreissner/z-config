@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.11.1] - 2026-03-14
+
+### Changed
+
+#### ZIA — Apply Baseline from JSON
+- **Delta mode is now non-destructive** — creates and updates only; resources present in the tenant but absent from the baseline are shown in the dry-run summary as informational only, with a note to use wipe-first if removal is needed. The deferred delete confirmation step has been removed from delta mode entirely.
+- **Failed deletes surface as warnings, not failures** — if a delete fails (e.g. a Zscaler-managed resource slips through classification), the result is recorded as a manual-action warning rather than a hard failure, so it appears in the Manual Action Required section instead of the Failures table.
+
+---
+
+## [0.11.0] - 2026-03-14
+
+### Added
+
+#### ZIA — Apply Baseline from JSON
+- **Wipe-first push mode** — new mode selection before each baseline apply: _Wipe-first_ deletes all resources absent from the baseline before pushing (target mirrors baseline exactly); _Delta-only_ retains the existing push-then-confirm-deletes flow
+- **`advanced_settings` pushed cross-tenant** — ZIA advanced settings (`/zia/api/v1/advancedSettings`) are now imported and pushed as a singleton resource in tier 2.5 (after URL categories, before rules), syncing toggles such as `logInternalIp`, `enablePolicyForUnauthenticatedTraffic`, and `blockNonCompliantHttpRequestOnHttpPorts`
+- **`tenancy_restriction_profile` pushed cross-tenant** — Microsoft 365 and Google tenancy restriction profiles are imported and pushed as a tier-0 resource; `cloud_app_control_rule` entries that reference tenant profiles are now fully remapped rather than stripped
+- **Scope-stripped rules inserted as DISABLED** — when a newly created rule references tenant-specific resources (locations, location groups, groups, departments, users, devices, ZPA app segments) that don't exist in the target tenant, the rule is inserted in `DISABLED` state and a manual-action warning is written to the push log and shown in the menu
+- **Manual-action warnings in push log** — scope-stripped rules and other items requiring follow-up are captured in a `=== Manual Action Required ===` section of the push log file
+
+#### ZIA — Import Config
+- `advanced_settings` and `tenancy_restriction_profile` added to `RESOURCE_DEFINITIONS` (37 resource types total)
+
+### Fixed
+
+#### ZIA — Apply Baseline from JSON
+- **Rule ordering for incremental pushes** — creates are stacked at the insertion point (descending) first; updates then move to their exact baseline positions (ascending); eliminates ordering constraint failures when rules share adjacent positions
+- **DLP engine ID filter** — predefined engines (IDs 60–64, `custom_dlp_engine: false`) were incorrectly excluded from `_usable_dlp_engine_ids`; rules referencing them (e.g. PCI engine) now push with all engines intact
+- **`cloud_app_control_rule` — predefined One-Click rules** — rules with `predefined: true` are provisioned by `url_filter_cloud_app_settings` and are now skipped during classification rather than failing with 404 (multiple rules share the same name across type buckets, making name-only lookup ambiguous)
+- **`cloud_app_control_rule` — empty `applications` field** — rules with `applications: []` ("Any" in the UI) now omit the field entirely; sending `[]` or `["ANY"]` was rejected by the API
+- **`_do_create_with_rank_fallback`** — "rank required" errors no longer trigger the rank-strip retry; only explicit "rank not allowed" errors retry without rank
+
+### Changed
+- `update_checker`: `CHANGELOG_TIMEOUT` (10 s) separated from version-check timeout (4 s); shows a message when changelog fetch times out
+
+---
+
 ## [0.10.9] - 2026-03-13
 
 ### Added

@@ -16,7 +16,8 @@ import questionary
 PYPI_URL = "https://pypi.org/pypi/zs-config/json"
 CHANGELOG_URL = "https://raw.githubusercontent.com/mpreissner/zs-config/main/CHANGELOG.md"
 PACKAGE_NAME = "zs-config"
-REQUEST_TIMEOUT = 4
+REQUEST_TIMEOUT = 4          # version check (PyPI)
+CHANGELOG_TIMEOUT = 10       # changelog fetch (raw.githubusercontent.com — can be slower)
 
 console = Console()
 
@@ -37,7 +38,7 @@ def _fetch_latest_version() -> Optional[str]:
 
 def _fetch_changelog() -> Optional[str]:
     try:
-        resp = requests.get(CHANGELOG_URL, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(CHANGELOG_URL, timeout=CHANGELOG_TIMEOUT)
         resp.raise_for_status()
         return resp.text
     except Exception:
@@ -96,7 +97,9 @@ def check_for_updates() -> None:
     )
 
     changelog = _fetch_changelog()
-    if changelog:
+    if changelog is None:
+        console.print("[dim]Could not fetch changelog (network timeout).[/dim]")
+    elif changelog:
         sections = _extract_changelog_sections(changelog, VERSION, latest)
         if sections:
             questionary.press_any_key_to_continue("Press any key to view changelog...").ask()

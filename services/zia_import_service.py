@@ -71,6 +71,11 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("workload_group",        "list_workload_groups"),
     ResourceDef("network_app",           "list_network_apps"),
     ResourceDef("network_app_group",     "list_network_app_groups"),
+    ResourceDef("url_filter_cloud_app_settings", "list_url_filter_cloud_app_settings",
+                id_field="id", name_field="name"),
+    ResourceDef("advanced_settings",             "list_advanced_settings",
+                id_field="id", name_field="name"),
+    ResourceDef("tenancy_restriction_profile",   "list_tenancy_restriction_profiles"),
 ]
 
 

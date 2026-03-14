@@ -10,12 +10,12 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 ## Features
 
 - **ZPA** — App Connectors & Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups, Access Policy (list/search/export/import-sync from CSV with dry-run, bulk reorder, and orphan delete), PRA Portals & Consoles, Service Edges, Certificate Management (upload/rotate/delete)
-- **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4 rules, DNS filter, IPS — list/search/enable-disable/export/import-sync from CSV), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), **Apply Baseline from JSON** (delta-only push with ID remapping), Policy Activation
+- **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4 rules, DNS filter, IPS — list/search/enable-disable/export/import-sync from CSV), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), **Apply Baseline from JSON** (wipe-first or delta push with ID remapping, cross-tenant rule ordering, scope-aware disable), Policy Activation
 - **ZIA IP Groups** — Source and Destination IPv4 Groups: list, search, create, edit, delete, and bulk create from CSV
 - **ZCC** — Devices (list/search/remove/OTP lookup/password lookup/CSV export), Trusted Networks, Forwarding Profiles, Admin Users, Entitlements, App Profiles (manage bypass apps/activate/delete), Bypass App Definitions
 - **ZDX** — Device health, app performance, user lookup, application scores, deep trace
 - **ZIdentity** — Users (list/search/reset-password/set-password/skip-MFA), Groups (list/search/members/add-remove), API Clients (list/search/secrets/delete)
-- **Config Import** — 25 ZPA + 35 ZIA + 6 ZCC resource types pulled into a local SQLite cache with SHA-256 change detection
+- **Config Import** — 25 ZPA + 37 ZIA + 6 ZCC resource types pulled into a local SQLite cache with SHA-256 change detection
 - **Config Snapshots** — save, compare (field-level diff), export, and delete point-in-time snapshots for ZPA and ZIA
 - **Audit Log** — immutable record of every operation
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
@@ -144,7 +144,7 @@ Rules missing from the CSV are deleted. The final `bulk_reorder_rules()` call ma
 
 **Cloud Apps** — Cloud Applications (list/search), Cloud App Control (full CRUD by rule type)
 
-**Bottom** — Activation, Import Config (35 resource types), Config Snapshots, Reset N/A Resource Types
+**Bottom** — Activation, Import Config (37 resource types), Config Snapshots, Reset N/A Resource Types
 
 #### Firewall Rule CSV sync
 

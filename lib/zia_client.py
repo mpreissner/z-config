@@ -43,11 +43,50 @@ class ZIAClient:
 
     def __init__(self, auth: ZscalerAuth, oneapi_base_url: str = "https://api.zsapi.net"):
         self.auth = auth
+        self._oneapi_base_url = oneapi_base_url.rstrip("/")
         self._sdk = ZscalerClient({
             "clientId": auth.client_id,
             "clientSecret": auth.client_secret,
             "vanityDomain": auth.vanity_domain,
         })
+
+    def zia_get(self, path: str) -> dict:
+        """Direct HTTP GET to the ZIA API — returns the raw camelCase JSON."""
+        import requests
+        token = self.auth.get_token()
+        resp = requests.get(
+            f"{self._oneapi_base_url}{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def zia_put(self, path: str, payload: dict) -> dict:
+        """Direct HTTP PUT to the ZIA API — bypasses the SDK's GET-merge-PUT behavior."""
+        import requests
+        token = self.auth.get_token()
+        url = f"{self._oneapi_base_url}{path}"
+        resp = requests.put(
+            url, json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    def zia_post(self, path: str, payload: dict) -> dict:
+        """Direct HTTP POST to the ZIA API — bypasses SDK serialization."""
+        import requests
+        token = self.auth.get_token()
+        url = f"{self._oneapi_base_url}{path}"
+        resp = requests.post(
+            url, json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
 
     # ------------------------------------------------------------------
     # Activation
@@ -125,6 +164,14 @@ class ZIAClient:
 
     def list_groups(self) -> List[Dict]:
         result, resp, err = self._sdk.zia.user_management.list_groups()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Browser Isolation
+    # ------------------------------------------------------------------
+
+    def list_browser_isolation_profiles(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.cloud_browser_isolation.list_isolation_profiles()
         return _to_dicts(_unwrap(result, resp, err))
 
     # ------------------------------------------------------------------
@@ -775,3 +822,63 @@ class ZIAClient:
     def delete_location(self, location_id: str) -> None:
         result, resp, err = self._sdk.zia.locations.delete_location(location_id)
         _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Advanced URL Filter & Cloud App Settings (singleton)
+    # ------------------------------------------------------------------
+
+    def list_url_filter_cloud_app_settings(self) -> List[Dict]:
+        """Return singleton settings wrapped in a one-element list for import compatibility."""
+        import requests
+        token = self.auth.get_token()
+        resp = requests.get(
+            f"{self._oneapi_base_url}/zia/api/v1/advancedUrlFilterAndCloudAppSettings",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return [{"id": 1, "name": "url_filter_cloud_app_settings",
+                  "access_control": "READ_WRITE", **resp.json()}]
+
+    def update_url_filter_cloud_app_settings(self, rule_id: str, config: Dict) -> bool:
+        """PUT singleton settings — rule_id is unused (singleton endpoint)."""
+        payload = {k: v for k, v in config.items() if k not in ("id", "name")}
+        self.zia_put("/zia/api/v1/advancedUrlFilterAndCloudAppSettings", payload)
+        return True
+
+    def list_advanced_settings(self) -> List[Dict]:
+        """Return singleton advancedSettings wrapped in a one-element list for import compatibility."""
+        data = self.zia_get("/zia/api/v1/advancedSettings")
+        return [{"id": 1, "name": "advanced_settings",
+                  "access_control": "READ_WRITE", **data}]
+
+    def update_advanced_settings(self, rule_id: str, config: Dict) -> bool:
+        """PUT singleton advancedSettings — rule_id is unused (singleton endpoint)."""
+        payload = {k: v for k, v in config.items() if k not in ("id", "name")}
+        self.zia_put("/zia/api/v1/advancedSettings", payload)
+        return True
+
+    # ------------------------------------------------------------------
+    # Tenancy Restriction Profiles
+    # ------------------------------------------------------------------
+
+    _TENANCY_PATH = "/zia/api/v1/tenancyRestrictionProfile"
+
+    def list_tenancy_restriction_profiles(self) -> List[Dict]:
+        return self.zia_get(self._TENANCY_PATH)
+
+    def create_tenancy_restriction_profile(self, config: Dict) -> Dict:
+        return self.zia_post(self._TENANCY_PATH, config)
+
+    def update_tenancy_restriction_profile(self, rule_id: str, config: Dict) -> Dict:
+        return self.zia_put(f"{self._TENANCY_PATH}/{rule_id}", config)
+
+    def delete_tenancy_restriction_profile(self, rule_id: str) -> None:
+        import requests
+        token = self.auth.get_token()
+        resp = requests.delete(
+            f"{self._oneapi_base_url}{self._TENANCY_PATH}/{rule_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
