@@ -50,6 +50,7 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("rule_label",            "list_rule_labels"),
     ResourceDef("time_interval",         "list_time_intervals"),
     ResourceDef("location",              "list_locations"),
+    ResourceDef("location_lite",         "list_locations_lite"),
     ResourceDef("location_group",        "list_location_groups"),
     ResourceDef("admin_user",            "list_admin_users"),
     ResourceDef("admin_role",            "list_admin_roles"),

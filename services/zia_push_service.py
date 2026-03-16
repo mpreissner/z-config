@@ -124,6 +124,7 @@ SKIP_TYPES: set = {
     "admin_role",
     "location_group",       # read-only in SDK
     "location",             # tenant-specific; public IPs and VPN credentials cannot be copied cross-tenant
+    "location_lite",        # predefined/system locations (Road Warrior etc.) — imported for ID remapping only
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
@@ -1830,6 +1831,10 @@ class ZIAPushService:
         if not arr:
             return arr
         known = self._target_known_ids.get(resource_type, set())
+        # Predefined locations (Road Warrior, Mobile Users, etc.) are stored under
+        # location_lite rather than location — include both when resolving location refs.
+        if resource_type == "location":
+            known = known | self._target_known_ids.get("location_lite", set())
         result = []
         for item in arr:
             id_val = item.get("id")

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.11.2] - 2026-03-16
+
+### Added
+
+#### ZIA — Import Config
+- **`location_lite` resource type** — predefined ZIA locations (Road Warrior, Mobile Users, etc.) are now imported from `/locations/lite` and stored in the DB. These are not exposed in the Locations menu and are never pushed cross-tenant; they exist solely so their IDs are available for reference resolution when applying a baseline to a target tenant.
+
+---
+
 ## [0.11.1] - 2026-03-14
 
 ### Changed
