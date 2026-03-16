@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.11.3] - 2026-03-16
+
+### Added
+
+#### ZIA — Apply Baseline from JSON
+- **`device_group` cross-tenant ID remapping** — ZIA device groups (Windows, iOS, Android, etc.) now have their source IDs remapped to the corresponding target-tenant IDs at classify time using name-based lookup. Rules that reference device groups are pushed with the correct tenant-specific IDs rather than the source tenant's IDs.
+- **`sandbox_rule` full support** — ZIA Behavioral Analysis (Sandbox) rules are now imported, classified, and pushed cross-tenant. The `Default BA Rule` is automatically detected and skipped (Zscaler-managed). Normalizer handles URL category remapping, time windows, location/group/department/user scope resolution, and empty-field stripping.
+- **`firewall_ips_rule` ordering and normalizer** — Firewall IPS Control rules are now treated as an ordered (first-match) policy engine: creates use the insertion-point stacking mechanism, updates are processed ascending, and delta-mode updates preserve correct ordering. A full normalizer handles cross-tenant ID remapping for locations, location groups, groups, departments, users, source/dest IP groups, network services, device groups, threat categories, and ZPA app segments.
+- **Post-push consistency check with auto-remediation** — after every push, the target tenant state is re-imported and re-classified against the baseline. Any remaining creates, updates, or deletes (e.g. ordering constraint failures, missed deletes) are shown in a discrepancy table. The user is offered an auto-remediation pass before being prompted to activate. The activate default reflects whether the check passed cleanly.
+
+#### ZIA — Import Config
+- **`location_lite` resource type** — predefined ZIA locations (Road Warrior, Mobile Users, etc.) are now imported from `/locations/lite` and stored in the DB. These are not exposed in the Locations menu and are never pushed cross-tenant; they exist solely so their IDs are available for reference resolution when applying a baseline to a target tenant.
+- **`device_group` resource type** — ZIA device groups are now imported (41 resource types total) and stored for cross-tenant ID remapping. They are never pushed.
+- **`sandbox_rule` resource type** — ZIA Behavioral Analysis rules are now imported via the SDK sandbox rules endpoint.
+
+---
+
 ## [0.11.2] - 2026-03-16
 
 ### Added

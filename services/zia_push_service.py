@@ -635,8 +635,8 @@ class ZIAPushService:
                         # from comparison so order-only diffs don't trigger updates.
                         _ORDERED_MANAGED_TYPES = {
                             "ssl_inspection_rule", "url_filtering_rule", "forwarding_rule",
-                            "firewall_rule", "firewall_dns_rule", "nat_control_rule",
-                            "sandbox_rule",
+                            "firewall_rule", "firewall_dns_rule", "firewall_ips_rule",
+                            "nat_control_rule", "sandbox_rule",
                         }
                         if raw_config.get("predefined") and rtype in _ORDERED_MANAGED_TYPES:
                             _bl = {k: v for k, v in raw_config.items() if k != "order"}
@@ -740,9 +740,9 @@ class ZIAPushService:
         # Sequence: creates first (descending), then updates (ascending).
         _ORDERED_RULE_TYPES = (
             "ssl_inspection_rule", "url_filtering_rule", "forwarding_rule",
-            "firewall_rule", "firewall_dns_rule", "nat_control_rule",
-            "dlp_web_rule", "bandwidth_control_rule", "traffic_capture_rule",
-            "sandbox_rule",
+            "firewall_rule", "firewall_dns_rule", "firewall_ips_rule",
+            "nat_control_rule", "dlp_web_rule", "bandwidth_control_rule",
+            "traffic_capture_rule", "sandbox_rule",
         )
         for rtype in _ORDERED_RULE_TYPES:
             if rtype not in pending:
@@ -1268,9 +1268,9 @@ class ZIAPushService:
             # In wipe-first mode this is moot (all rules are creates after wipe).
             _ORDERED_RULE_TYPES = {
                 "url_filtering_rule", "ssl_inspection_rule", "firewall_rule",
-                "firewall_dns_rule", "forwarding_rule", "nat_control_rule",
-                "dlp_web_rule", "bandwidth_control_rule", "traffic_capture_rule",
-                "cloud_app_control_rule", "sandbox_rule",
+                "firewall_dns_rule", "firewall_ips_rule", "forwarding_rule",
+                "nat_control_rule", "dlp_web_rule", "bandwidth_control_rule",
+                "traffic_capture_rule", "cloud_app_control_rule", "sandbox_rule",
             }
             update_payload = payload
             if resource_type in _ORDERED_RULE_TYPES and not entry.get("__managed"):
@@ -1488,6 +1488,7 @@ class ZIAPushService:
             "ssl_inspection_rule":    self._norm_ssl_inspection_rule,
             "firewall_rule":          self._norm_firewall_rule,
             "firewall_dns_rule":      self._norm_firewall_dns_rule,
+            "firewall_ips_rule":      self._norm_firewall_ips_rule,
             "forwarding_rule":        self._norm_forwarding_rule,
             "nat_control_rule":       self._norm_nat_control_rule,
             "url_filtering_rule":     self._norm_url_filtering_rule,
@@ -1608,6 +1609,24 @@ class ZIAPushService:
                 ("users",           "user"),
             ),
             empty_strip=("src_ips", "dest_addresses", "dest_countries"),
+        )
+        return cfg
+
+    def _norm_firewall_ips_rule(self, cfg: dict) -> dict:
+        self._norm_ref_fields(cfg,
+            ref_fields=("src_ip_groups", "src_ipv6_groups", "dest_ip_groups", "dest_ipv6_groups",
+                        "nw_services", "nw_service_groups", "devices", "device_groups",
+                        "time_windows", "labels", "threat_categories"),
+            resolved_fields=(
+                ("locations",        "location"),
+                ("location_groups",  "location_group"),
+                ("groups",           "group"),
+                ("departments",      "department"),
+                ("users",            "user"),
+                ("zpa_app_segments", "zpa_app_segment"),
+            ),
+            empty_strip=("src_ips", "dest_addresses", "dest_countries", "source_countries",
+                         "dest_ip_categories", "res_categories"),
         )
         return cfg
 
