@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.11.4] - 2026-03-16
+
+### Added
+
+#### Plugin Manager
+- **GitHub OAuth authentication** — Device Flow OAuth (no password prompt; supports MFA) via a classic OAuth App. Token stored at `~/.config/zs-config/github_token` (chmod 600). Login/logout available from the plugin manager.
+- **Plugin discovery and install** — fetches `manifest.json` from the private `mpreissner/zs-plugins` repo via GitHub API. Lists available plugins not yet installed, installs via `pip install git+...` from the manifest `install_url`.
+- **Installed plugin listing** — shows currently installed plugins discovered via `zs-config.plugins` entry points.
+- **Uninstall support** — uninstalls a selected plugin via `pip uninstall`.
+- **Hidden `Ctrl+]` key binding** — opens the plugin manager from the main menu without exposing it as a visible menu item.
+- **Cancel navigation fix** — resolved crash when selecting "← Cancel" in install/uninstall selects (questionary returning title string instead of `None` for `value=None` choices).
+
+---
+
 ## [0.11.3] - 2026-03-16
 
 ### Added

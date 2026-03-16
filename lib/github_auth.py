@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import requests
 
-_CLIENT_ID  = "Iv23lihLlgkOXzIf7Unp"
+_CLIENT_ID  = "Ov23liBDXNJZC4YC0jnE"
 _TOKEN_FILE = Path.home() / ".config" / "zs-config" / "github_token"
 _DEVICE_URL = "https://github.com/login/device/code"
 _TOKEN_URL  = "https://github.com/login/oauth/access_token"

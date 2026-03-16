@@ -189,10 +189,10 @@ def _browse_plugins() -> None:
         for p in not_installed
     ]
     choices.append(questionary.Separator())
-    choices.append(questionary.Choice("← Cancel", value=None))
+    choices.append(questionary.Choice("← Cancel", value="__cancel__"))
 
     plugin = questionary.select("Select a plugin to install:", choices=choices).ask()
-    if not plugin:
+    if not plugin or plugin == "__cancel__":
         return
 
     _do_install(plugin)
@@ -244,10 +244,10 @@ def _uninstall_plugin(installed: list[dict]) -> None:
         for p in installed
     ]
     choices.append(questionary.Separator())
-    choices.append(questionary.Choice("← Cancel", value=None))
+    choices.append(questionary.Choice("← Cancel", value="__cancel__"))
 
     plugin = questionary.select("Select plugin to uninstall:", choices=choices).ask()
-    if not plugin:
+    if not plugin or plugin == "__cancel__":
         return
 
     confirmed = questionary.confirm(
