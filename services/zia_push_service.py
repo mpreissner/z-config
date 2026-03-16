@@ -76,6 +76,7 @@ PUSH_ORDER: List[str] = [
     "bandwidth_control_rule",
     "traffic_capture_rule",
     "cloud_app_control_rule",
+    "sandbox_rule",
     # Tier 4 — merge-only list resources
     "allowlist",
     "denylist",
@@ -87,6 +88,7 @@ WIPE_ORDER: List[str] = [
     "allowlist",
     "denylist",
     # Tier 3 — rules in reverse
+    "sandbox_rule",
     "cloud_app_control_rule",
     "traffic_capture_rule",
     "bandwidth_control_rule",
@@ -125,6 +127,7 @@ SKIP_TYPES: set = {
     "location_group",       # read-only in SDK
     "location",             # tenant-specific; public IPs and VPN credentials cannot be copied cross-tenant
     "location_lite",        # predefined/system locations (Road Warrior etc.) — imported for ID remapping only
+    "device_group",         # predefined OS/platform groups (Windows, iOS, etc.) — imported for ID remapping only
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
@@ -141,6 +144,9 @@ SKIP_NAMED: dict = {
     # predefined=True.  They can be managed/deleted by the user, but must never
     # be wiped during wipe-floor since they're Zscaler-provided defaults.
     "firewall_dns_rule":  {"Risky DNS categories", "Risky DNS tunnels"},
+    # The SDK SandboxRules model omits default_rule, so _is_zscaler_managed can't
+    # detect it via the boolean field.  Guard by name as a belt-and-suspenders fallback.
+    "sandbox_rule":       {"Default BA Rule"},
 }
 
 # Fields always stripped from raw_config before comparison and before push.
@@ -193,6 +199,7 @@ _DELETE_METHODS: Dict[str, str] = {
     "bandwidth_control_rule": "delete_bandwidth_control_rule",
     "traffic_capture_rule":   "delete_traffic_capture_rule",
     "cloud_app_control_rule": None,   # handled via delete_cloud_app_rule(rule_type, id)
+    "sandbox_rule":           "delete_sandbox_rule",
     "workload_group":                "delete_workload_group",
     "dlp_engine":                    "delete_dlp_engine",
     "dlp_dictionary":                "delete_dlp_dictionary",
@@ -226,6 +233,7 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
     "traffic_capture_rule":   ("create_traffic_capture_rule",  "update_traffic_capture_rule"),
     "tenancy_restriction_profile":   ("create_tenancy_restriction_profile",
                                       "update_tenancy_restriction_profile"),
+    "sandbox_rule":                  ("create_sandbox_rule",   "update_sandbox_rule"),
     # Singletons — no create path; use update method for both entries
     "url_filter_cloud_app_settings": ("update_url_filter_cloud_app_settings",
                                       "update_url_filter_cloud_app_settings"),
@@ -526,6 +534,21 @@ class ZIAPushService:
         # are fully accepted by the API in user-created rule payloads.
         self._usable_dlp_engine_ids = set((existing.get("dlp_engine") or {}).keys())
 
+        # Device group name → target ID map.
+        # Device group IDs differ across tenants; remap by name so rules scoped to
+        # predefined OS groups (Windows, iOS, etc.) carry over on push.
+        # Source device_group entries come from the baseline; target from the DB.
+        target_dg_name_map = {
+            entry["name"].lower(): entry["id"]
+            for entry in (existing.get("device_group") or {}).values()
+            if entry.get("name")
+        }
+        for src_entry in (baseline.get("resources", {}).get("device_group") or []):
+            src_id = str(src_entry.get("id", ""))
+            src_name = (src_entry.get("name") or "").lower()
+            if src_id and src_name and src_name in target_dg_name_map:
+                self._register_remap(src_id, target_dg_name_map[src_name])
+
         # CBI profile map: profile name (lowercase) → profile dict.
         # Used to remap cbi_profile UUIDs on ISOLATE url_filtering_rules across tenants.
         try:
@@ -612,7 +635,8 @@ class ZIAPushService:
                         # from comparison so order-only diffs don't trigger updates.
                         _ORDERED_MANAGED_TYPES = {
                             "ssl_inspection_rule", "url_filtering_rule", "forwarding_rule",
-                            "firewall_rule", "firewall_dns_rule", "nat_control_rule",
+                            "firewall_rule", "firewall_dns_rule", "firewall_ips_rule",
+                            "nat_control_rule", "sandbox_rule",
                         }
                         if raw_config.get("predefined") and rtype in _ORDERED_MANAGED_TYPES:
                             _bl = {k: v for k, v in raw_config.items() if k != "order"}
@@ -716,8 +740,9 @@ class ZIAPushService:
         # Sequence: creates first (descending), then updates (ascending).
         _ORDERED_RULE_TYPES = (
             "ssl_inspection_rule", "url_filtering_rule", "forwarding_rule",
-            "firewall_rule", "firewall_dns_rule", "nat_control_rule",
-            "dlp_web_rule", "bandwidth_control_rule", "traffic_capture_rule",
+            "firewall_rule", "firewall_dns_rule", "firewall_ips_rule",
+            "nat_control_rule", "dlp_web_rule", "bandwidth_control_rule",
+            "traffic_capture_rule", "sandbox_rule",
         )
         for rtype in _ORDERED_RULE_TYPES:
             if rtype not in pending:
@@ -761,6 +786,23 @@ class ZIAPushService:
             to_delete=to_delete,
             id_remap=dict(self._id_remap),
         )
+
+    def verify_push(
+        self,
+        baseline: dict,
+        import_progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> DryRunResult:
+        """Re-classify the baseline against the current live state after a push.
+
+        Runs a fresh import of the target tenant then compares against the
+        baseline.  Any remaining creates, updates, or deletes indicate that
+        the push did not fully apply (e.g. ordering constraint, missed delete).
+
+        Returns:
+            A new DryRunResult.  An ideal post-push result has zero pending
+            creates/updates and zero to_delete entries.
+        """
+        return self.classify_baseline(baseline, import_progress_callback=import_progress_callback)
 
     def push_classified(
         self,
@@ -1226,9 +1268,9 @@ class ZIAPushService:
             # In wipe-first mode this is moot (all rules are creates after wipe).
             _ORDERED_RULE_TYPES = {
                 "url_filtering_rule", "ssl_inspection_rule", "firewall_rule",
-                "firewall_dns_rule", "forwarding_rule", "nat_control_rule",
-                "dlp_web_rule", "bandwidth_control_rule", "traffic_capture_rule",
-                "cloud_app_control_rule",
+                "firewall_dns_rule", "firewall_ips_rule", "forwarding_rule",
+                "nat_control_rule", "dlp_web_rule", "bandwidth_control_rule",
+                "traffic_capture_rule", "cloud_app_control_rule", "sandbox_rule",
             }
             update_payload = payload
             if resource_type in _ORDERED_RULE_TYPES and not entry.get("__managed"):
@@ -1446,6 +1488,7 @@ class ZIAPushService:
             "ssl_inspection_rule":    self._norm_ssl_inspection_rule,
             "firewall_rule":          self._norm_firewall_rule,
             "firewall_dns_rule":      self._norm_firewall_dns_rule,
+            "firewall_ips_rule":      self._norm_firewall_ips_rule,
             "forwarding_rule":        self._norm_forwarding_rule,
             "nat_control_rule":       self._norm_nat_control_rule,
             "url_filtering_rule":     self._norm_url_filtering_rule,
@@ -1454,6 +1497,7 @@ class ZIAPushService:
             "traffic_capture_rule":   self._norm_traffic_capture_rule,
             "cloud_app_control_rule": self._norm_cloud_app_control_rule,
             "location":               self._norm_location,
+            "sandbox_rule":                  self._norm_sandbox_rule,
             "url_filter_cloud_app_settings": self._norm_url_filter_cloud_app_settings,
             "advanced_settings":             self._norm_advanced_settings,
         }
@@ -1565,6 +1609,24 @@ class ZIAPushService:
                 ("users",           "user"),
             ),
             empty_strip=("src_ips", "dest_addresses", "dest_countries"),
+        )
+        return cfg
+
+    def _norm_firewall_ips_rule(self, cfg: dict) -> dict:
+        self._norm_ref_fields(cfg,
+            ref_fields=("src_ip_groups", "src_ipv6_groups", "dest_ip_groups", "dest_ipv6_groups",
+                        "nw_services", "nw_service_groups", "devices", "device_groups",
+                        "time_windows", "labels", "threat_categories"),
+            resolved_fields=(
+                ("locations",        "location"),
+                ("location_groups",  "location_group"),
+                ("groups",           "group"),
+                ("departments",      "department"),
+                ("users",            "user"),
+                ("zpa_app_segments", "zpa_app_segment"),
+            ),
+            empty_strip=("src_ips", "dest_addresses", "dest_countries", "source_countries",
+                         "dest_ip_categories", "res_categories"),
         )
         return cfg
 
@@ -1701,6 +1763,28 @@ class ZIAPushService:
                     cfg.pop("url_categories", None)
             else:
                 cfg["url_categories"] = self._remap_str_list(cats)
+        return cfg
+
+    def _norm_sandbox_rule(self, cfg: dict) -> dict:
+        # url_categories is a flat string list — remap CUSTOM_XX slots.
+        if cfg.get("url_categories"):
+            cfg["url_categories"] = self._remap_str_list(cfg["url_categories"])
+        # Strip read-only / server-computed fields.
+        for f in ("default_rule", "cbi_profile_id"):
+            cfg.pop(f, None)
+        self._norm_ref_fields(cfg,
+            ref_fields=("time_windows", "labels"),
+            resolved_fields=(
+                ("locations",       "location"),
+                ("location_groups", "location_group"),
+                ("groups",          "group"),
+                ("departments",     "department"),
+                ("users",           "user"),
+            ),
+            empty_strip=("url_categories", "file_types", "protocols",
+                         "ba_policy_categories", "zpa_app_segments",
+                         "device_trust_levels", "user_agent_types"),
+        )
         return cfg
 
     def _norm_bandwidth_control_rule(self, cfg: dict) -> dict:
@@ -1952,7 +2036,8 @@ def _is_zscaler_managed(resource_type: str, raw_config: dict) -> bool:
         return True  # singletons — always present in every tenant, never created/deleted
     if raw_config.get("predefined"):
         return True
-    if raw_config.get("default_rule"):
+    # Check both snake_case (SDK as_dict()) and camelCase (direct HTTP) forms.
+    if raw_config.get("default_rule") or raw_config.get("defaultRule"):
         return True
     name = raw_config.get("name", "")
     if name and name in SKIP_NAMED.get(resource_type, set()):

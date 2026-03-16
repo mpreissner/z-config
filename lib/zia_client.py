@@ -294,6 +294,36 @@ class ZIAClient:
         return _to_dicts(_unwrap(result, resp, err))
 
     # ------------------------------------------------------------------
+    # Sandbox Policy
+    # ------------------------------------------------------------------
+
+    def list_sandbox_rules(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.sandbox_rules.list_rules()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_sandbox_rule(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.sandbox_rules.add_rule(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_sandbox_rule(self, rule_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.sandbox_rules.update_rule(int(rule_id), **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_sandbox_rule(self, rule_id: str) -> None:
+        result, resp, err = self._sdk.zia.sandbox_rules.delete_rule(int(rule_id))
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
+    # Device Groups
+    # ------------------------------------------------------------------
+
+    def list_device_groups(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.device_management.list_device_groups(
+            query_params={"includePseudoGroups": True}
+        )
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
     # Location Groups
     # ------------------------------------------------------------------
 

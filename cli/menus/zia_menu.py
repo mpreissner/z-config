@@ -4668,10 +4668,68 @@ def apply_baseline_menu(client, tenant):
     if log_path:
         console.print(f"\n[dim]Push log: {log_path}[/dim]")
 
+    # Post-push consistency check
+    verify_clean = True
+    if created > 0 or updated > 0 or delete_records:
+        console.print()
+        verify_result = None
+        with console.status("[cyan]Verifying push consistency...[/cyan]") as status:
+            def _verify_progress(rtype, done, total):
+                status.update(f"[cyan]Verifying: {rtype} ({done}/{total})[/cyan]")
+            try:
+                verify_result = service.verify_push(baseline, import_progress_callback=_verify_progress)
+            except Exception as exc:
+                console.print(f"[yellow]⚠ Consistency check failed: {exc}[/yellow]")
+
+        if verify_result is not None:
+            v_creates, v_updates, v_deletes = verify_result.changes_by_action()
+            discrepancies = len(v_creates) + len(v_updates) + len(v_deletes)
+            if discrepancies == 0:
+                console.print("[green]✓ Consistency check passed — tenant state matches baseline[/green]")
+            else:
+                verify_clean = False
+                console.print(f"[bold yellow]⚠ Consistency check found {discrepancies} discrepancy(ies):[/bold yellow]")
+                disc_table = Table(show_lines=False)
+                disc_table.add_column("Issue", style="yellow")
+                disc_table.add_column("Resource Type")
+                disc_table.add_column("Name")
+                for rtype, name in v_creates:
+                    disc_table.add_row("Not created", rtype, name)
+                for rtype, name in v_updates:
+                    disc_table.add_row("Config / order mismatch", rtype, name)
+                for rtype, name in v_deletes:
+                    disc_table.add_row("Not deleted", rtype, name)
+                console.print(disc_table)
+
+                remediate = questionary.confirm(
+                    f"Attempt to remediate {discrepancies} discrepancy(ies) now?", default=True
+                ).ask()
+                if remediate:
+                    remediate_pass = [0]
+                    with console.status("[cyan]Remediating...[/cyan]") as status:
+                        def _rem_progress(pass_num, rtype, rec):
+                            if pass_num != remediate_pass[0]:
+                                remediate_pass[0] = pass_num
+                            status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+                        rem_records = service.push_classified(verify_result, progress_callback=_rem_progress)
+                    rem_created = sum(1 for r in rem_records if r.is_created)
+                    rem_updated = sum(1 for r in rem_records if r.is_updated)
+                    rem_failed  = sum(1 for r in rem_records if r.is_failed)
+                    console.print(f"  [green]Created:[/green] {rem_created}  "
+                                  f"[cyan]Updated:[/cyan] {rem_updated}  "
+                                  f"[red]Failed:[/red] {rem_failed}")
+                    if rem_failed == 0:
+                        verify_clean = True
+                        push_records = push_records + rem_records
+                        created += rem_created
+                        updated += rem_updated
+                    else:
+                        console.print("[yellow]Some remediations failed — review before activating.[/yellow]")
+
     # Offer activation
     if created > 0 or updated > 0:
         activate_now = questionary.confirm(
-            "Activate changes in ZIA now?", default=True
+            "Activate changes in ZIA now?", default=verify_clean
         ).ask()
         if activate_now:
             try:
