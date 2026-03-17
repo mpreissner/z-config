@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.2] - 2026-03-17
+
+### Fixed
+
+#### Plugin Manager
+- **Entry point group rename** — plugin group renamed from `zs-config.plugins` to `zs_config.plugins` to comply with the stricter `python-entrypoint-group` format validation enforced by setuptools on Python 3.14+. Plugins using the old group name will need to update their `pyproject.toml` accordingly.
+
+---
+
 ## [1.0.1] - 2026-03-17
 
 ### Added

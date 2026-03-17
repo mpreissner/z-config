@@ -2,7 +2,7 @@
 
 Plugins are pip-installable packages that declare themselves via:
 
-    [project.entry-points."zs-config.plugins"]
+    [project.entry-points."zs_config.plugins"]
     my-plugin = "my_package.plugin:register"
 
 The register() function must return:
@@ -22,7 +22,7 @@ import requests
 
 from lib.github_auth import get_token
 
-_PLUGIN_GROUP   = "zs-config.plugins"
+_PLUGIN_GROUP   = "zs_config.plugins"
 _MANIFEST_REPO  = "mpreissner/zs-plugins"
 _MANIFEST_FILE  = "manifest.json"
 
