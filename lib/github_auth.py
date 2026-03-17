@@ -11,12 +11,13 @@ from typing import Callable, Optional
 
 import requests
 
-_CLIENT_ID  = "Ov23liBDXNJZC4YC0jnE"
-_TOKEN_FILE = Path.home() / ".config" / "zs-config" / "github_token"
-_DEVICE_URL = "https://github.com/login/device/code"
-_TOKEN_URL  = "https://github.com/login/oauth/access_token"
-_SCOPE      = "repo"
-_API_URL    = "https://api.github.com"
+_CLIENT_ID    = "Ov23liBDXNJZC4YC0jnE"
+_TOKEN_FILE   = Path.home() / ".config" / "zs-config" / "github_token"
+_DEVICE_URL   = "https://github.com/login/device/code"
+_TOKEN_URL    = "https://github.com/login/oauth/access_token"
+_SCOPE        = "repo"
+_API_URL      = "https://api.github.com"
+_PLUGINS_REPO = "mpreissner/zs-plugins"  # private repo; access = authorised user
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,35 @@ def verify_token(token: str) -> tuple[bool, str]:
             return True, resp.json().get("login", "unknown")
         if resp.status_code == 401:
             return False, "token expired or revoked"
+        return False, f"HTTP {resp.status_code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Repo access check
+# ---------------------------------------------------------------------------
+
+def has_repo_access(token: str) -> tuple[bool, str]:
+    """Check whether the token holder can access the plugin repository.
+
+    Uses the repo metadata endpoint — private repos are hidden as 404 to
+    anyone without explicit collaborator access, so a 200 means authorised.
+
+    Returns (True, "") on success or (False, reason) on failure.
+    """
+    try:
+        resp = requests.get(
+            f"{_API_URL}/repos/{_PLUGINS_REPO}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, ""
+        if resp.status_code == 404:
+            return False, "account is not a collaborator on the plugin repository"
+        if resp.status_code == 401:
+            return False, "token invalid or expired"
         return False, f"HTTP {resp.status_code}"
     except Exception as exc:
         return False, str(exc)
@@ -151,8 +181,16 @@ def authenticate(
         if not error:
             token = result.get("access_token")
             if token:
-                save_token(token)
                 _, username = verify_token(token)
+                ok, access_err = has_repo_access(token)
+                if not ok:
+                    return False, (
+                        f"GitHub authentication succeeded (as {username}) but your "
+                        f"account does not have access to the plugin repository. "
+                        f"Contact your administrator to be added as a collaborator.\n"
+                        f"  ({access_err})"
+                    )
+                save_token(token)
                 return True, f"Authenticated as {username}"
 
         elif error == "authorization_pending":

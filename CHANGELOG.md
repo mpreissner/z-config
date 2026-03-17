@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.1] - 2026-03-17
+
+### Added
+
+#### Core
+- **SSL inspection support** — startup injects the OS native trust store via `truststore` so corporate SSL inspection certificates (pushed by MDM/GPO/Jamf) are automatically honoured across all HTTP clients without any user configuration. A custom CA bundle can also be placed at `~/.config/zs-config/ca-bundle.pem`; if present at startup it is set as `REQUESTS_CA_BUNDLE`.
+
+### Fixed
+
+#### Plugin Manager
+- **Repo access gate at login** — GitHub Device Flow authentication now verifies that the authenticated user has collaborator access to the plugin repository before saving the token. Users who complete GitHub auth but are not listed as collaborators receive a clear error message at login time rather than discovering the restriction when browsing plugins.
+- **SSH install URL conversion** — plugin install URLs using `git+ssh://git@github.com/` are automatically rewritten to `git+https://x-access-token:{token}@github.com/` at install time, using the already-authenticated GitHub token. Eliminates SSH host-key verification failures and SSH key requirements on machines that have never connected to GitHub.
+
+---
+
 ## [1.0.0] - 2026-03-16
 
 ### Added

@@ -84,6 +84,21 @@ def _run_data_migrations(console) -> None:
 
 
 def main():
+    import os
+    from pathlib import Path
+
+    # ── SSL: use the OS trust store so corporate inspection certs are trusted ──
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except ImportError:
+        pass  # not installed; requests falls back to certifi
+
+    # ── SSL: honour a user-supplied CA bundle (drop a PEM at this path) ───────
+    _ca_bundle = Path.home() / ".config" / "zs-config" / "ca-bundle.pem"
+    if _ca_bundle.exists() and "REQUESTS_CA_BUNDLE" not in os.environ:
+        os.environ["REQUESTS_CA_BUNDLE"] = str(_ca_bundle)
+
     from db.database import init_db
     from cli.banner import render_banner
     from cli.menus import select_tenant

@@ -12,6 +12,7 @@ Available plugins are listed in manifest.json in the private manifest repo,
 fetched via the GitHub API using the authenticated token.
 """
 
+import re
 import subprocess
 import sys
 from importlib.metadata import entry_points
@@ -115,14 +116,32 @@ def fetch_manifest() -> tuple[Optional[list], Optional[str]]:
 # Install / uninstall
 # ---------------------------------------------------------------------------
 
+def _to_https_url(url: str) -> str:
+    """Convert a git+ssh GitHub URL to git+https with token auth.
+
+    Manifests may use SSH URLs (git+ssh://git@github.com/...) which require a
+    pre-configured SSH key.  We already hold a GitHub token, so rewrite to
+    HTTPS instead — no SSH key required on the client machine.
+    """
+    token = get_token()
+    if not token:
+        return url
+    return re.sub(
+        r"^git\+ssh://git@github\.com/",
+        f"git+https://x-access-token:{token}@github.com/",
+        url,
+    )
+
+
 def install_plugin(install_url: str) -> tuple[bool, str]:
     """Install a plugin using pip.
 
     Returns (True, success_message) or (False, error_output).
     """
+    url = _to_https_url(install_url)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", install_url],
+            [sys.executable, "-m", "pip", "install", url],
             capture_output=True,
             text=True,
             timeout=120,

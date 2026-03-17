@@ -20,6 +20,7 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 - **Audit Log** — immutable record of every operation
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
 - **Auto-update** — silent PyPI check on startup; shows changelog and upgrades in-place via pipx or pip
+- **Plugin Manager** (`Ctrl+]`) — browse, install, and uninstall optional plugins from the private plugin repository; GitHub Device Flow OAuth with collaborator-gated access
 
 ---
 
@@ -88,6 +89,9 @@ zs-config
 |---|---|---|
 | `ZSCALER_SECRET_KEY` | auto-generated | Fernet key for secret encryption |
 | `ZSCALER_DB_URL` | `~/.local/share/zs-config/zscaler.db` | SQLAlchemy DB URL (e.g. PostgreSQL) |
+| `REQUESTS_CA_BUNDLE` | system trust store | Path to a PEM CA bundle for all outbound HTTPS requests |
+
+**SSL inspection:** zs-config automatically uses the OS native trust store (macOS Keychain, Windows Certificate Store) via `truststore`, so corporate inspection certificates pushed by MDM/GPO/Jamf are trusted without any configuration. Alternatively, drop a PEM file at `~/.config/zs-config/ca-bundle.pem` and it will be used automatically.
 
 ---
 
@@ -185,6 +189,21 @@ Select a time window (2 / 4 / 8 / 24 hours) on entry. Sections: Device Lookup & 
 **API Clients** — list, search, view details and secrets, add/delete secrets, delete client
 
 ---
+
+### Plugin Manager
+
+Accessed via **`Ctrl+]`** from the main menu (not listed as a visible menu item).
+
+Plugins are pip-installable packages distributed via a private GitHub repository. Access requires a GitHub account that has been added as a collaborator on the plugin repository — contact the repository owner to request access.
+
+**Authentication flow:**
+
+1. Open the plugin manager (`Ctrl+]`) and select **Log in with GitHub**
+2. A browser window opens — complete the Device Flow OAuth prompt (MFA supported)
+3. On success, zs-config verifies your GitHub token has collaborator access to the plugin repository before saving it. If your account is not listed as a collaborator, login fails with a clear message
+4. Once authenticated, **Browse available plugins** lists plugins from the manifest and offers install via pip — no SSH key or manual git configuration required
+
+**Token storage:** `~/.config/zs-config/github_token` (chmod 600)
 
 ### Settings
 
