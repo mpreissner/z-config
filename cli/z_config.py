@@ -104,14 +104,16 @@ def main():
     from cli.menus import select_tenant
     from cli.menus.main_menu import main_menu
     from cli.session import set_active_tenant
-    from cli.update_checker import check_for_updates
+    from cli.update_checker import check_for_updates, check_plugin_updates
     from rich.console import Console
 
     console = Console()
 
     init_db()
     render_banner()
-    check_for_updates()
+    zs_update_found = check_for_updates()
+    if not zs_update_found:
+        check_plugin_updates()
 
     from services.config_service import list_tenants
     if list_tenants():

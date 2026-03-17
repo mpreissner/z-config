@@ -76,18 +76,24 @@ def _detect_install_method() -> tuple:
     return ("pip", [sys.executable, "-m", "pip", "install", "--upgrade", PACKAGE_NAME])
 
 
-def check_for_updates() -> None:
+def check_for_updates() -> bool:
+    """Check PyPI for a newer zs-config version.
+
+    Returns True if an update was found (regardless of whether the user
+    accepted it), False otherwise.  Callers use the return value to decide
+    whether to skip downstream checks (e.g. plugin updates) until next launch.
+    """
     from cli.banner import VERSION
 
     latest = _fetch_latest_version()
     if latest is None:
-        return
+        return False
 
     try:
         if _parse_ver(latest) <= _parse_ver(VERSION):
-            return
+            return False
     except Exception:
-        return
+        return False
 
     console.print(
         Panel(
@@ -117,7 +123,7 @@ def check_for_updates() -> None:
 
     if not answer:
         console.print("[dim]Skipping update. You can update manually later.[/dim]")
-        return
+        return True
 
     result = subprocess.run(cmd)
 
@@ -134,5 +140,105 @@ def check_for_updates() -> None:
             Panel(
                 f"[red]Update failed. Update manually:[/red]\n{cmd_str}",
                 border_style="red",
+            )
+        )
+    return True
+
+
+def check_plugin_updates() -> None:
+    """Check the plugin manifest for newer versions of installed plugins.
+
+    Skipped entirely if:
+    - No plugins are installed
+    - No GitHub token is present
+    - The manifest cannot be fetched
+
+    Runs silently when everything is current.
+    """
+    from lib.plugin_manager import get_installed_plugins, fetch_manifest, install_plugin
+    from lib.github_auth import get_token
+    from rich.table import Table
+
+    # Skip if no plugins installed
+    installed = get_installed_plugins()
+    if not installed:
+        return
+
+    # Skip if not authenticated
+    if not get_token():
+        return
+
+    # Fetch manifest — skip silently on any error
+    manifest_plugins, error = fetch_manifest()
+    if error or not manifest_plugins:
+        return
+
+    # Build map of package → manifest entry for installed packages
+    installed_map = {p["package"]: p for p in installed if not p.get("error")}
+    manifest_map  = {p["package"]: p for p in manifest_plugins}
+
+    updates = []
+    for pkg, inst in installed_map.items():
+        manifest = manifest_map.get(pkg)
+        if not manifest:
+            continue
+        avail_ver = manifest.get("version", "")
+        inst_ver  = inst.get("version", "")
+        try:
+            if avail_ver and _parse_ver(avail_ver) > _parse_ver(inst_ver):
+                updates.append({
+                    "display_name": manifest.get("display_name", pkg),
+                    "package":      pkg,
+                    "installed":    inst_ver,
+                    "available":    avail_ver,
+                    "install_url":  manifest.get("install_url", ""),
+                })
+        except Exception:
+            continue
+
+    if not updates:
+        return
+
+    # Show what's available
+    table = Table(show_header=True, show_lines=False, box=None, padding=(0, 2))
+    table.add_column("Plugin")
+    table.add_column("Installed")
+    table.add_column("Available")
+    for u in updates:
+        table.add_row(u["display_name"], u["installed"], f"[green]{u['available']}[/green]")
+
+    noun = "update" if len(updates) == 1 else "updates"
+    console.print(
+        Panel(
+            table,
+            title=f"[yellow]Plugin {noun} available[/yellow]",
+            border_style="yellow",
+        )
+    )
+
+    answer = questionary.confirm(
+        f"Update {len(updates)} plugin {noun} now?",
+        default=True,
+    ).ask()
+
+    if not answer:
+        console.print("[dim]Skipping plugin updates.[/dim]")
+        return
+
+    any_updated = False
+    for u in updates:
+        with console.status(f"[cyan]Updating {u['display_name']}...[/cyan]"):
+            ok, msg = install_plugin(u["install_url"])
+        if ok:
+            console.print(f"[green]✓ {u['display_name']} updated to v{u['available']}[/green]")
+            any_updated = True
+        else:
+            console.print(f"[red]✗ {u['display_name']} update failed:[/red] {msg}")
+
+    if any_updated:
+        console.print(
+            Panel(
+                "[green]Plugin update complete.[/green] Re-launch zs-config to load the updated plugin(s).",
+                border_style="green",
             )
         )

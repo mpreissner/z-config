@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.3] - 2026-03-17
+
+### Added
+
+#### Plugin Manager
+- **Startup plugin update check** — on launch, after the zs-config self-update check, installed plugins are compared against the manifest in the plugin repository. If updates are available they are shown in a table and the user is offered the option to update all of them in one step. The check is skipped entirely if no plugins are installed, no GitHub token is present, or the manifest cannot be reached. If the zs-config self-update check finds a pending update, the plugin check is deferred to the next launch.
+
+---
+
 ## [1.0.2] - 2026-03-17
 
 ### Fixed
