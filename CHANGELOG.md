@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.0] - 2026-03-16
+
+### Added
+
+#### PAN Migration Plugin — Push Bridge
+- **Programmatic baseline push from palo-tools** — `apply_baseline_menu` now accepts optional `baseline=` and `baseline_path=` kwargs so the palo-tools plugin can hand off a just-converted baseline directly, without requiring the user to navigate separately to ZIA → Apply Baseline from JSON.
+
+### Fixed
+
+#### ZIA — Apply Baseline from JSON
+- **Within-baseline ID remap type coercion** — string-keyed source IDs (e.g. PAN object names) are now correctly coerced to integers when resolving to target-tenant IDs. Previously `_remap_value` and `_ref_resolved` preserved the string type, causing ZIA API rejections.
+
+---
+
 ## [0.11.4] - 2026-03-16
 
 ### Added

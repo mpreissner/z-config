@@ -1871,7 +1871,11 @@ class ZIAPushService:
             if "id" in value:
                 id_str = str(value["id"])
                 if id_str in self._id_remap:
-                    value["id"] = type(value["id"])(self._id_remap[id_str])
+                    mapped = self._id_remap[id_str]
+                    try:
+                        value["id"] = int(mapped)
+                    except (ValueError, TypeError):
+                        value["id"] = mapped
             return {k: self._remap_value(v) for k, v in value.items()}
         elif isinstance(value, list):
             return [self._remap_value(item) for item in value]
@@ -1930,7 +1934,11 @@ class ZIAPushService:
                 continue
             id_str = str(id_val)
             if id_str in known or id_str in self._id_remap:
-                result.append({"id": type(id_val)(self._id_remap.get(id_str, id_val))})
+                mapped = self._id_remap.get(id_str, id_val)
+                try:
+                    result.append({"id": int(mapped)})
+                except (ValueError, TypeError):
+                    result.append({"id": mapped})
         return result
 
     def _remap_str_list(self, lst: list) -> list:

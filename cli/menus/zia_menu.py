@@ -4398,7 +4398,7 @@ def _write_push_log(baseline_path, tenant, dry_run, push_records):
         return None
 
 
-def apply_baseline_menu(client, tenant):
+def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
     import json
     from collections import defaultdict
     from services.zia_push_service import SKIP_TYPES, ZIAPushService
@@ -4407,17 +4407,18 @@ def apply_baseline_menu(client, tenant):
     console.print("\n[bold]Apply Baseline from JSON[/bold]")
     console.print("[dim]Reads a ZIA snapshot export file and pushes it to the live tenant.[/dim]\n")
 
-    path = questionary.text("Path to baseline JSON file:").ask()
-    if not path:
-        return
-
-    try:
-        with open(path.strip()) as fh:
-            baseline = json.load(fh)
-    except Exception as e:
-        console.print(f"[red]✗ Could not read file: {e}[/red]")
-        questionary.press_any_key_to_continue("Press any key to continue...").ask()
-        return
+    if baseline is None:
+        path = questionary.text("Path to baseline JSON file:").ask()
+        if not path:
+            return
+        baseline_path = path.strip()
+        try:
+            with open(baseline_path) as fh:
+                baseline = json.load(fh)
+        except Exception as e:
+            console.print(f"[red]✗ Could not read file: {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
 
     if baseline.get("product") != "ZIA":
         console.print("[red]✗ Invalid baseline file — 'product' must be 'ZIA'.[/red]")
@@ -4664,7 +4665,7 @@ def apply_baseline_menu(client, tenant):
                 console.print(f"  [dim]{r.resource_type}:[/dim] {r.name} — {w}")
 
     # Write push log
-    log_path = _write_push_log(path, tenant, dry_run, push_records)
+    log_path = _write_push_log(baseline_path, tenant, dry_run, push_records)
     if log_path:
         console.print(f"\n[dim]Push log: {log_path}[/dim]")
 
