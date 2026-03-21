@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.5] - 2026-03-21
+
+### Security
+
+#### Core / Plugin Manager
+- **Database file permissions** — SQLite database is now created with `chmod 600` (owner read/write only). Previously world-readable (644), exposing tenant metadata, client IDs, and audit logs to other local users. Existing installations are corrected automatically on first launch after upgrade.
+- **Plugin install URL validation** — install URLs from the manifest are validated against a GitHub HTTPS/SSH allowlist before being passed to pip. Arbitrary domains and local filesystem paths are rejected.
+- **GitHub token removed from process listing** — token is now passed to git via a short-lived `GIT_ASKPASS` temp script rather than embedded in the install URL, preventing exposure via `ps aux` during the install window.
+- **Uninstall package name validation** — package names are validated against PEP 508 before being passed to pip, preventing argument injection via malicious manifest entries.
+
+---
+
 ## [1.0.4] - 2026-03-21
 
 ### Added
