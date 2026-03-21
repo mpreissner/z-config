@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.4] - 2026-03-21
+
+### Added
+
+#### Plugin Manager
+- **Plugin entries in main menu** — installed plugins now appear as selectable entries in the main menu, visually separated from the core product list. The menu is rebuilt on each loop iteration so plugins installed or removed via the plugin manager (Ctrl+]) are reflected immediately without a restart. Plugins that failed to load are excluded.
+
+---
+
 ## [1.0.3] - 2026-03-17
 
 ### Added
