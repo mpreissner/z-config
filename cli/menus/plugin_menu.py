@@ -19,9 +19,10 @@ def plugin_menu() -> None:
         render_banner()
 
         from lib.github_auth import get_token, is_authenticated, verify_token
-        from lib.plugin_manager import get_installed_plugins
+        from lib.plugin_manager import get_installed_plugins, get_plugin_channel
 
         installed = get_installed_plugins()
+        channel   = get_plugin_channel()
 
         # ── Auth status header ────────────────────────────────────────────
         token = get_token()
@@ -36,7 +37,16 @@ def plugin_menu() -> None:
             auth_line = "[dim]● Not authenticated[/dim]"
             valid = False
 
-        console.print(Panel(auth_line, title="Plugin Manager", border_style="cyan"))
+        if channel == "dev":
+            channel_line = "[yellow]⚠  Channel: [bold]dev[/bold] — pre-release builds active[/yellow]"
+        else:
+            channel_line = "[dim]Channel: stable[/dim]"
+
+        console.print(Panel(
+            auth_line + "\n" + channel_line,
+            title="Plugin Manager",
+            border_style="cyan",
+        ))
 
         # ── Installed plugins summary ─────────────────────────────────────
         if installed:
@@ -59,6 +69,8 @@ def plugin_menu() -> None:
         if installed:
             choices.append(questionary.Choice("  Uninstall a plugin",       value="uninstall"))
         choices.append(questionary.Separator())
+        choices.append(questionary.Choice("  Switch plugin channel",        value="channel"))
+        choices.append(questionary.Separator())
         if valid:
             choices.append(questionary.Choice("  Log out of GitHub",        value="logout"))
         else:
@@ -74,6 +86,8 @@ def plugin_menu() -> None:
             _install_plugin_by_url()
         elif action == "uninstall":
             _uninstall_plugin(installed)
+        elif action == "channel":
+            _switch_channel(channel)
         elif action == "login":
             _login()
         elif action == "logout":
@@ -129,6 +143,39 @@ def _logout() -> None:
         logout()
         console.print("[green]✓ Logged out.[/green]")
         questionary.press_any_key_to_continue("Press any key...").ask()
+
+
+def _switch_channel(current: str) -> None:
+    from lib.plugin_manager import set_plugin_channel
+
+    target = "stable" if current == "dev" else "dev"
+
+    console.print()
+    if target == "dev":
+        console.print(
+            Panel(
+                "[yellow][bold]Warning — dev channel[/bold]\n\n"
+                "Dev builds are pre-release and may contain incomplete features, "
+                "breaking changes, or unexpected behaviour.\n\n"
+                "Do not use dev builds in production environments.[/yellow]",
+                border_style="yellow",
+            )
+        )
+
+    confirmed = questionary.confirm(
+        f"Switch plugin channel from '{current}' to '{target}'?",
+        default=False,
+    ).ask()
+
+    if not confirmed:
+        return
+
+    set_plugin_channel(target)
+    console.print(f"[green]✓ Plugin channel set to [bold]{target}[/bold].[/green]\n")
+
+    from cli.update_checker import check_plugin_updates
+    check_plugin_updates()
+    questionary.press_any_key_to_continue("Press any key...").ask()
 
 
 def _browse_plugins() -> None:
@@ -199,9 +246,9 @@ def _browse_plugins() -> None:
 
 
 def _do_install(plugin: dict) -> None:
-    from lib.plugin_manager import install_plugin
+    from lib.plugin_manager import install_plugin, effective_install_url
 
-    install_url = plugin.get("install_url")
+    install_url = effective_install_url(plugin) if plugin.get("install_url") else None
     if not install_url:
         console.print("[red]✗ No install URL in manifest entry.[/red]")
         questionary.press_any_key_to_continue("Press any key...").ask()

@@ -238,3 +238,19 @@ class ZCCResource(Base):
 
     def __repr__(self) -> str:
         return f"<ZCCResource type={self.resource_type!r} name={self.name!r} id={self.zcc_id!r}>"
+
+
+class AppSettings(Base):
+    """Key-value store for application-level preferences.
+
+    Used for settings that apply globally (not per-tenant), such as the
+    plugin channel selection (stable vs dev).
+    """
+
+    __tablename__ = "app_settings"
+
+    key   = Column(String(255), primary_key=True)
+    value = Column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<AppSettings key={self.key!r} value={self.value!r}>"

@@ -7,7 +7,7 @@ from typing import Generator, Optional
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base
+from .models import Base, AppSettings
 
 # Default SQLite path — stored in a user data directory so it survives
 # package upgrades and works correctly when installed via pip/pipx.
@@ -112,3 +112,22 @@ def get_session() -> Generator[Session, None, None]:
         raise
     finally:
         session.close()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Read a value from the app_settings table. Returns default if not set."""
+    _ensure_init()
+    with get_session() as session:
+        row = session.get(AppSettings, key)
+        return row.value if row is not None else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """Write a value to the app_settings table (insert or update)."""
+    _ensure_init()
+    with get_session() as session:
+        row = session.get(AppSettings, key)
+        if row is None:
+            session.add(AppSettings(key=key, value=value))
+        else:
+            row.value = value

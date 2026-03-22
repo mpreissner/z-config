@@ -81,7 +81,12 @@ def get_installed_plugins() -> list[dict]:
 # Available plugins (manifest from GitHub)
 # ---------------------------------------------------------------------------
 
-def fetch_manifest() -> tuple[Optional[list], Optional[str]]:
+def get_manifest_ref() -> str:
+    """Return the git ref to fetch the manifest from based on the active channel."""
+    return "dev" if get_plugin_channel() == "dev" else "main"
+
+
+def fetch_manifest(ref: Optional[str] = None) -> tuple[Optional[list], Optional[str]]:
     """Fetch the plugin manifest from the private GitHub manifest repo.
 
     Returns (plugins_list, None) on success or (None, error_message) on failure.
@@ -92,14 +97,17 @@ def fetch_manifest() -> tuple[Optional[list], Optional[str]]:
         package         pip package name (for uninstall / version comparison)
         version         latest available version string
         install_url     pip-compatible git URL
+        install_url_dev pip-compatible git URL for the dev branch (optional)
     """
     token = get_token()
     if not token:
         return None, "Not authenticated — log in first."
 
+    resolved_ref = ref if ref is not None else get_manifest_ref()
     url = (
         f"https://api.github.com/repos/{_MANIFEST_REPO}"
         f"/contents/{_MANIFEST_FILE}"
+        f"?ref={resolved_ref}"
     )
     try:
         resp = requests.get(
@@ -206,6 +214,29 @@ def install_plugin(install_url: str) -> tuple[bool, str]:
                 os.unlink(askpass_path)
             except OSError:
                 pass
+
+
+def get_plugin_channel() -> str:
+    """Return the active plugin channel: 'stable' (default) or 'dev'."""
+    from db.database import get_setting
+    return get_setting("plugin_channel", default="stable") or "stable"
+
+
+def set_plugin_channel(channel: str) -> None:
+    """Persist the plugin channel ('stable' or 'dev')."""
+    from db.database import set_setting
+    set_setting("plugin_channel", channel)
+
+
+def effective_install_url(plugin_entry: dict) -> str:
+    """Return the install URL for the current channel.
+
+    Falls back to install_url when install_url_dev is absent or the channel
+    is stable.
+    """
+    if get_plugin_channel() == "dev":
+        return plugin_entry.get("install_url_dev") or plugin_entry.get("install_url", "")
+    return plugin_entry.get("install_url", "")
 
 
 def uninstall_plugin(package_name: str) -> tuple[bool, str]:

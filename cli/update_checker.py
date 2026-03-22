@@ -155,7 +155,7 @@ def check_plugin_updates() -> None:
 
     Runs silently when everything is current.
     """
-    from lib.plugin_manager import get_installed_plugins, fetch_manifest, install_plugin
+    from lib.plugin_manager import get_installed_plugins, fetch_manifest, install_plugin, effective_install_url
     from lib.github_auth import get_token
     from rich.table import Table
 
@@ -191,7 +191,7 @@ def check_plugin_updates() -> None:
                     "package":      pkg,
                     "installed":    inst_ver,
                     "available":    avail_ver,
-                    "install_url":  manifest.get("install_url", ""),
+                    "install_url":  effective_install_url(manifest),
                 })
         except Exception:
             continue

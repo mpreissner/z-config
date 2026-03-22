@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.6] - 2026-03-22
+
+### Added
+
+#### Plugin Manager
+- **Plugin channel selection** — users can now switch between `stable` (default) and `dev` plugin channels from the Plugin Manager (Ctrl+]). The active channel is persisted in the local database. A disclaimer is shown when switching to the dev channel.
+- **Dev channel manifest fetch** — when the dev channel is active, the plugin manifest is fetched from the `dev` branch of the plugin repository rather than `main`, enabling independent versioning and update detection for pre-release builds.
+- **Immediate update check on channel switch** — switching channels triggers an update check inline so dev builds are offered immediately without requiring a restart.
+- **App settings store** — new `app_settings` table added to the local database for persisting application-level preferences (key/value). Existing databases are updated automatically on first launch.
+
+---
+
 ## [1.0.5] - 2026-03-21
 
 ### Security
