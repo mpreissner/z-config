@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.8] - 2026-03-23
+
+### Added
+
+#### ZCC — Zscaler Client Connector
+- **Export Disable Reasons CSV** — new export option under the ZCC menu. Prompts for a required date range (`startDate`/`endDate`), optional OS type filter, and IANA timezone (applied to the "Disable Time" column). Downloads the report directly from the API and saves as CSV. Columns: User, UDID, Platform, Service, Disable Time, Disable Reason.
+
+### Fixed
+
+#### ZCC — Zscaler Client Connector
+- **Disable Reasons endpoint** — the SDK's `download_disable_reasons` wrapper is broken: it validates the response for an unrelated CSV format and strips the date range parameters. The implementation now bypasses the SDK, using direct HTTP with the correct required parameters (`startDate`, `endDate`) and optional `Time-Zone` header.
+
+---
+
 ## [1.0.7] - 2026-03-23
 
 ### Added

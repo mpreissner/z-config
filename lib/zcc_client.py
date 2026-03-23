@@ -264,6 +264,40 @@ class ZCCClient:
         )
         return _unwrap(result, resp, err)
 
+    def download_disable_reasons(
+        self,
+        filename: str,
+        start_date: str,
+        end_date: str,
+        os_type: Optional[int] = None,
+        time_zone: Optional[str] = None,
+    ) -> str:
+        """Download disable-reasons CSV via direct HTTP.
+
+        startDate and endDate (YYYY-MM-DD) are required by the API.
+        The SDK wrapper for this endpoint is broken — it validates for a
+        different CSV format. The actual response columns are:
+        User, UDID, Platform, Service, Disable Time, Disable Reason.
+        """
+        params: Dict = {"startDate": start_date, "endDate": end_date}
+        if os_type is not None:
+            params["osType"] = os_type
+        headers: Dict = {"Authorization": f"Bearer {self._get_token()}", "Accept": "*/*"}
+        if time_zone:
+            headers["Time-Zone"] = time_zone
+
+        resp = requests.get(
+            f"{self._zcc_base}/downloadDisableReasons",
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        with open(filename, "wb") as f:
+            f.write(resp.content)
+        return filename
+
     # ------------------------------------------------------------------
     # Secrets
     # ------------------------------------------------------------------

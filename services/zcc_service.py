@@ -143,6 +143,32 @@ class ZCCService:
             registration_types=registration_types,
         )
 
+    def download_disable_reasons_csv(
+        self,
+        filename: str,
+        start_date: str,
+        end_date: str,
+        os_type: Optional[int] = None,
+        time_zone: Optional[str] = None,
+    ) -> str:
+        result = self.client.download_disable_reasons(
+            filename=filename,
+            start_date=start_date,
+            end_date=end_date,
+            os_type=os_type,
+            time_zone=time_zone,
+        )
+        audit_service.log(
+            product="ZCC",
+            operation="download_disable_reasons",
+            action="READ",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="device",
+            details={"start_date": start_date, "end_date": end_date, "os_type": os_type},
+        )
+        return result
+
     # ------------------------------------------------------------------
     # Label helpers
     # ------------------------------------------------------------------

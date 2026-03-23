@@ -51,6 +51,7 @@ def zcc_menu():
                 questionary.Separator(),
                 questionary.Choice("Export Devices CSV", value="export_devices"),
                 questionary.Choice("Export Service Status CSV", value="export_status"),
+                questionary.Choice("Export Disable Reasons CSV", value="export_disable_reasons"),
                 questionary.Separator(),
                 questionary.Choice("Import Config", value="import"),
                 questionary.Choice("Reset N/A Resource Types", value="reset_na"),
@@ -82,6 +83,8 @@ def zcc_menu():
             _export_devices(client, tenant)
         elif choice == "export_status":
             _export_service_status(client, tenant)
+        elif choice == "export_disable_reasons":
+            _export_disable_reasons(client, tenant)
         elif choice == "import":
             _import_zcc_config(client, tenant)
         elif choice == "reset_na":
@@ -492,6 +495,58 @@ def _export_service_status(client, tenant):
                 filename=filename,
                 os_types=os_types or None,
                 registration_types=reg_types or None,
+            )
+        except Exception as e:
+            console.print(f"[red]✗ {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+    console.print(f"[green]✓ Saved to {filename}[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _export_disable_reasons(client, tenant):
+    from services.zcc_service import ZCCService
+    service = ZCCService(client, tenant_id=tenant.id)
+
+    console.print("\n[bold]Export Disable Reasons CSV[/bold]\n")
+    console.print("[dim]Columns: User, UDID, Platform, Service, Disable Time, Disable Reason[/dim]\n")
+
+    start_date = questionary.text("Start date (YYYY-MM-DD):").ask()
+    if not start_date:
+        return
+
+    end_date = questionary.text("End date (YYYY-MM-DD):").ask()
+    if not end_date:
+        return
+
+    os_type_choice = questionary.select(
+        "Filter by OS type:",
+        choices=[questionary.Choice("All OS types", value=None)] + _OS_CHOICES,
+    ).ask()
+
+    tz_input = questionary.text(
+        "Time zone for Disable Time column (IANA, e.g. America/New_York):",
+        default="UTC",
+    ).ask()
+    if tz_input is None:
+        return
+
+    default_path = os.path.expanduser(
+        f"~/zcc-disable-reasons-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+    )
+    filename = questionary.text("Save to:", default=default_path).ask()
+    if not filename:
+        return
+
+    with console.status("Downloading..."):
+        try:
+            service.download_disable_reasons_csv(
+                filename=filename,
+                start_date=start_date,
+                end_date=end_date,
+                os_type=os_type_choice,
+                time_zone=tz_input or None,
             )
         except Exception as e:
             console.print(f"[red]✗ {e}[/red]")
