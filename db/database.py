@@ -84,6 +84,11 @@ def _migrate(engine) -> None:
         "ALTER TABLE tenant_configs ADD COLUMN zia_tenant_id VARCHAR(255)",
         "ALTER TABLE tenant_configs ADD COLUMN zia_cloud VARCHAR(255)",
         "ALTER TABLE tenant_configs ADD COLUMN zia_subscriptions JSON",
+        # palo-tools candidate scaffolding
+        "ALTER TABLE zia_resources ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT 'tenant'",
+        "ALTER TABLE zia_resources ADD COLUMN candidate_status VARCHAR(32)",
+        "ALTER TABLE zpa_resources ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT 'tenant'",
+        "ALTER TABLE zpa_resources ADD COLUMN candidate_status VARCHAR(32)",
     ]
     for stmt in migrations:
         with engine.connect() as conn:
@@ -92,6 +97,12 @@ def _migrate(engine) -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()  # reset transaction state; column already exists
+
+
+def get_engine():
+    """Return the SQLAlchemy engine (initialising the DB if needed)."""
+    _ensure_init()
+    return _engine
 
 
 def _ensure_init() -> None:

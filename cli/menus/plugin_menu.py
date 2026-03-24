@@ -21,10 +21,14 @@ def plugin_menu() -> None:
         render_banner()
 
         from lib.github_auth import get_token, is_authenticated, verify_token
-        from lib.plugin_manager import get_installed_plugins, get_plugin_channel
+        from lib.plugin_manager import (
+            get_installed_plugins, get_plugin_channel, get_plugin_branch_overrides,
+        )
 
-        installed = get_installed_plugins()
-        channel   = get_plugin_channel()
+        installed  = get_installed_plugins()
+        channel    = get_plugin_channel()
+        overrides  = get_plugin_branch_overrides()
+        palo_branch = overrides.get("palo-tools")
 
         # ── Auth status header ────────────────────────────────────────────
         token = get_token()
@@ -44,8 +48,13 @@ def plugin_menu() -> None:
         else:
             channel_line = "[dim]Channel: stable[/dim]"
 
+        if palo_branch:
+            override_line = f"\n[magenta]⚙  palo-tools branch override: [bold]{palo_branch}[/bold][/magenta]"
+        else:
+            override_line = ""
+
         console.print(Panel(
-            auth_line + "\n" + channel_line,
+            auth_line + "\n" + channel_line + override_line,
             title="Plugin Manager",
             border_style="cyan",
         ))
@@ -80,7 +89,21 @@ def plugin_menu() -> None:
         choices.append(questionary.Separator())
         choices.append(questionary.Choice("  ← Back",                       value="back"))
 
-        action = questionary.select("Plugin Manager", choices=choices).ask()
+        q = questionary.select("Plugin Manager", choices=choices)
+
+        # Inject Ctrl+] binding for the hidden palo-tools branch toggle.
+        from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+        _branch_kb = KeyBindings()
+
+        @_branch_kb.add("c-]")
+        def _branch_toggle_key(event):
+            event.app.exit(result="__branch_toggle__")
+
+        app = q.application
+        app.key_bindings = merge_key_bindings(
+            [app.key_bindings or KeyBindings(), _branch_kb]
+        )
+        action = app.run()
 
         if action == "browse":
             _browse_plugins()
@@ -94,6 +117,8 @@ def plugin_menu() -> None:
             _login()
         elif action == "logout":
             _logout()
+        elif action == "__branch_toggle__":
+            _toggle_palo_branch(palo_branch)
         elif action in ("back", None):
             break
 
@@ -288,6 +313,83 @@ def _install_plugin_by_url() -> None:
     if not url:
         return
     _do_install({"install_url": url, "name": url})
+
+
+def _toggle_palo_branch(current_override: str | None) -> None:
+    """Secret Ctrl+] handler: toggle palo-tools between dev and dev-overhaul."""
+    from lib.plugin_manager import (
+        fetch_manifest, get_plugin_channel, install_plugin,
+        set_plugin_branch_override, url_for_branch,
+    )
+
+    # Determine target branch
+    if current_override == "dev-overhaul":
+        target_branch = "dev"
+        label = "dev-overhaul  →  dev"
+    else:
+        target_branch = "dev-overhaul"
+        label = f"{'override: ' + current_override if current_override else 'channel: ' + get_plugin_channel()}  →  dev-overhaul"
+
+    console.print()
+    console.print(Panel(
+        f"[bold]palo-tools branch toggle[/bold]\n\n"
+        f"[dim]{label}[/dim]\n\n"
+        "This will reinstall palo-tools from the target branch and exit zs-config.",
+        border_style="magenta",
+        title="Developer — Branch Override",
+    ))
+
+    confirmed = questionary.confirm(
+        f"Switch palo-tools to '{target_branch}' and reinstall?",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    # Fetch manifest to get the base install URL
+    console.print()
+    with console.status("[cyan]Fetching manifest...[/cyan]"):
+        available, error = fetch_manifest()
+
+    if error:
+        console.print(f"[red]✗ {error}[/red]")
+        questionary.press_any_key_to_continue("Press any key...").ask()
+        return
+
+    palo_entry = next(
+        (p for p in (available or []) if p.get("package") == "palo-tools"),
+        None,
+    )
+    if not palo_entry:
+        console.print("[red]✗ palo-tools not found in manifest.[/red]")
+        questionary.press_any_key_to_continue("Press any key...").ask()
+        return
+
+    base_url = palo_entry.get("install_url_dev") or palo_entry.get("install_url", "")
+    if not base_url:
+        console.print("[red]✗ No install URL in manifest for palo-tools.[/red]")
+        questionary.press_any_key_to_continue("Press any key...").ask()
+        return
+
+    install_url = url_for_branch(base_url, target_branch)
+    console.print(f"[dim]  {install_url}[/dim]\n")
+
+    with console.status(f"[cyan]Installing palo-tools @ {target_branch}...[/cyan]"):
+        success, message = install_plugin(install_url)
+
+    if success:
+        set_plugin_branch_override("palo-tools", target_branch)
+        console.print(f"[green]✓ {message}[/green]")
+        console.print(Panel(
+            f"[green]palo-tools switched to [bold]{target_branch}[/bold].[/green] "
+            "zs-config will now exit — please re-launch to activate the update.",
+            border_style="green",
+        ))
+        questionary.press_any_key_to_continue("Press any key to exit...").ask()
+        sys.exit(0)
+    else:
+        console.print(f"[red]✗ Installation failed:[/red]\n{message}")
+        questionary.press_any_key_to_continue("Press any key...").ask()
 
 
 def _uninstall_plugin(installed: list[dict]) -> None:

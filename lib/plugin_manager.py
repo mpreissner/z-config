@@ -228,12 +228,68 @@ def set_plugin_channel(channel: str) -> None:
     set_setting("plugin_channel", channel)
 
 
-def effective_install_url(plugin_entry: dict) -> str:
-    """Return the install URL for the current channel.
+def get_plugin_branch_overrides() -> dict:
+    """Return per-package branch overrides: {package_name: branch_name}."""
+    import json
+    from db.database import get_setting
+    raw = get_setting("plugin_branch_overrides")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
 
-    Falls back to install_url when install_url_dev is absent or the channel
-    is stable.
+
+def set_plugin_branch_override(package_name: str, branch: Optional[str]) -> None:
+    """Set or clear a branch override for a specific package.
+
+    When set, the override takes precedence over the active channel when
+    constructing install URLs via url_for_branch().
+    Pass branch=None to clear the override.
     """
+    import json
+    from db.database import set_setting
+    overrides = get_plugin_branch_overrides()
+    if branch:
+        overrides[package_name] = branch
+    else:
+        overrides.pop(package_name, None)
+    set_setting("plugin_branch_overrides", json.dumps(overrides))
+
+
+def url_for_branch(base_url: str, branch: str) -> str:
+    """Return a pip git URL with the specified branch injected.
+
+    git+https://github.com/org/repo.git#sub        → …@branch#sub
+    git+https://github.com/org/repo.git@dev#sub     → …@branch#sub
+    """
+    # Strip any existing @ref before the fragment (handles both https and ssh URLs).
+    # SSH URLs contain 'git@github.com' so the pattern anchors past that literal.
+    stripped = re.sub(
+        r'(git\+(?:https://(?:[^@/]+@)?|ssh://git@)github\.com/[^@#]+)@[^#]+',
+        r'\1',
+        base_url,
+    )
+    if '#' in stripped:
+        base, fragment = stripped.split('#', 1)
+        return f"{base}@{branch}#{fragment}"
+    return f"{stripped}@{branch}"
+
+
+def effective_install_url(plugin_entry: dict) -> str:
+    """Return the install URL for the current channel and any branch override.
+
+    Priority: per-package branch override > channel setting > stable.
+    """
+    package   = plugin_entry.get("package", "")
+    overrides = get_plugin_branch_overrides()
+
+    if package in overrides:
+        branch   = overrides[package]
+        base_url = plugin_entry.get("install_url_dev") or plugin_entry.get("install_url", "")
+        return url_for_branch(base_url, branch) if base_url else ""
+
     if get_plugin_channel() == "dev":
         return plugin_entry.get("install_url_dev") or plugin_entry.get("install_url", "")
     return plugin_entry.get("install_url", "")
