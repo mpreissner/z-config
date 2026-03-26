@@ -64,6 +64,7 @@ PUSH_ORDER: List[str] = [
     # enables admin rank, and sets other policy toggles)
     "url_filter_cloud_app_settings",
     "advanced_settings",
+    "browser_control_settings",
     # Tier 3 — rules (dependency order)
     "url_filtering_rule",
     "firewall_rule",
@@ -147,6 +148,22 @@ SKIP_NAMED: dict = {
     # The SDK SandboxRules model omits default_rule, so _is_zscaler_managed can't
     # detect it via the boolean field.  Guard by name as a belt-and-suspenders fallback.
     "sandbox_rule":       {"Default BA Rule"},
+}
+
+# Rule types that can be provisioned by one-click settings toggles.
+# After pushing settings singletons, these types are re-fetched from the target
+# so that newly provisioned rules can be matched and ID-remapped.
+_ONE_CLICK_RULE_TYPES: set = {
+    "url_filtering_rule",     # CIPA Compliance Rule  (enableCIPACompliance)
+    "ssl_inspection_rule",    # O365 One Click, UCaaS One Click, Smart Isolation One Click
+    "firewall_rule",          # O365 One Click, UCaaS One Click, Block malicious IPs
+    "firewall_dns_rule",      # O365 One Click, UCaaS One Click, DNS risk rules
+}
+
+# Settings resource types whose push may provision new one-click rules in the target.
+_SETTINGS_WITH_TOGGLE_RULES: set = {
+    "url_filter_cloud_app_settings",  # O365, UCaaS, CIPA toggles
+    "browser_control_settings",       # Smart Browser Isolation toggle
 }
 
 # Fields always stripped from raw_config before comparison and before push.
@@ -239,6 +256,8 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
                                       "update_url_filter_cloud_app_settings"),
     "advanced_settings":             ("update_advanced_settings",
                                       "update_advanced_settings"),
+    "browser_control_settings":      ("update_browser_control_settings",
+                                      "update_browser_control_settings"),
 }
 
 # GET methods for live configVersion fetch before UPDATE.
@@ -653,6 +672,25 @@ class ZIAPushService:
                                      __managed=True)
                             )
                             continue
+                        # Found in target and configs match (or read-only): nothing to push.
+                        skipped.append(PushRecord(rtype, display_name, "skipped"))
+                        continue
+                    # Rule not found in target. If it's a one-click governed rule that is
+                    # ENABLED in the source, it may not exist yet because the toggle was
+                    # never enabled on the target.  Tag it for re-matching after the
+                    # settings push provisions it.  Disabled/absent rules are left as
+                    # skipped — toggle=OFF / rule-absent is equivalent behaviour to
+                    # toggle=OFF / rule-disabled; the settings push handles both.
+                    if (rtype in _ONE_CLICK_RULE_TYPES
+                            and raw_config.get("state") == "ENABLED"):
+                        pending.setdefault(rtype, []).append(
+                            dict(entry,
+                                 __action="update",
+                                 __display_name=display_name,
+                                 __managed=True,
+                                 __one_click_pending=True)
+                        )
+                        continue
                     skipped.append(PushRecord(rtype, display_name, "skipped"))
                     continue
 
@@ -825,23 +863,71 @@ class ZIAPushService:
         """
         self._id_remap = dict(dry_run.id_remap)
 
-        # Split pending into managed updates (Pass 1) and user-defined (Pass 2)
-        managed_pending: Dict[str, List[dict]] = {}
+        # Split pending into:
+        #   settings_pending    — Tier-2.5 singletons that may provision one-click rules
+        #   one_click_pending   — managed rules absent from target that need re-matching
+        #                         after the settings push materialises them
+        #   other_managed       — remaining managed resources (Pass 1b)
+        #   user_pending        — user-defined resources (Pass 2+)
+        _ALL_SINGLETONS = {"url_filter_cloud_app_settings", "advanced_settings",
+                           "browser_control_settings"}
+        settings_pending: Dict[str, List[dict]] = {}
+        one_click_pending: Dict[str, List[dict]] = {}
+        other_managed_pending: Dict[str, List[dict]] = {}
         user_pending: Dict[str, List[dict]] = {}
 
         for rtype, entries in dry_run.pending.items():
             for entry in entries:
                 if entry.get("__managed"):
-                    managed_pending.setdefault(rtype, []).append(entry)
+                    if rtype in _ALL_SINGLETONS:
+                        settings_pending.setdefault(rtype, []).append(entry)
+                    elif entry.get("__one_click_pending"):
+                        one_click_pending.setdefault(rtype, []).append(entry)
+                    else:
+                        other_managed_pending.setdefault(rtype, []).append(entry)
                 else:
                     user_pending.setdefault(rtype, []).append(entry)
 
         all_records: List[PushRecord] = []
 
-        # Pass 1 — managed resource updates (live configVersion re-fetch)
-        if managed_pending:
-            _, pass1_records = self._single_pass(managed_pending, 1, progress_callback)
-            all_records.extend(pass1_records)
+        # Pass 1a — settings singletons (provisions one-click rules on the target)
+        if settings_pending:
+            _, pass1a_records = self._single_pass(settings_pending, 1, progress_callback)
+            all_records.extend(pass1a_records)
+
+        # Re-import one-click rule types so newly provisioned rules are visible,
+        # then resolve __one_click_pending entries to real target IDs.
+        if one_click_pending:
+            from services.zia_import_service import ZIAImportService
+            _reimport_svc = ZIAImportService(self._client, self._tenant_id)
+            _reimport_svc.run(resource_types=list(one_click_pending.keys()))
+            refreshed = self._load_existing_from_db()
+
+            for rtype, entries in one_click_pending.items():
+                refreshed_for_type = refreshed.get(rtype, {})
+                for entry in entries:
+                    name = entry.get("name") or entry.get("__display_name", "")
+                    source_id = str(entry.get("id", ""))
+                    found = self._find_existing(refreshed_for_type, source_id, name)
+                    if found:
+                        target_id = found["id"]
+                        if source_id:
+                            self._register_remap(source_id, target_id)
+                        entry["__target_id"] = target_id
+                        entry.pop("__one_click_pending", None)
+                        other_managed_pending.setdefault(rtype, []).append(entry)
+                    else:
+                        dname = entry.get("__display_name") or name or "?"
+                        all_records.append(PushRecord(
+                            resource_type=rtype,
+                            name=dname,
+                            status="skipped:one_click_not_provisioned",
+                        ))
+
+        # Pass 1b — remaining managed resources (including resolved one-click items)
+        if other_managed_pending:
+            _, pass1b_records = self._single_pass(other_managed_pending, 1, progress_callback)
+            all_records.extend(pass1b_records)
             # Managed failures are logged but not retried
 
         # Pass 2+ — user-defined resources with multi-pass retry
@@ -1500,6 +1586,7 @@ class ZIAPushService:
             "sandbox_rule":                  self._norm_sandbox_rule,
             "url_filter_cloud_app_settings": self._norm_url_filter_cloud_app_settings,
             "advanced_settings":             self._norm_advanced_settings,
+            "browser_control_settings":      self._norm_browser_control_settings,
         }
         handler = handlers.get(resource_type)
         if handler:
@@ -1836,6 +1923,39 @@ class ZIAPushService:
         cfg.pop("name", None)
         return cfg
 
+    def _norm_browser_control_settings(self, cfg: dict) -> dict:
+        cfg.pop("name", None)
+        # smartIsolationProfileId is a tenant-specific UUID; remap by profile name.
+        # The API response includes smartIsolationProfile {id, name, url} alongside
+        # the flat smartIsolationProfileId — use the name for cross-tenant remapping.
+        profile_obj = cfg.get("smart_isolation_profile") or cfg.get("smartIsolationProfile")
+        if profile_obj and isinstance(profile_obj, dict):
+            profile_name = (profile_obj.get("name") or "").lower()
+            matched = self._cbi_profile_map.get(profile_name)
+            if matched:
+                cfg["smart_isolation_profile_id"] = matched["id"]
+                cfg["smart_isolation_profile"] = {
+                    "id": matched["id"],
+                    "name": matched.get("name", ""),
+                    "url": matched.get("url", ""),
+                }
+            else:
+                # No matching profile in target — strip isolation profile fields
+                # so the setting saves without a dangling UUID reference.
+                cfg.pop("smart_isolation_profile_id", None)
+                cfg.pop("smartIsolationProfileId", None)
+                cfg.pop("smart_isolation_profile", None)
+                cfg.pop("smartIsolationProfile", None)
+        # smartIsolationUsers / smartIsolationGroups are env-specific references;
+        # strip IDs that don't exist in the target.
+        self._norm_ref_fields(cfg,
+            resolved_fields=(
+                ("smart_isolation_users",  "user"),
+                ("smart_isolation_groups", "group"),
+            ),
+        )
+        return cfg
+
     def _norm_cloud_app_control_rule(self, cfg: dict) -> dict:
         # applications is a flat string list (app names), not [{id: X}] — leave as-is.
         # An empty list means "Any" in the ZIA UI; the API represents this by omitting
@@ -2043,6 +2163,11 @@ def _is_zscaler_managed(resource_type: str, raw_config: dict) -> bool:
     if resource_type in ("url_filter_cloud_app_settings", "advanced_settings"):
         return True  # singletons — always present in every tenant, never created/deleted
     if raw_config.get("predefined"):
+        return True
+    # ciparule:true — CIPA Compliance Rule; Zscaler-managed, toggled via enableCIPACompliance
+    # in url_filter_cloud_app_settings.  Not flagged predefined by the API but equally
+    # restricted: cannot be created/renamed manually.
+    if raw_config.get("ciparule"):
         return True
     # Check both snake_case (SDK as_dict()) and camelCase (direct HTTP) forms.
     if raw_config.get("default_rule") or raw_config.get("defaultRule"):

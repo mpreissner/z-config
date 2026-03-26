@@ -7,6 +7,14 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
+## What's New — v1.0.11
+
+- **Rule display order fixed** — rules with negative positions (default/catch-all rules) now appear at the bottom of every list, matching the Zscaler admin console order, across all ZIA and ZPA policy views.
+- **Browser Control Settings** — Smart Browser Isolation settings are now imported and pushed as part of ZIA baseline sync, including CBI profile remapping and user/group scope resolution.
+- **One-click rule provisioning** — when a one-click governed rule (CIPA Compliance, O365/UCaaS/Smart Isolation One Click) is enabled in the source but absent from the target, the push service now enables the associated toggle, re-queries the target to pick up newly provisioned rules, and applies the update in a second pass. Rules that remain absent after provisioning are reported as `skipped:one_click_not_provisioned` rather than failing.
+
+---
+
 ## Features
 
 - **ZPA** — App Connectors & Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups, Access Policy (list/search/export/import-sync from CSV with dry-run, bulk reorder, and orphan delete), PRA Portals & Consoles, Service Edges, Certificate Management (upload/rotate/delete)

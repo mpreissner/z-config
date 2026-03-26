@@ -77,6 +77,8 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
                 id_field="id", name_field="name"),
     ResourceDef("advanced_settings",             "list_advanced_settings",
                 id_field="id", name_field="name"),
+    ResourceDef("browser_control_settings",      "list_browser_control_settings",
+                id_field="id", name_field="name"),
     ResourceDef("tenancy_restriction_profile",   "list_tenancy_restriction_profiles"),
     ResourceDef("sandbox_rule",                  "list_sandbox_rules"),
 ]

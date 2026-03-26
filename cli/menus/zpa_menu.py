@@ -12,6 +12,16 @@ from lib.defaults import DEFAULT_WORK_DIR
 console = Console()
 
 
+def _rule_order_key(n):
+    """Sort key: positive integers ascending first, then negative integers descending.
+
+    Positive/zero positions (user rules) come first in ascending order.
+    Negative positions (system/default rules) come last in descending order.
+    e.g. 1, 2, 3, ..., -1, -2, -3, ...
+    """
+    return (0, n) if n >= 0 else (1, -n)
+
+
 def zpa_menu():
     client, tenant = get_zpa_client()
     if client is None:
@@ -2765,7 +2775,7 @@ def _list_access_policy_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: int(r["raw_config"].get("rule_order") or 0))
+    rows.sort(key=lambda r: _rule_order_key(int(r["raw_config"].get("rule_order") or 0)))
 
     table = Table(title=f"Access Policy Rules ({len(rows)} total)", show_lines=False)
     table.add_column("#", style="dim", width=5)
@@ -2814,7 +2824,7 @@ def _search_access_policy_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: int(r["raw_config"].get("rule_order") or 0))
+    rows.sort(key=lambda r: _rule_order_key(int(r["raw_config"].get("rule_order") or 0)))
 
     table = Table(title=f"Matching Access Policy Rules ({len(rows)})", show_lines=False)
     table.add_column("#", style="dim", width=5)
@@ -2981,7 +2991,7 @@ def _export_policy_rules_to_csv(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: int(r["raw_config"].get("rule_order") or 0))
+    rows.sort(key=lambda r: _rule_order_key(int(r["raw_config"].get("rule_order") or 0)))
 
     default_path = str(DEFAULT_WORK_DIR / f"access_policy_{tenant.name}.csv")
     out_path = questionary.path("Output path:", default=default_path).ask()

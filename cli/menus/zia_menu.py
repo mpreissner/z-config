@@ -10,6 +10,16 @@ from lib.defaults import DEFAULT_WORK_DIR
 console = Console()
 
 
+def _rule_order_key(n):
+    """Sort key: positive integers ascending first, then negative integers descending.
+
+    Positive/zero positions (user rules) come first in ascending order.
+    Negative positions (system/default rules) come last in descending order.
+    e.g. 1, 2, 3, ..., -1, -2, -3, ...
+    """
+    return (0, n) if n >= 0 else (1, -n)
+
+
 def _zia_changed():
     """Mark the active tenant's ZIA config as having unactivated changes."""
     from cli.session import get_active_tenant, mark_zia_pending
@@ -362,7 +372,7 @@ def _list_firewall_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"Firewall Rules ({len(rows)} total)", show_lines=False)
     table.add_column("Order", justify="right")
@@ -419,7 +429,7 @@ def _search_firewall_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"Matching Firewall Rules ({len(rows)})", show_lines=False)
     table.add_column("Order", justify="right")
@@ -1816,7 +1826,7 @@ def _list_dns_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"DNS Filter Rules ({len(rows)} total)", show_lines=False)
     table.add_column("Order", justify="right")
@@ -1873,7 +1883,7 @@ def _search_dns_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"Matching DNS Filter Rules ({len(rows)})", show_lines=False)
     table.add_column("Order", justify="right")
@@ -2013,7 +2023,7 @@ def _list_ips_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"IPS Rules ({len(rows)} total)", show_lines=False)
     table.add_column("Order", justify="right")
@@ -2078,7 +2088,7 @@ def _search_ips_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"Matching IPS Rules ({len(rows)})", show_lines=False)
     table.add_column("Order", justify="right")
@@ -2332,7 +2342,7 @@ def _list_ssl_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"SSL Inspection Rules ({len(rows)} total)", show_lines=False)
     table.add_column("Order", justify="right")
@@ -2389,7 +2399,7 @@ def _search_ssl_rules(tenant):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"Matching SSL Rules ({len(rows)})", show_lines=False)
     table.add_column("Order", justify="right")
@@ -2907,7 +2917,7 @@ def _list_url_filtering_rules(tenant, search: str = None):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     table = Table(title=f"URL Filtering Rules ({len(rows)} total)", show_lines=False)
     table.add_column("Order", justify="right")
@@ -3836,7 +3846,7 @@ def _list_dlp_web_rules(tenant, search: str = None):
             {"name": r.name, "zia_id": r.zia_id, "raw_config": r.raw_config or {}, "synced_at": r.synced_at}
             for r in resources
         ]
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
 
     if search:
         search_lower = search.lower()
@@ -4119,7 +4129,7 @@ def _get_cloud_app_rules_from_db(tenant, rule_type: str):
             for r in resources
             if (r.raw_config or {}).get("type") == rule_type
         ]
-    rows.sort(key=lambda r: r["raw_config"].get("order") or r["raw_config"].get("rank") or 0)
+    rows.sort(key=lambda r: _rule_order_key(r["raw_config"].get("order") or r["raw_config"].get("rank") or 0))
     return rows
 
 

@@ -888,6 +888,18 @@ class ZIAClient:
         self.zia_put("/zia/api/v1/advancedSettings", payload)
         return True
 
+    def list_browser_control_settings(self) -> List[Dict]:
+        """Return singleton browserControlSettings wrapped in a one-element list."""
+        data = self.zia_get("/zia/api/v1/browserControlSettings")
+        return [{"id": 1, "name": "browser_control_settings",
+                  "access_control": "READ_WRITE", **data}]
+
+    def update_browser_control_settings(self, rule_id: str, config: Dict) -> bool:
+        """PUT singleton browserControlSettings — rule_id is unused (singleton endpoint)."""
+        payload = {k: v for k, v in config.items() if k not in ("id", "name")}
+        self.zia_put("/zia/api/v1/browserControlSettings", payload)
+        return True
+
     # ------------------------------------------------------------------
     # Tenancy Restriction Profiles
     # ------------------------------------------------------------------

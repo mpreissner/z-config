@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.11] - 2026-03-26
+
+### Added
+
+#### ZIA — Internet Access
+- **`browser_control_settings` import and push** — Smart Browser Isolation settings are now imported as a resource and can be pushed cross-tenant. Includes CBI profile remapping by name and resolution of scoped users/groups.
+- **One-click rule provisioning during push** — when a one-click governed rule (CIPA Compliance Rule, O365/UCaaS/Smart Isolation One Click rules) is enabled in the source but absent from the target, the push service now re-imports the affected rule types after pushing settings singletons, resolves the newly provisioned rules, and updates them in a second pass. Rules that remain absent after the re-import are marked `skipped:one_click_not_provisioned` rather than failing.
+
+### Fixed
+
+#### ZIA / ZPA — All Products
+- **Rule list display order** — rules with negative positions (default/catch-all rules) were sorted to the top of every list. All rule list views now display positive positions ascending first, then negative positions descending, matching the Zscaler admin console order.
+
+#### ZIA — Internet Access
+- **CIPA Compliance Rule detection** — rules with `ciparule: true` are now correctly identified as Zscaler-managed and treated as read-only in the push service; their state is managed via the `enableCIPACompliance` toggle in URL/cloud app settings.
+- **One-click rule state equivalence** — `toggle=OFF / rule absent` is now treated as functionally equivalent to `toggle=OFF / rule disabled`; no spurious create attempts are made for rules the target tenant has never provisioned.
+
+---
+
 ## [1.0.10] - 2026-03-24
 
 ### Changed
