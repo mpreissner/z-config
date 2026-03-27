@@ -7,23 +7,25 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.11
+## What's New — v1.0.12
 
-- **Rule display order fixed** — rules with negative positions (default/catch-all rules) now appear at the bottom of every list, matching the Zscaler admin console order, across all ZIA and ZPA policy views.
-- **Browser Control Settings** — Smart Browser Isolation settings are now imported and pushed as part of ZIA baseline sync, including CBI profile remapping and user/group scope resolution.
-- **One-click rule provisioning** — when a one-click governed rule (CIPA Compliance, O365/UCaaS/Smart Isolation One Click) is enabled in the source but absent from the target, the push service now enables the associated toggle, re-queries the target to pick up newly provisioned rules, and applies the update in a second pass. Rules that remain absent after provisioning are reported as `skipped:one_click_not_provisioned` rather than failing.
+- **ZPA Access Policy CSV — POSTURE, RISK SCORE, SCIM attributes** — three new scoping columns: `posture_profiles` (resolved by name to `posture_udid`), `risk_factor_types` (`LOW` / `MEDIUM` / `HIGH` / `CRITICAL`), and `scim_attributes` (`AttributeName=Value` format). Fixes a long-standing bug where SCIM individual attribute conditions (`object_type: SCIM`) were silently dropped on export and rejected on import.
+- **SCIM_GROUP export/import fixed** — SCIM_GROUP condition operands return `name: null` from the ZPA API. Export now resolves group names from the local DB cache (`IdpName:GroupName` format) and import correctly passes `lhs=idp_id` to the API.
+- **Identity & Directory views** — new ZPA menu section: SAML Attributes, SCIM User Attributes, and SCIM Groups are now viewable as searchable tables.
+- **Policy Scoping Reference export** — new markdown export under Access Policy listing every available value per criteria category (Client Types, Platforms, Risk Factor Types, IdPs, SAML Attributes, SCIM Attributes, SCIM Groups, Machine Groups, Trusted Networks, Posture Profiles, Country Codes).
+- **Apps & Groups Reference export** — new markdown export under App Segments listing all Application Segments and Segment Groups with their IDs.
 
 ---
 
 ## Features
 
-- **ZPA** — App Connectors & Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups, Access Policy (list/search/export/import-sync from CSV with dry-run, bulk reorder, and orphan delete), PRA Portals & Consoles, Service Edges, Certificate Management (upload/rotate/delete)
+- **ZPA** — App Connectors & Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups, Access Policy (list/search/export/import-sync from CSV with dry-run, bulk reorder, and orphan delete), PRA Portals & Consoles, Service Edges, Certificate Management (upload/rotate/delete), Identity & Directory (SAML Attributes, SCIM User Attributes, SCIM Groups), Policy Scoping Reference export, Apps & Groups Reference export
 - **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4 rules, DNS filter, IPS — list/search/enable-disable/export/import-sync from CSV), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), **Apply Baseline from JSON** (wipe-first or delta push with ID remapping, cross-tenant rule ordering, scope-aware disable), Policy Activation
 - **ZIA IP Groups** — Source and Destination IPv4 Groups: list, search, create, edit, delete, and bulk create from CSV
 - **ZCC** — Devices (list/search/remove/OTP lookup/password lookup/CSV export), Trusted Networks, Forwarding Profiles, Admin Users, Entitlements, App Profiles (manage bypass apps/activate/delete), Bypass App Definitions
 - **ZDX** — Device health, app performance, user lookup, application scores, deep trace
 - **ZIdentity** — Users (list/search/reset-password/set-password/skip-MFA), Groups (list/search/members/add-remove), API Clients (list/search/secrets/delete)
-- **Config Import** — 25 ZPA + 37 ZIA + 6 ZCC resource types pulled into a local SQLite cache with SHA-256 change detection
+- **Config Import** — 27 ZPA + 42 ZIA + 6 ZCC resource types pulled into a local SQLite cache with SHA-256 change detection
 - **Config Snapshots** — save, compare (field-level diff), export, and delete point-in-time snapshots for ZPA and ZIA
 - **Audit Log** — immutable record of every operation
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
@@ -124,21 +126,23 @@ zs-config
 
 **Infrastructure** — App Connectors (list/search/enable-disable/rename/delete), Connector Groups (full CRUD), Service Edges (list/search/enable-disable)
 
-**Applications** — Application Segments (list/search/enable-disable/bulk-create from CSV/export template), App Segment Groups (list/search)
+**Applications** — Application Segments (list/search/enable-disable/bulk-create from CSV/export template/Apps & Groups Reference export), App Segment Groups (list/search)
 
-**Policy** — Access Policy: list, search, export to CSV, import/sync from CSV (dry-run preview → update/create/delete/reorder in one atomic operation)
+**Policy** — Access Policy: list, search, export to CSV, import/sync from CSV (dry-run preview → update/create/delete/reorder in one atomic operation), Policy Scoping Reference export
 
 **PRA** — PRA Portals (full CRUD), PRA Consoles (list/search/enable-disable/delete)
 
 **Certificates** — list, rotate (upload new cert → update all matching segments and portals → delete old), delete
 
-**Bottom** — Import Config (25 resource types), Config Snapshots, Reset N/A Resource Types
+**Identity & Directory** — SAML Attributes (list/search), SCIM User Attributes (list/search), SCIM Groups (list/search)
+
+**Bottom** — Import Config (27 resource types), Config Snapshots, Reset N/A Resource Types
 
 #### Access Policy CSV sync
 
 The sync workflow: parse CSV → classify (UPDATE / CREATE / DELETE / SKIP / MISSING_DEP / REORDER) → show dry-run table → confirm → apply → reorder.
 
-CSV columns: `id` (blank = new rule), `name`, `action`, `description`, `rule_order` (informational; row order is authoritative), `app_groups`, `applications`, `saml_attributes`, `scim_groups`, `client_types`, `machine_groups`, `trusted_networks`, `platforms`, `country_codes`, `idp_names`
+CSV columns: `id` (blank = new rule), `name`, `action`, `description`, `rule_order` (informational; row order is authoritative), `app_groups`, `applications`, `saml_attributes`, `scim_attributes`, `scim_groups`, `client_types`, `machine_groups`, `trusted_networks`, `platforms`, `country_codes`, `idp_names`, `posture_profiles`, `risk_factor_types`
 
 Rules missing from the CSV are deleted. The final `bulk_reorder_rules()` call makes row sequence the authoritative order.
 

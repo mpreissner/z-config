@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.12] - 2026-03-27
+
+### Added
+
+#### ZPA — Access Policy
+- **`posture_profiles` CSV column** — access policy CSV import/export now supports posture profile scoping. Values are resolved by name to the profile's `posture_udid` used in ZPA policy conditions.
+- **`risk_factor_types` CSV column** — access policy CSV import/export now supports Zscaler risk score scoping. Accepted values: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` (comma-separated).
+- **`scim_attributes` CSV column** — access policy CSV import/export now supports SCIM individual attribute scoping (`AttributeName=Value` format). Was previously unsupported despite being a valid ZPA condition type (`object_type: SCIM`).
+- **Policy Scoping Reference export** — new "Export Policy Scoping Reference" option under the Access Policy menu. Generates a markdown file listing all available values per scoping criteria category: Client Types, Platforms, Risk Factor Types, Identity Providers, SAML Attributes, SCIM User Attributes, SCIM Groups, Machine Groups, Trusted Networks, Posture Profiles, and Country Codes.
+
+#### ZPA — Application Segments
+- **Apps & Groups Reference export** — new "Export Apps & Groups Reference" option under the App Segments menu. Generates a markdown file listing all imported Application Segments and Segment Groups with their IDs.
+
+#### ZPA — Identity & Directory
+- **SAML Attributes view** — new entry in the ZPA main menu showing all imported SAML attributes with name, IdP, and SAML attribute name.
+- **SCIM User Attributes view** — new entry in the ZPA main menu showing all imported SCIM user attributes with name, IdP (resolved via DB lookup), and data type.
+- **SCIM Groups view** — new entry in the ZPA main menu showing all imported SCIM groups with name and IdP (resolved via DB lookup from `idp_id`).
+
+#### ZPA — Import
+- **`posture_profile` resource type** — posture profiles are now imported and stored; uses `posture_udid` as the stored resource ID to match ZPA policy condition format.
+- **`scim_attribute` resource type** — SCIM user attributes are now imported across all configured IdPs.
+
+### Fixed
+
+#### ZPA — Access Policy
+- **SCIM_GROUP decode** — SCIM_GROUP policy condition operands always return `name: null` from the ZPA API. Decode now uses a `scim_group_map` (built from the DB, keyed by group ID) to correctly render group names as `IdpName:GroupName` in the CSV.
+- **SCIM_GROUP build** — `_build_conditions` was incorrectly passing `lhs=group_id` for SCIM_GROUP conditions. Corrected to `lhs=idp_id, rhs=group_id` as required by the ZPA API.
+
+---
+
 ## [1.0.11] - 2026-03-26
 
 ### Added

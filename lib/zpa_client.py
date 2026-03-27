@@ -248,6 +248,10 @@ class ZPAClient:
         result, resp, err = self._sdk.zpa.scim_groups.list_scim_groups(idp_id)
         return _to_dicts(_unwrap(result, resp, err))
 
+    def list_scim_attributes(self, idp_id: str) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.scim_attributes.list_scim_attributes(idp_id)
+        return _to_dicts(_unwrap(result, resp, err))
+
     # ------------------------------------------------------------------
     # Microtenants
     # ------------------------------------------------------------------
@@ -362,6 +366,14 @@ class ZPAClient:
 
     def list_servers(self) -> List[Dict]:
         result, resp, err = self._sdk.zpa.servers.list_servers()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    # ------------------------------------------------------------------
+    # Posture Profiles
+    # ------------------------------------------------------------------
+
+    def list_posture_profiles(self) -> List[Dict]:
+        result, resp, err = self._sdk.zpa.posture_profiles.list_posture_profiles()
         return _to_dicts(_unwrap(result, resp, err))
 
     # ------------------------------------------------------------------

@@ -22,6 +22,11 @@ CSV columns:
                     Valid: ios, android, mac_os, windows, linux, chrome_os
     country_codes   Semicolon-separated ISO 3166-1 alpha-2 country codes (e.g. US;GB;DE)
     idp_names       Semicolon-separated Identity Provider names
+    posture_profiles Semicolon-separated posture profile names
+    risk_factor_types Semicolon-separated risk factor values
+                    Valid: LOW, MEDIUM, HIGH, CRITICAL
+    scim_attributes Semicolon-separated SCIM user attribute name=value pairs
+                    e.g. userName=alice@example.com;department=Engineering
 """
 
 import csv
@@ -54,6 +59,9 @@ TEMPLATE_ROWS = [
         "platforms": "",
         "country_codes": "",
         "idp_names": "",
+        "posture_profiles": "",
+        "risk_factor_types": "",
+        "scim_attributes": "",
     },
     {
         "id": "",
@@ -71,6 +79,9 @@ TEMPLATE_ROWS = [
         "platforms": "windows;mac_os",
         "country_codes": "",
         "idp_names": "",
+        "posture_profiles": "",
+        "risk_factor_types": "",
+        "scim_attributes": "",
     },
 ]
 
@@ -87,6 +98,9 @@ ZPA_READONLY = frozenset({
 
 # Valid platform identifiers (lowercase SDK values)
 VALID_PLATFORMS = frozenset({"ios", "android", "mac_os", "windows", "linux", "chrome_os"})
+
+# Valid risk factor values (uppercase)
+VALID_RISK_FACTORS = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +180,13 @@ def parse_csv(path: str) -> List[Dict]:
                         f"invalid platform '{platform}' — valid: {', '.join(sorted(VALID_PLATFORMS))}"
                     )
 
+            # Validate risk factor values if provided
+            for rf in _split(row.get("risk_factor_types", "")):
+                if rf.upper() not in VALID_RISK_FACTORS:
+                    row_errors.append(
+                        f"invalid risk_factor_type '{rf}' — valid: {', '.join(sorted(VALID_RISK_FACTORS))}"
+                    )
+
             if row_errors:
                 name = row.get("name", f"row {i}")
                 errors.append(f"Row {i} ({name!r}): {'; '.join(row_errors)}")
@@ -195,20 +216,24 @@ def resolve_dependencies(
         "app_group": [],
         "application": [],
         "saml_attribute": [],
+        "scim_attribute": [],
         "scim_group": [],
         "machine_group": [],
         "trusted_network": [],
         "idp": [],
+        "posture_profile": [],
     }
 
     # Collect unique names to resolve
     app_group_names: set = set()
     app_names: set = set()
-    saml_pairs: set = set()   # (attr_name, value)
-    scim_pairs: set = set()   # (idp_name, group_name)
+    saml_pairs: set = set()       # (attr_name, value)
+    scim_attr_pairs: set = set()  # (attr_name, value)
+    scim_pairs: set = set()       # (idp_name, group_name)
     machine_group_names: set = set()
     trusted_network_names: set = set()
     idp_names: set = set()
+    posture_profile_names: set = set()
 
     for row in rows:
         for name in _split(row.get("app_groups", "")):
@@ -219,6 +244,10 @@ def resolve_dependencies(
             if "=" in pair:
                 attr_name, _, val = pair.partition("=")
                 saml_pairs.add((attr_name.strip(), val.strip()))
+        for pair in _split(row.get("scim_attributes", "")):
+            if "=" in pair:
+                attr_name, _, val = pair.partition("=")
+                scim_attr_pairs.add((attr_name.strip(), val.strip()))
         for pair in _split(row.get("scim_groups", "")):
             if ":" in pair:
                 idp_name, _, group_name = pair.partition(":")
@@ -229,14 +258,18 @@ def resolve_dependencies(
             trusted_network_names.add(name)
         for name in _split(row.get("idp_names", "")):
             idp_names.add(name)
+        for name in _split(row.get("posture_profiles", "")):
+            posture_profile_names.add(name)
 
     app_group_map: Dict[str, str] = {}
     app_map: Dict[str, str] = {}
-    saml_map: Dict[Tuple[str, str], str] = {}   # (attr_name, value) → attr_id
-    scim_map: Dict[Tuple[str, str], str] = {}   # (idp_name, group_name) → group_id
+    saml_map: Dict[Tuple[str, str], str] = {}             # (attr_name, value) → attr_id
+    scim_attr_map: Dict[Tuple[str, str], str] = {}        # (attr_name, value) → attr_id
+    scim_map: Dict[Tuple[str, str], Tuple[str, str]] = {} # (idp_name, group_name) → (idp_id, group_id)
     machine_group_map: Dict[str, str] = {}
     trusted_network_map: Dict[str, str] = {}
     idp_map: Dict[str, str] = {}
+    posture_profile_map: Dict[str, str] = {}    # name → posture_udid
 
     def _lookup_by_type(session, resource_type: str, names: set, result_map: dict, missing_key: str):
         for name in names:
@@ -257,6 +290,7 @@ def resolve_dependencies(
         _lookup_by_type(session, "machine_group",    machine_group_names,    machine_group_map,    "machine_group")
         _lookup_by_type(session, "trusted_network",  trusted_network_names,  trusted_network_map,  "trusted_network")
         _lookup_by_type(session, "idp",              idp_names,              idp_map,              "idp")
+        _lookup_by_type(session, "posture_profile",  posture_profile_names,  posture_profile_map,  "posture_profile")
 
         # SAML attributes — resolve by attribute name
         saml_attr_names = {pair[0] for pair in saml_pairs}
@@ -277,19 +311,47 @@ def resolve_dependencies(
             if attr_name in saml_by_name:
                 saml_map[(attr_name, val)] = saml_by_name[attr_name]
 
-        # SCIM groups — match by group name + IdP name via raw_config
-        all_scim = (
+        # SCIM user attributes — resolve by attribute name
+        scim_attr_names = {pair[0] for pair in scim_attr_pairs}
+        scim_attr_by_name: Dict[str, str] = {}
+        for name in scim_attr_names:
+            rec = (
+                session.query(ZPAResource)
+                .filter_by(tenant_id=tenant_id, resource_type="scim_attribute",
+                            name=name, is_deleted=False)
+                .first()
+            )
+            if rec:
+                scim_attr_by_name[name] = rec.zpa_id
+            elif name not in missing["scim_attribute"]:
+                missing["scim_attribute"].append(name)
+
+        for attr_name, val in scim_attr_pairs:
+            if attr_name in scim_attr_by_name:
+                scim_attr_map[(attr_name, val)] = scim_attr_by_name[attr_name]
+
+        # SCIM groups — match by group name + IdP name
+        # raw_config stores idp_id (numeric); resolve to IdP name via the idp table
+        all_idps = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant_id, resource_type="idp", is_deleted=False)
+            .all()
+        )
+        idp_id_to_name: Dict[str, str] = {r.zpa_id: (r.name or "") for r in all_idps}
+
+        all_scim_groups = (
             session.query(ZPAResource)
             .filter_by(tenant_id=tenant_id, resource_type="scim_group", is_deleted=False)
             .all()
         )
-        scim_by_idp_and_name: Dict[Tuple[str, str], str] = {}
-        for rec in all_scim:
+        scim_by_idp_and_name: Dict[Tuple[str, str], Tuple[str, str]] = {}
+        for rec in all_scim_groups:
             cfg = rec.raw_config or {}
-            idp_n = (cfg.get("idpName") or "").strip()
+            idp_id_val = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+            idp_n = idp_id_to_name.get(idp_id_val, "").strip()
             group_n = (rec.name or "").strip()
             if idp_n and group_n:
-                scim_by_idp_and_name[(idp_n, group_n)] = rec.zpa_id
+                scim_by_idp_and_name[(idp_n, group_n)] = (idp_id_val, rec.zpa_id)
 
         for idp_name, group_name in scim_pairs:
             key = (idp_name, group_name)
@@ -322,13 +384,22 @@ def resolve_dependencies(
                 if attr_id:
                     r["_saml_conditions"].append((attr_id, val))
 
+        r["_scim_conditions"] = []
+        for pair in _split(row.get("scim_attributes", "")):
+            if "=" in pair:
+                attr_name, _, val = pair.partition("=")
+                attr_name, val = attr_name.strip(), val.strip()
+                attr_id = scim_attr_map.get((attr_name, val))
+                if attr_id:
+                    r["_scim_conditions"].append((attr_id, val))
+
         r["_scim_group_ids"] = []
         for pair in _split(row.get("scim_groups", "")):
             if ":" in pair:
                 idp_name, _, group_name = pair.partition(":")
-                gid = scim_map.get((idp_name.strip(), group_name.strip()))
-                if gid:
-                    r["_scim_group_ids"].append(gid)
+                ids = scim_map.get((idp_name.strip(), group_name.strip()))
+                if ids:
+                    r["_scim_group_ids"].append(ids)  # (idp_id, group_id)
 
         r["_client_types"] = [ct for ct in _split(row.get("client_types", "")) if ct]
         r["_machine_group_ids"] = [
@@ -345,6 +416,11 @@ def resolve_dependencies(
             idp_map[n] for n in _split(row.get("idp_names", ""))
             if n in idp_map
         ]
+        r["_posture_profile_udids"] = [
+            posture_profile_map[n] for n in _split(row.get("posture_profiles", ""))
+            if n in posture_profile_map
+        ]
+        r["_risk_factor_types"] = [rf.upper() for rf in _split(row.get("risk_factor_types", "")) if rf]
 
         enriched.append(r)
 
@@ -362,10 +438,12 @@ def dry_run(tenant_id: int, rows: List[Dict]) -> List[Dict]:
     missing_app_groups = set(missing.get("app_group", []))
     missing_apps = set(missing.get("application", []))
     missing_saml = set(missing.get("saml_attribute", []))
+    missing_scim_attr = set(missing.get("scim_attribute", []))
     missing_scim = set(missing.get("scim_group", []))
     missing_machine = set(missing.get("machine_group", []))
     missing_tn = set(missing.get("trusted_network", []))
     missing_idp = set(missing.get("idp", []))
+    missing_posture = set(missing.get("posture_profile", []))
 
     result: List[Dict] = []
     for row in enriched:
@@ -387,6 +465,11 @@ def dry_run(tenant_id: int, rows: List[Dict]) -> List[Dict]:
                 attr_name = pair.partition("=")[0].strip()
                 if attr_name in missing_saml:
                     issues.append(f"saml_attribute '{attr_name}' not found in DB")
+        for pair in _split(row.get("scim_attributes", "")):
+            if "=" in pair:
+                attr_name = pair.partition("=")[0].strip()
+                if attr_name in missing_scim_attr:
+                    issues.append(f"scim_attribute '{attr_name}' not found in DB")
         for pair in _split(row.get("scim_groups", "")):
             if ":" in pair:
                 label = ":".join(p.strip() for p in pair.split(":", 1))
@@ -401,6 +484,9 @@ def dry_run(tenant_id: int, rows: List[Dict]) -> List[Dict]:
         for name in _split(row.get("idp_names", "")):
             if name in missing_idp:
                 issues.append(f"idp '{name}' not found in DB")
+        for name in _split(row.get("posture_profiles", "")):
+            if name in missing_posture:
+                issues.append(f"posture_profile '{name}' not found in DB")
 
         r = dict(row)
         r["_status"] = "MISSING_DEPENDENCY" if issues else "READY"
@@ -438,6 +524,26 @@ def classify_sync(tenant_id: int, rows: List[Dict]) -> SyncClassification:
             key=lambda r: int(r["raw_config"].get("rule_order") or 0),
         )
 
+        # Build scim_group_map: group_id (str) → (idp_name, group_name) for decode
+        all_idps = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant_id, resource_type="idp", is_deleted=False)
+            .all()
+        )
+        idp_id_to_name_cls: Dict[str, str] = {r.zpa_id: (r.name or "") for r in all_idps}
+        all_scim_grps = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant_id, resource_type="scim_group", is_deleted=False)
+            .all()
+        )
+        scim_group_map: Dict[str, Tuple[str, str]] = {}
+        for rec in all_scim_grps:
+            cfg = rec.raw_config or {}
+            idp_id_val = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+            idp_n = idp_id_to_name_cls.get(idp_id_val, "")
+            if rec.zpa_id and rec.name:
+                scim_group_map[rec.zpa_id] = (idp_n, rec.name)
+
     # Resolve dependencies for all rows
     enriched, missing = resolve_dependencies(tenant_id, rows)
 
@@ -468,7 +574,7 @@ def classify_sync(tenant_id: int, rows: List[Dict]) -> SyncClassification:
                     "issues": issues,
                 })
             else:
-                unchanged, changes = _is_row_unchanged(row, existing_cfg)
+                unchanged, changes = _is_row_unchanged(row, existing_cfg, scim_group_map=scim_group_map)
                 if unchanged:
                     classification.csv_rows.append({
                         "action": "SKIP",
@@ -772,6 +878,11 @@ def _check_dependency_issues(row: Dict, all_missing: Dict[str, set]) -> List[str
             attr_name = pair.partition("=")[0].strip()
             if attr_name in all_missing.get("saml_attribute", set()):
                 issues.append(f"saml_attribute '{attr_name}' not found in DB")
+    for pair in _split(row.get("scim_attributes", "")):
+        if "=" in pair:
+            attr_name = pair.partition("=")[0].strip()
+            if attr_name in all_missing.get("scim_attribute", set()):
+                issues.append(f"scim_attribute '{attr_name}' not found in DB")
     for pair in _split(row.get("scim_groups", "")):
         if ":" in pair:
             label = ":".join(p.strip() for p in pair.split(":", 1))
@@ -786,6 +897,9 @@ def _check_dependency_issues(row: Dict, all_missing: Dict[str, set]) -> List[str
     for name in _split(row.get("idp_names", "")):
         if name in all_missing.get("idp", set()):
             issues.append(f"idp '{name}' not found in DB")
+    for name in _split(row.get("posture_profiles", "")):
+        if name in all_missing.get("posture_profile", set()):
+            issues.append(f"posture_profile '{name}' not found in DB")
     return issues
 
 
@@ -798,8 +912,10 @@ def _build_conditions(row: Dict) -> List[Tuple]:
         conditions.append(("app", "id", aid))
     for attr_id, val in row.get("_saml_conditions", []):
         conditions.append(("saml", attr_id, val))
-    for gid in row.get("_scim_group_ids", []):
-        conditions.append(("scim_group", gid, gid))
+    for attr_id, val in row.get("_scim_conditions", []):
+        conditions.append(("scim", attr_id, val))
+    for idp_id, gid in row.get("_scim_group_ids", []):
+        conditions.append(("scim_group", idp_id, gid))
     for ct in row.get("_client_types", []):
         conditions.append(("client_type", ct, ct))
     for gid in row.get("_machine_group_ids", []):
@@ -812,14 +928,27 @@ def _build_conditions(row: Dict) -> List[Tuple]:
         conditions.append(("country_code", "id", code))
     for idp_id in row.get("_idp_ids", []):
         conditions.append(("idp", "id", idp_id))
+    for udid in row.get("_posture_profile_udids", []):
+        conditions.append(("posture", udid, "true"))
+    for rf in row.get("_risk_factor_types", []):
+        conditions.append(("risk_factor_type", "id", rf))
     return conditions
 
 
-def _decode_conditions(cfg: Dict) -> Dict[str, str]:
-    """Decode conditions from raw_config into CSV-format semicolon strings."""
+def _decode_conditions(
+    cfg: Dict,
+    scim_group_map: Optional[Dict[str, Tuple[str, str]]] = None,
+) -> Dict[str, str]:
+    """Decode conditions from raw_config into CSV-format semicolon strings.
+
+    scim_group_map: optional dict mapping group_id (str) → (idp_name, group_name).
+    When provided, SCIM_GROUP operands are resolved to 'IdpName:GroupName' format.
+    Without it, SCIM_GROUP operands are omitted (name field is null in the API).
+    """
     conditions = cfg.get("conditions") or []
-    app_groups, applications, saml_attrs, scim_groups, client_types = [], [], [], [], []
+    app_groups, applications, saml_attrs, scim_attrs, scim_groups, client_types = [], [], [], [], [], []
     machine_groups, trusted_networks, platforms, country_codes, idp_names = [], [], [], [], []
+    posture_profiles, risk_factor_types = [], []
 
     for group in conditions:
         for op in group.get("operands") or []:
@@ -837,14 +966,22 @@ def _decode_conditions(cfg: Dict) -> Dict[str, str]:
                 client_types.append(rhs)
             elif otype == "SAML" and name and rhs:
                 saml_attrs.append(f"{name}={rhs}")
-            elif otype == "SCIM_GROUP" and name:
-                prefix = f"{idp_name}:" if idp_name else ""
-                scim_groups.append(f"{prefix}{name}")
+            elif otype == "SCIM" and name and rhs:
+                scim_attrs.append(f"{name}={rhs}")
+            elif otype == "SCIM_GROUP" and rhs:
+                if scim_group_map and rhs in scim_group_map:
+                    grp_idp_name, group_name = scim_group_map[rhs]
+                    effective_idp = grp_idp_name or idp_name
+                    prefix = f"{effective_idp}:" if effective_idp else ""
+                    scim_groups.append(f"{prefix}{group_name}")
+                elif name:
+                    # Fallback: name present (unusual but handle gracefully)
+                    prefix = f"{idp_name}:" if idp_name else ""
+                    scim_groups.append(f"{prefix}{name}")
             elif otype == "MACHINE_GRP":
                 if name:
                     machine_groups.append(name)
             elif otype == "TRUSTED_NETWORK":
-                # name is the human-readable network name
                 if name:
                     trusted_networks.append(name)
             elif otype == "PLATFORM" and rhs:
@@ -854,22 +991,33 @@ def _decode_conditions(cfg: Dict) -> Dict[str, str]:
             elif otype == "IDP":
                 if name:
                     idp_names.append(name)
+            elif otype == "POSTURE" and name:
+                posture_profiles.append(name)
+            elif otype == "RISK_FACTOR_TYPE" and rhs:
+                risk_factor_types.append(rhs)
 
     return {
-        "app_groups":       ";".join(app_groups),
-        "applications":     ";".join(applications),
-        "saml_attributes":  ";".join(saml_attrs),
-        "scim_groups":      ";".join(scim_groups),
-        "client_types":     ";".join(client_types),
-        "machine_groups":   ";".join(machine_groups),
-        "trusted_networks": ";".join(trusted_networks),
-        "platforms":        ";".join(platforms),
-        "country_codes":    ";".join(country_codes),
-        "idp_names":        ";".join(idp_names),
+        "app_groups":        ";".join(app_groups),
+        "applications":      ";".join(applications),
+        "saml_attributes":   ";".join(saml_attrs),
+        "scim_attributes":   ";".join(scim_attrs),
+        "scim_groups":       ";".join(scim_groups),
+        "client_types":      ";".join(client_types),
+        "machine_groups":    ";".join(machine_groups),
+        "trusted_networks":  ";".join(trusted_networks),
+        "platforms":         ";".join(platforms),
+        "country_codes":     ";".join(country_codes),
+        "idp_names":         ";".join(idp_names),
+        "posture_profiles":  ";".join(posture_profiles),
+        "risk_factor_types": ";".join(risk_factor_types),
     }
 
 
-def _is_row_unchanged(row: Dict, existing_cfg: Dict) -> Tuple[bool, List[str]]:
+def _is_row_unchanged(
+    row: Dict,
+    existing_cfg: Dict,
+    scim_group_map: Optional[Dict[str, Tuple[str, str]]] = None,
+) -> Tuple[bool, List[str]]:
     """Compare CSV row against existing raw_config.
 
     Returns (unchanged, list_of_change_descriptions).
@@ -885,10 +1033,11 @@ def _is_row_unchanged(row: Dict, existing_cfg: Dict) -> Tuple[bool, List[str]]:
         if csv_val != db_val:
             changes.append(f"{csv_key}: {db_val!r} → {csv_val!r}")
 
-    db_cond = _decode_conditions(existing_cfg)
+    db_cond = _decode_conditions(existing_cfg, scim_group_map=scim_group_map)
     condition_fields = [
-        "app_groups", "applications", "saml_attributes", "scim_groups", "client_types",
-        "machine_groups", "trusted_networks", "platforms", "country_codes", "idp_names",
+        "app_groups", "applications", "saml_attributes", "scim_attributes", "scim_groups",
+        "client_types", "machine_groups", "trusted_networks", "platforms", "country_codes",
+        "idp_names", "posture_profiles", "risk_factor_types",
     ]
     for field_name in condition_fields:
         csv_val = ";".join(_split(row.get(field_name, "")))

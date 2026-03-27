@@ -38,6 +38,10 @@ def zpa_menu():
                 questionary.Separator("── Applications ──"),
                 questionary.Choice("Application Segments", value="apps"),
                 questionary.Choice("App Segment Groups", value="seg_groups"),
+                questionary.Separator("── Identity & Directory ──"),
+                questionary.Choice("SAML Attributes", value="saml_attrs"),
+                questionary.Choice("SCIM User Attributes", value="scim_attrs"),
+                questionary.Choice("SCIM Groups", value="scim_groups"),
                 questionary.Separator("── Policy ──"),
                 questionary.Choice("Access Policy", value="policy"),
                 questionary.Separator("── PRA ──"),
@@ -61,6 +65,12 @@ def zpa_menu():
             app_segments_menu(client, tenant)
         elif choice == "seg_groups":
             segment_groups_menu(client, tenant)
+        elif choice == "saml_attrs":
+            _list_saml_attributes(tenant)
+        elif choice == "scim_attrs":
+            _list_scim_attributes(tenant)
+        elif choice == "scim_groups":
+            _list_scim_groups(tenant)
         elif choice == "policy":
             access_policy_menu(client, tenant)
         elif choice == "pra":
@@ -270,6 +280,7 @@ def app_segments_menu(client, tenant):
                 questionary.Choice("Bulk Create from CSV", value="bulk"),
                 questionary.Choice("Export CSV Template", value="template"),
                 questionary.Choice("CSV Field Reference", value="csvhelp"),
+                questionary.Choice("Export Apps & Groups Reference", value="apps_ref"),
                 questionary.Separator(),
                 questionary.Choice("← Back", value="back"),
             ],
@@ -288,6 +299,8 @@ def app_segments_menu(client, tenant):
             _export_template()
         elif choice == "csvhelp":
             _csv_field_reference()
+        elif choice == "apps_ref":
+            _export_apps_reference_md(tenant)
         elif choice in ("back", None):
             break
 
@@ -2730,6 +2743,7 @@ def access_policy_menu(client, tenant):
                 questionary.Choice("Export Existing Rules to CSV", value="export"),
                 questionary.Choice("Import / Sync from CSV", value="sync"),
                 questionary.Choice("Export Blank CSV Template", value="template"),
+                questionary.Choice("Export Policy Scoping Reference", value="scoping_ref"),
                 questionary.Separator(),
                 questionary.Choice("← Back", value="back"),
             ],
@@ -2748,6 +2762,8 @@ def access_policy_menu(client, tenant):
             _sync_policy_rules(client, tenant)
         elif choice == "template":
             _export_policy_template()
+        elif choice == "scoping_ref":
+            _export_scoping_reference_md(tenant)
         elif choice in ("back", None):
             break
 
@@ -2986,6 +3002,26 @@ def _export_policy_rules_to_csv(tenant):
             for r in resources
         ]
 
+        # Build scim_group_map for decode: group_id → (idp_name, group_name)
+        all_idps = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="idp", is_deleted=False)
+            .all()
+        )
+        idp_id_to_name = {r.zpa_id: (r.name or "") for r in all_idps}
+        scim_grp_recs = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="scim_group", is_deleted=False)
+            .all()
+        )
+        scim_group_map = {}
+        for rec in scim_grp_recs:
+            cfg = rec.raw_config or {}
+            idp_id_val = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+            idp_n = idp_id_to_name.get(idp_id_val, "")
+            if rec.zpa_id and rec.name:
+                scim_group_map[rec.zpa_id] = (idp_n, rec.name)
+
     if not rows:
         console.print("[yellow]No access policy rules in local DB. Run Import Config first.[/yellow]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
@@ -3003,23 +3039,26 @@ def _export_policy_rules_to_csv(tenant):
     csv_rows = []
     for r in rows:
         cfg = r["raw_config"]
-        cond = _decode_conditions(cfg)
+        cond = _decode_conditions(cfg, scim_group_map=scim_group_map)
         csv_rows.append({
-            "id":               r["zpa_id"] or cfg.get("id") or "",
-            "name":             r["name"],
-            "action":           cfg.get("action") or "ALLOW",
-            "description":      cfg.get("description") or "",
-            "rule_order":       cfg.get("rule_order") or "",
-            "app_groups":       cond["app_groups"],
-            "applications":     cond["applications"],
-            "saml_attributes":  cond["saml_attributes"],
-            "scim_groups":      cond["scim_groups"],
-            "client_types":     cond["client_types"],
-            "machine_groups":   cond["machine_groups"],
-            "trusted_networks": cond["trusted_networks"],
-            "platforms":        cond["platforms"],
-            "country_codes":    cond["country_codes"],
-            "idp_names":        cond["idp_names"],
+            "id":                r["zpa_id"] or cfg.get("id") or "",
+            "name":              r["name"],
+            "action":            cfg.get("action") or "ALLOW",
+            "description":       cfg.get("description") or "",
+            "rule_order":        cfg.get("rule_order") or "",
+            "app_groups":        cond["app_groups"],
+            "applications":      cond["applications"],
+            "saml_attributes":   cond["saml_attributes"],
+            "scim_attributes":   cond["scim_attributes"],
+            "scim_groups":       cond["scim_groups"],
+            "client_types":      cond["client_types"],
+            "machine_groups":    cond["machine_groups"],
+            "trusted_networks":  cond["trusted_networks"],
+            "platforms":         cond["platforms"],
+            "country_codes":     cond["country_codes"],
+            "idp_names":         cond["idp_names"],
+            "posture_profiles":  cond["posture_profiles"],
+            "risk_factor_types": cond["risk_factor_types"],
         })
 
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
@@ -3369,6 +3408,479 @@ def _delete_access_rule(client, tenant):
         )
         console.print(f"[red]✗ Delete failed: {exc}[/red]")
 
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# Identity & Directory views
+# ------------------------------------------------------------------
+
+def _list_saml_attributes(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="saml_attribute", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [{"name": r.name, "raw_config": r.raw_config or {}} for r in resources]
+
+    if not rows:
+        console.print(
+            "[yellow]No SAML attributes in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"SAML Attributes ({len(rows)} total)", show_lines=False)
+    table.add_column("Attribute Name")
+    table.add_column("Identity Provider")
+    table.add_column("SAML Name")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        idp_name = cfg.get("idp_name") or cfg.get("idpName") or "—"
+        saml_name = cfg.get("saml_name") or cfg.get("samlName") or "—"
+        table.add_row(r["name"] or "—", idp_name, saml_name)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _list_scim_attributes(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="scim_attribute", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        scim_rows = [{"name": r.name, "raw_config": r.raw_config or {}} for r in resources]
+
+        # Build idp_id → name map from DB
+        idps = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="idp", is_deleted=False)
+            .all()
+        )
+        idp_map = {r.zpa_id: r.name for r in idps}
+
+    if not scim_rows:
+        console.print(
+            "[yellow]No SCIM user attributes in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"SCIM User Attributes ({len(scim_rows)} total)", show_lines=False)
+    table.add_column("Attribute Name")
+    table.add_column("Identity Provider")
+    table.add_column("Data Type")
+
+    for r in scim_rows:
+        cfg = r["raw_config"]
+        idp_id = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+        idp_name = idp_map.get(idp_id, idp_id or "—")
+        data_type = cfg.get("data_type") or cfg.get("dataType") or "—"
+        table.add_row(r["name"] or "—", idp_name, data_type)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+def _list_scim_groups(tenant):
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    with get_session() as session:
+        resources = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="scim_group", is_deleted=False)
+            .order_by(ZPAResource.name)
+            .all()
+        )
+        rows = [{"name": r.name, "raw_config": r.raw_config or {}} for r in resources]
+
+        idps = (
+            session.query(ZPAResource)
+            .filter_by(tenant_id=tenant.id, resource_type="idp", is_deleted=False)
+            .all()
+        )
+        idp_map = {str(r.zpa_id): r.name for r in idps}
+
+    if not rows:
+        console.print(
+            "[yellow]No SCIM groups in local DB. "
+            "Run [bold]Import Config[/bold] first.[/yellow]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    table = Table(title=f"SCIM Groups ({len(rows)} total)", show_lines=False)
+    table.add_column("Group Name")
+    table.add_column("Identity Provider")
+
+    for r in rows:
+        cfg = r["raw_config"]
+        idp_id = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+        idp_name = idp_map.get(idp_id, idp_id or "—")
+        table.add_row(r["name"] or "—", idp_name)
+
+    from cli.banner import capture_banner
+    from cli.scroll_view import render_rich_to_lines, scroll_view
+    scroll_view(render_rich_to_lines(table), header_ansi=capture_banner())
+
+
+# ------------------------------------------------------------------
+# Policy Scoping Reference export
+# ------------------------------------------------------------------
+
+# Well-known ZPA client type identifiers and their display names
+_CLIENT_TYPES = [
+    ("zpn_client_type_zapp",              "Zscaler Client Connector"),
+    ("zpn_client_type_browser_isolation", "Cloud Browser Isolation"),
+    ("zpn_client_type_exporter",          "Clientless (ZPA Connector Exporter)"),
+    ("zpn_client_type_ip_anchoring",      "ZIA Service Edges"),
+    ("zpn_client_type_edge_connector",    "Edge Connector"),
+    ("zpn_client_type_machine_tunnel",    "Machine Tunnel"),
+    ("zpn_client_type_slogger",           "ZPA LSS"),
+]
+
+_PLATFORM_DISPLAY = {
+    "ios":       "iOS",
+    "android":   "Android",
+    "mac_os":    "macOS",
+    "windows":   "Windows",
+    "linux":     "Linux",
+    "chrome_os": "ChromeOS",
+}
+
+_RISK_FACTORS = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+
+def _export_scoping_reference_md(tenant):
+    from datetime import datetime
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    default_path = str(DEFAULT_WORK_DIR / f"policy_scoping_reference_{tenant.name}.md")
+    out_path = questionary.path("Output path:", default=default_path).ask()
+    if not out_path:
+        return
+    out_path = os.path.expanduser(out_path)
+
+    with console.status("Building scoping reference..."):
+        with get_session() as session:
+            def _fetch(resource_type):
+                return (
+                    session.query(ZPAResource)
+                    .filter_by(tenant_id=tenant.id, resource_type=resource_type, is_deleted=False)
+                    .order_by(ZPAResource.name)
+                    .all()
+                )
+
+            idp_records    = _fetch("idp")
+            saml_records   = _fetch("saml_attribute")
+            scim_a_records = _fetch("scim_attribute")
+            scim_g_records = _fetch("scim_group")
+            machine_records= _fetch("machine_group")
+            network_records= _fetch("trusted_network")
+            posture_records= _fetch("posture_profile")
+
+            idp_map = {r.zpa_id: r.name for r in idp_records}
+
+    lines = []
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    lines.append(f"# ZPA Access Policy Scoping Reference")
+    lines.append(f"")
+    lines.append(f"Tenant: **{tenant.name}**  |  Generated: {ts}")
+    lines.append(f"")
+    lines.append(
+        "Use the values in this file to populate the corresponding columns when building "
+        "an Access Policy CSV for import."
+    )
+
+    # ── Client Types ──────────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Client Types")
+    lines.append("")
+    lines.append("CSV column: `client_types`")
+    lines.append("")
+    lines.append("| Value | Description |")
+    lines.append("|-------|-------------|")
+    for value, desc in _CLIENT_TYPES:
+        lines.append(f"| `{value}` | {desc} |")
+
+    # ── Platforms ─────────────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Platforms")
+    lines.append("")
+    lines.append("CSV column: `platforms`")
+    lines.append("")
+    lines.append("| Value | Platform |")
+    lines.append("|-------|----------|")
+    for value, display in _PLATFORM_DISPLAY.items():
+        lines.append(f"| `{value}` | {display} |")
+
+    # ── Risk Factor Types ─────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Risk Factor Types")
+    lines.append("")
+    lines.append("CSV column: `risk_factor_types`")
+    lines.append("")
+    lines.append("| Value |")
+    lines.append("|-------|")
+    for rf in _RISK_FACTORS:
+        lines.append(f"| `{rf}` |")
+
+    # ── Identity Providers ────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Identity Providers")
+    lines.append("")
+    lines.append("CSV column: `idp_names`")
+    lines.append("")
+    if idp_records:
+        lines.append("| Name |")
+        lines.append("|------|")
+        for r in idp_records:
+            lines.append(f"| {r.name} |")
+    else:
+        lines.append("_No identity providers found. Run Import Config first._")
+
+    # ── SAML Attributes ───────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## SAML Attributes")
+    lines.append("")
+    lines.append("CSV column: `saml_attributes` — format: `AttributeName=Value`")
+    lines.append("")
+    if saml_records:
+        lines.append("| Attribute Name | Identity Provider |")
+        lines.append("|----------------|-------------------|")
+        for r in saml_records:
+            cfg = r.raw_config or {}
+            idp_name = cfg.get("idp_name") or cfg.get("idpName") or "—"
+            lines.append(f"| {r.name} | {idp_name} |")
+    else:
+        lines.append("_No SAML attributes found. Run Import Config first._")
+
+    # ── SCIM User Attributes ──────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## SCIM User Attributes")
+    lines.append("")
+    lines.append("CSV column: `scim_attributes` — format: `AttributeName=Value`  (e.g. `userName=alice@example.com`)")
+    lines.append("")
+    if scim_a_records:
+        lines.append("| Attribute Name | Identity Provider | Data Type |")
+        lines.append("|----------------|-------------------|-----------|")
+        for r in scim_a_records:
+            cfg = r.raw_config or {}
+            idp_id = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+            idp_name = idp_map.get(idp_id, idp_id or "—")
+            data_type = cfg.get("data_type") or cfg.get("dataType") or "—"
+            lines.append(f"| {r.name} | {idp_name} | {data_type} |")
+    else:
+        lines.append("_No SCIM user attributes found. Run Import Config first._")
+
+    # ── SCIM Groups ───────────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## SCIM Groups")
+    lines.append("")
+    lines.append("CSV column: `scim_groups` — format: `IdpName:GroupName`")
+    lines.append("")
+    if scim_g_records:
+        lines.append("| Group Name | Identity Provider |")
+        lines.append("|------------|-------------------|")
+        for r in scim_g_records:
+            cfg = r.raw_config or {}
+            idp_id = str(cfg.get("idp_id") or cfg.get("idpId") or "")
+            idp_name = idp_map.get(idp_id, idp_id or "—")
+            lines.append(f"| {r.name} | {idp_name} |")
+    else:
+        lines.append("_No SCIM groups found. Run Import Config first._")
+
+    # ── Machine Groups ────────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Machine Groups")
+    lines.append("")
+    lines.append("CSV column: `machine_groups`")
+    lines.append("")
+    if machine_records:
+        lines.append("| Name |")
+        lines.append("|------|")
+        for r in machine_records:
+            lines.append(f"| {r.name} |")
+    else:
+        lines.append("_No machine groups found. Run Import Config first._")
+
+    # ── Trusted Networks ──────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Trusted Networks")
+    lines.append("")
+    lines.append("CSV column: `trusted_networks`")
+    lines.append("")
+    if network_records:
+        lines.append("| Name |")
+        lines.append("|------|")
+        for r in network_records:
+            lines.append(f"| {r.name} |")
+    else:
+        lines.append("_No trusted networks found. Run Import Config first._")
+
+    # ── Posture Profiles ──────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Posture Profiles")
+    lines.append("")
+    lines.append("CSV column: `posture_profiles`")
+    lines.append("")
+    if posture_records:
+        lines.append("| Name |")
+        lines.append("|------|")
+        for r in posture_records:
+            lines.append(f"| {r.name} |")
+    else:
+        lines.append("_No posture profiles found. Run Import Config first._")
+
+    # ── Country Codes note ────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Country Codes")
+    lines.append("")
+    lines.append(
+        "CSV column: `country_codes` — use ISO 3166-1 alpha-2 codes (e.g. `US`, `GB`, `DE`)."
+    )
+
+    lines.append("")
+
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+
+    console.print(f"[green]✓ Policy scoping reference written to {out_path}[/green]")
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# App Segments & Groups reference export
+# ------------------------------------------------------------------
+
+def _export_apps_reference_md(tenant):
+    from datetime import datetime
+    from db.database import get_session
+    from db.models import ZPAResource
+
+    default_path = str(DEFAULT_WORK_DIR / f"app_segments_reference_{tenant.name}.md")
+    out_path = questionary.path("Output path:", default=default_path).ask()
+    if not out_path:
+        return
+    out_path = os.path.expanduser(out_path)
+
+    with console.status("Building apps reference..."):
+        with get_session() as session:
+            app_records = (
+                session.query(ZPAResource)
+                .filter_by(tenant_id=tenant.id, resource_type="application", is_deleted=False)
+                .order_by(ZPAResource.name)
+                .all()
+            )
+            group_records = (
+                session.query(ZPAResource)
+                .filter_by(tenant_id=tenant.id, resource_type="segment_group", is_deleted=False)
+                .order_by(ZPAResource.name)
+                .all()
+            )
+
+    lines = []
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    lines.append("# ZPA Application Segments & Segment Groups Reference")
+    lines.append("")
+    lines.append(f"Tenant: **{tenant.name}**  |  Generated: {ts}")
+    lines.append("")
+    lines.append(
+        "Use the values in this file to populate the `applications` and `app_groups` columns "
+        "when building an Access Policy CSV for import."
+    )
+
+    # ── Application Segments ──────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Application Segments")
+    lines.append("")
+    lines.append("CSV column: `applications`")
+    lines.append("")
+    if app_records:
+        lines.append("| Name | Enabled | Domains |")
+        lines.append("|------|---------|---------|")
+        for r in app_records:
+            cfg = r.raw_config or {}
+            enabled = "Yes" if cfg.get("enabled") is not False else "No"
+            domains = cfg.get("domain_names") or []
+            if isinstance(domains, list):
+                domain_str = ", ".join(domains[:3])
+                if len(domains) > 3:
+                    domain_str += f", … (+{len(domains) - 3} more)"
+            else:
+                domain_str = str(domains)
+            lines.append(f"| {r.name} | {enabled} | {domain_str} |")
+    else:
+        lines.append("_No application segments found. Run Import Config first._")
+
+    # ── Segment Groups ────────────────────────────────────────────
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Segment Groups")
+    lines.append("")
+    lines.append("CSV column: `app_groups`")
+    lines.append("")
+    if group_records:
+        lines.append("| Name | Enabled |")
+        lines.append("|------|---------|")
+        for r in group_records:
+            cfg = r.raw_config or {}
+            enabled = "Yes" if cfg.get("enabled") is not False else "No"
+            lines.append(f"| {r.name} | {enabled} |")
+    else:
+        lines.append("_No segment groups found. Run Import Config first._")
+
+    lines.append("")
+
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+
+    console.print(f"[green]✓ Apps & groups reference written to {out_path}[/green]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 

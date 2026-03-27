@@ -46,7 +46,8 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("pra_credential",       "list_credentials"),
     ResourceDef("idp",                  "list_idp"),
     ResourceDef("saml_attribute",       "list_saml_attributes"),
-    ResourceDef("scim_group",           "_scim_groups_all"),  # handled specially in _fetch
+    ResourceDef("scim_group",           "_scim_groups_all"),      # handled specially in _fetch
+    ResourceDef("scim_attribute",       "_scim_attributes_all"),  # handled specially in _fetch
     ResourceDef("microtenant",          "list_microtenants"),
     ResourceDef("enrollment_cert",      "list_enrollment_certificates"),
     ResourceDef("policy_access",        "list_policy_rules", list_args={"policy_type": "access"}),
@@ -59,6 +60,7 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("service_edge_group",   "list_service_edge_groups"),
     ResourceDef("service_edge",         "list_service_edges"),
     ResourceDef("server",               "list_servers"),
+    ResourceDef("posture_profile",       "list_posture_profiles", id_field="posture_udid"),
     ResourceDef("machine_group",        "list_machine_groups"),
     ResourceDef("trusted_network",      "list_trusted_networks"),
     ResourceDef("lss_config",           "list_lss_configs"),
@@ -237,6 +239,8 @@ class ZPAImportService:
         """Call the appropriate ZPAClient list method."""
         if defn.list_method == "_scim_groups_all":
             return self._fetch_scim_groups_all()
+        if defn.list_method == "_scim_attributes_all":
+            return self._fetch_scim_attributes_all()
         method = getattr(self.client, defn.list_method)
         result = method(**defn.list_args) if defn.list_args else method()
         return result or []
@@ -254,6 +258,20 @@ class ZPAImportService:
             except Exception:
                 pass
         return groups
+
+    def _fetch_scim_attributes_all(self) -> list:
+        """Fetch SCIM user attributes across all IdPs."""
+        idps = self.client.list_idp()
+        attrs = []
+        for idp in idps:
+            idp_id = str(idp.get("id", ""))
+            if not idp_id:
+                continue
+            try:
+                attrs.extend(self.client.list_scim_attributes(idp_id) or [])
+            except Exception:
+                pass
+        return attrs
 
     def _upsert(self, defn: ResourceDef, records: list, run_start: datetime):
         """Insert or update ZPAResource rows for the fetched records.
