@@ -56,6 +56,24 @@ class ZIAClient:
             "vanityDomain": auth.vanity_domain,
         })
 
+    @staticmethod
+    def _raise_for_status(resp) -> None:
+        """Like resp.raise_for_status() but includes the response body in the message.
+
+        This ensures that ZIA error codes such as NOT_SUBSCRIBED survive as
+        a substring of the exception string so callers (e.g. the import service)
+        can inspect them without having to parse the response object.
+        """
+        if resp.ok:
+            return
+        try:
+            body = resp.json()
+            msg = f"{resp.status_code} Error: {body}"
+        except Exception:
+            msg = f"{resp.status_code} Error: {resp.text[:200]}"
+        import requests as _req
+        raise _req.HTTPError(msg, response=resp)
+
     def zia_get(self, path: str) -> dict:
         """Direct HTTP GET to the ZIA API — returns the raw camelCase JSON."""
         import requests
@@ -65,7 +83,7 @@ class ZIAClient:
             headers={"Authorization": f"Bearer {token}"},
             timeout=30,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return resp.json()
 
     def zia_put(self, path: str, payload: dict) -> dict:
@@ -78,7 +96,7 @@ class ZIAClient:
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=30,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return resp.json() if resp.content else {}
 
     def zia_post(self, path: str, payload) -> dict:
@@ -91,7 +109,7 @@ class ZIAClient:
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=30,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return resp.json() if resp.content else {}
 
     def zia_delete(self, path: str) -> None:
@@ -103,7 +121,7 @@ class ZIAClient:
             headers={"Authorization": f"Bearer {token}"},
             timeout=30,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
 
     # ------------------------------------------------------------------
     # Activation
@@ -134,11 +152,9 @@ class ZIAClient:
         return _to_dicts(_unwrap(result, resp, err))
 
     def list_url_categories_lite(self) -> List[Dict]:
-        if self._govcloud:
-            data = self.zia_get("/zia/api/v1/urlCategories/lite")
-            return data if isinstance(data, list) else []
-        result, resp, err = self._sdk.zia.url_categories.list_url_categories_lite()
-        return _to_dicts(_unwrap(result, resp, err))
+        # SDK does not expose a lite endpoint — use direct HTTP for both paths.
+        data = self.zia_get("/zia/api/v1/urlCategories/lite")
+        return data if isinstance(data, list) else []
 
     def get_url_category(self, category_id: str) -> Dict:
         if self._govcloud:
