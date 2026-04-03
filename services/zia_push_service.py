@@ -2014,14 +2014,14 @@ class ZIAPushService:
         """Reduce embedded object array to [{id: X}] — strips extra fields."""
         if not arr:
             return arr
-        return [{"id": item["id"]} for item in arr if item.get("id") is not None]
+        return [{"id": item["id"]} for item in arr if isinstance(item, dict) and item.get("id") is not None]
 
     @staticmethod
     def _ref_named(arr: list) -> list:
         """Reduce embedded object array to [{id: X, name: Y}]."""
         if not arr:
             return arr
-        return [{"id": i["id"], "name": i.get("name", "")} for i in arr if i.get("id") is not None]
+        return [{"id": i["id"], "name": i.get("name", "")} for i in arr if isinstance(i, dict) and i.get("id") is not None]
 
     def _ref_resolved(self, arr: list, resource_type: str) -> list:
         """Like _ref() but strips IDs that can't be resolved in the target tenant.
