@@ -182,6 +182,7 @@ def _switch_tenant():
         tenant.client_id,
         secret,
         old_tenant=tenant,
+        oneapi_base_url=tenant.oneapi_base_url,
     )
 
     # Reload from DB so the active tenant reflects the freshly written org info fields
@@ -247,6 +248,7 @@ def _fetch_and_apply_org_info(
     client_id: str,
     client_secret: str,
     old_tenant=None,
+    oneapi_base_url: str = "https://api.zsapi.net",
 ) -> tuple:
     """Fetch orgInformation + subscriptions and persist to DB.
 
@@ -260,7 +262,7 @@ def _fetch_and_apply_org_info(
     from services.config_service import fetch_org_info, update_tenant
 
     with console.status("[cyan]Fetching org information...[/cyan]"):
-        org_info, subscriptions, err = fetch_org_info(zidentity_url, client_id, client_secret)
+        org_info, subscriptions, err = fetch_org_info(zidentity_url, client_id, client_secret, oneapi_base_url)
 
     if err or not org_info:
         console.print(f"[yellow]⚠ Could not fetch org information: {err or 'empty response'}[/yellow]")
@@ -388,7 +390,7 @@ def _add_tenant():
         return
 
     console.print("[green]✓ Token obtained — credentials verified.[/green]")
-    _fetch_and_apply_org_info(name, zidentity_url, client_id, client_secret)
+    _fetch_and_apply_org_info(name, zidentity_url, client_id, client_secret, oneapi_base_url=oneapi_base_url)
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -485,7 +487,7 @@ def _edit_tenant_credentials(tenant_name: str):
     console.print(f"[green]✓ Credentials updated for '[bold]{tenant_name}[/bold]'.[/green]")
 
     if ok:
-        _fetch_and_apply_org_info(tenant_name, zidentity_url, client_id, test_secret, old_tenant=tenant)
+        _fetch_and_apply_org_info(tenant_name, zidentity_url, client_id, test_secret, old_tenant=tenant, oneapi_base_url=oneapi_base_url)
 
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
