@@ -4419,7 +4419,7 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
     console.print("[dim]Reads a ZIA snapshot export file and pushes it to the live tenant.[/dim]\n")
 
     if baseline is None:
-        path = questionary.text("Path to baseline JSON file:").ask()
+        path = questionary.text("Path to baseline JSON file:", default=str(DEFAULT_WORK_DIR)).ask()
         if not path:
             return
         baseline_path = path.strip()

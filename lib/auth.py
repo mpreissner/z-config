@@ -9,10 +9,11 @@ class ZscalerAuth:
     Token acquisition and refresh are handled internally by zscaler-sdk-python.
     """
 
-    def __init__(self, zidentity_base_url: str, client_id: str, client_secret: str):
+    def __init__(self, zidentity_base_url: str, client_id: str, client_secret: str, govcloud: bool = False):
         self.zidentity_base_url = zidentity_base_url
         self.client_id = client_id
         self.client_secret = client_secret
+        self.govcloud = govcloud
 
     @property
     def vanity_domain(self) -> str:

@@ -38,7 +38,7 @@ app = FastAPI(
         "REST API layer for Zscaler OneAPI automation. "
         "Powers the GUI client — all endpoints mirror the CLI service layer."
     ),
-    version="1.0.0",
+    version="1.0.13",
     lifespan=lifespan,
 )
 
@@ -57,7 +57,7 @@ app.include_router(zia.router, prefix="/api/v1/zia", tags=["ZIA"])
 
 @app.get("/health", tags=["System"])
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.0.13"}
 
 
 @app.get("/api/v1/tenants", tags=["System"])
@@ -70,6 +70,7 @@ def list_tenants():
             "name": t.name,
             "zidentity_base_url": t.zidentity_base_url,
             "oneapi_base_url": t.oneapi_base_url,
+            "govcloud": t.govcloud,
             "zpa_customer_id": t.zpa_customer_id,
             "notes": t.notes,
             "created_at": t.created_at.isoformat() if t.created_at else None,

@@ -84,6 +84,7 @@ def _migrate(engine) -> None:
         "ALTER TABLE tenant_configs ADD COLUMN zia_tenant_id VARCHAR(255)",
         "ALTER TABLE tenant_configs ADD COLUMN zia_cloud VARCHAR(255)",
         "ALTER TABLE tenant_configs ADD COLUMN zia_subscriptions JSON",
+        "ALTER TABLE tenant_configs ADD COLUMN govcloud BOOLEAN NOT NULL DEFAULT 0",
         # palo-tools candidate scaffolding
         "ALTER TABLE zia_resources ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT 'tenant'",
         "ALTER TABLE zia_resources ADD COLUMN candidate_status VARCHAR(32)",

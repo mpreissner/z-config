@@ -51,15 +51,19 @@ class ZPAClient:
         auth: ZscalerAuth,
         customer_id: str,
         oneapi_base_url: str = "https://api.zsapi.net",
+        govcloud_cloud: Optional[str] = None,
     ):
         self.auth = auth
         self.customer_id = customer_id
-        self._sdk = ZscalerClient({
+        sdk_config = {
             "clientId": auth.client_id,
             "clientSecret": auth.client_secret,
             "vanityDomain": auth.vanity_domain,
             "customerId": customer_id,
-        })
+        }
+        if govcloud_cloud:
+            sdk_config["cloud"] = govcloud_cloud
+        self._sdk = ZscalerClient(sdk_config)
 
     # ------------------------------------------------------------------
     # Certificates

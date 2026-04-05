@@ -31,6 +31,7 @@ class TenantConfig(Base):
     zia_subscriptions = Column(JSON, nullable=True)         # full response from GET /subscriptions
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    govcloud = Column(Boolean, default=False, nullable=False)
     zpa_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     zia_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     zcc_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401

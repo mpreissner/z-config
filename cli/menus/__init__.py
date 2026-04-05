@@ -47,8 +47,9 @@ def get_zpa_client(tenant=None):
         console.print(f"[red]Tenant '{tenant.name}' has no ZPA Customer ID configured.[/red]")
         return None, None
 
-    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc))
-    return ZPAClient(auth, tenant.zpa_customer_id, tenant.oneapi_base_url), tenant
+    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc), govcloud=tenant.govcloud)
+    govcloud_cloud = tenant.zpa_tenant_cloud if tenant.govcloud else None
+    return ZPAClient(auth, tenant.zpa_customer_id, tenant.oneapi_base_url, govcloud_cloud=govcloud_cloud), tenant
 
 
 def get_zia_client(tenant=None):
@@ -68,7 +69,7 @@ def get_zia_client(tenant=None):
     if tenant is None:
         return None, None
 
-    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc))
+    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc), govcloud=tenant.govcloud)
     return ZIAClient(auth, tenant.oneapi_base_url), tenant
 
 
@@ -89,7 +90,7 @@ def get_zcc_client(tenant=None):
     if tenant is None:
         return None, None
 
-    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc))
+    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc), govcloud=tenant.govcloud)
     return ZCCClient(auth, tenant.oneapi_base_url, tenant.zia_cloud, tenant.zia_tenant_id), tenant
 
 
@@ -110,7 +111,7 @@ def get_zidentity_client(tenant=None):
     if tenant is None:
         return None, None
 
-    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc))
+    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc), govcloud=tenant.govcloud)
     return ZIdentityClient(auth, tenant.oneapi_base_url), tenant
 
 
@@ -131,5 +132,5 @@ def get_zdx_client(tenant=None):
     if tenant is None:
         return None, None
 
-    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc))
+    auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc), govcloud=tenant.govcloud)
     return ZDXClient(auth, tenant.oneapi_base_url), tenant

@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.13] - 2026-04-02
+
+### Added
+
+#### GovCloud Support
+- **GovCloud tenant flag** — `TenantConfig` now has a `govcloud` boolean column. Existing tenants are unaffected (migrated to `govcloud=False`).
+- **GovCloud ZIdentity URL** — `build_zidentity_url()` now accepts `govcloud=True`, producing `https://<vanity>.zidentitygov.us` instead of `.zslogin.net`.
+- **GovCloud oneapi URL default** — `GOVCLOUD_ONEAPI_URL` constant (`https://api.zscalergov.net`) added to `lib/conf_writer.py`; MOD-tier confirmed. User can override at add time.
+- **Add/Edit tenant prompts** — adding a GovCloud tenant prompts for confirmation, shows the correct `.zidentitygov.us` subdomain hint, and presents an editable oneapi URL. Editing an existing tenant includes a GovCloud toggle.
+- **Tenant list GovCloud column** — the tenant table now shows a `"Gov"` badge for GovCloud tenants.
+- **API response** — the `/api/v1/tenants` endpoint now includes `govcloud` in each tenant object.
+- **ZPA GovCloud routing** — `ZPAClient` accepts `govcloud_cloud` (e.g. `ZPAGOV_US` for MOD tier) and passes it to the ZscalerClient SDK config. Value is sourced from `orgInformation.zpaTenantCloud` at tenant creation time.
+
+#### ZIA GovCloud Import
+- **Full ZIA import support for GovCloud tenants** — all 42 ZIA resource types now work against GovCloud endpoints. The `ZscalerClient` SDK is not GovCloud-aware (it builds the token URL as `{vanity}.zslogin.net`), so every SDK-backed ZIA method falls back to direct HTTP when `govcloud=True`, using the confirmed GovCloud API paths:
+  - `nat_control_rule` → `/zia/api/v1/dnatRules`
+  - `location_group` → `/zia/api/v1/locations/groups`
+  - `cloud_app_control_rule` → `/zia/api/v1/webApplicationRules/{rule_type}`
+  - `sandbox_rule` → `/zia/api/v1/sandboxRules`
+  - `dlp_web_rule` → `/zia/api/v1/webDlpRules`
+  - All other resource types follow standard OneAPI camelCase path conventions.
+- **`zia_delete()` helper** — added to `ZIAClient` alongside the existing `zia_get/put/post` helpers; used by all GovCloud delete fallbacks.
+- **Allowlist/denylist GovCloud write** — GovCloud fallbacks for `add_to_allowlist`, `remove_from_allowlist`, `add_to_denylist`, `remove_from_denylist` use GET-merge/filter-PUT against `/zia/api/v1/security` and `/zia/api/v1/security/advanced`.
+- **`traffic_capture_rule`** — import correctly attempts `/zia/api/v1/trafficCaptureRules`; returns 403 on tenants without the entitlement (logged as a non-fatal error, import continues).
+
+---
+
 ## [1.0.12] - 2026-03-27
 
 ### Added

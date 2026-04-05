@@ -17,10 +17,14 @@ if sys.platform == "win32":
 else:
     DEFAULT_CONF_PATH = "/etc/zscaler-oneapi.conf"
 DEFAULT_ONEAPI_URL = "https://api.zsapi.net"
+GOVCLOUD_ONEAPI_URL = "https://api.zscalergov.us"  # MOD tier confirmed; HIGH tier TBD
 
 
-def build_zidentity_url(subdomain: str) -> str:
-    return f"https://{subdomain.strip().lower()}.zslogin.net"
+def build_zidentity_url(subdomain: str, govcloud: bool = False) -> str:
+    sub = subdomain.strip().lower()
+    if govcloud:
+        return f"https://{sub}.zidentitygov.us"
+    return f"https://{sub}.zslogin.net"
 
 
 def write_conf(
@@ -30,13 +34,14 @@ def write_conf(
     client_secret: str,
     zpa_customer_id: Optional[str] = None,
     oneapi_base_url: str = DEFAULT_ONEAPI_URL,
+    govcloud: bool = False,
 ) -> str:
     """Write the conf file and set permissions to 600.
 
     Returns the resolved absolute path of the written file.
     Raises PermissionError if the path is not writable.
     """
-    zidentity_url = build_zidentity_url(vanity_subdomain)
+    zidentity_url = build_zidentity_url(vanity_subdomain, govcloud=govcloud)
 
     lines = [
         "# Zscaler OneAPI Configuration",
@@ -72,7 +77,7 @@ def write_conf(
     return str(p.resolve())
 
 
-def test_credentials(vanity_subdomain: str, client_id: str, client_secret: str) -> None:
+def test_credentials(vanity_subdomain: str, client_id: str, client_secret: str, govcloud: bool = False) -> None:
     """Attempt an OAuth token request to verify the credentials are valid.
 
     Raises on failure — requests.HTTPError for API errors, or ConnectionError
@@ -80,5 +85,5 @@ def test_credentials(vanity_subdomain: str, client_id: str, client_secret: str) 
     """
     from lib.auth import ZscalerAuth
 
-    auth = ZscalerAuth(build_zidentity_url(vanity_subdomain), client_id, client_secret)
+    auth = ZscalerAuth(build_zidentity_url(vanity_subdomain, govcloud=govcloud), client_id, client_secret)
     auth.get_token()
