@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.14] - 2026-04-05
+
+### Fixed
+
+#### Security
+- **Dependency updates** — bumped to secure versions: `requests>=2.33.0` (CVE-2026-25645), `zscaler-sdk-python>=1.9.20`, `cryptography>=46.0.6` (CVE-2026-34073).
+
+---
+
 ## [1.0.13] - 2026-04-02
 
 ### Added

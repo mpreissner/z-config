@@ -1,8 +1,8 @@
 # Core HTTP
-requests>=2.31.0
+requests>=2.33.0
 
 # Zscaler SDK
-zscaler-sdk-python>=1.0.0
+zscaler-sdk-python>=1.9.20
 
 # Rich TUI (CLI)
 rich>=13.7.0
@@ -13,7 +13,7 @@ pyfiglet>=1.0.2
 sqlalchemy>=2.0.0
 
 # Secret encryption
-cryptography>=41.0.0
+cryptography>=46.0.6
 
 # REST API (future GUI backend)
 fastapi>=0.110.0
