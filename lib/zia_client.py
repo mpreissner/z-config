@@ -248,11 +248,10 @@ class ZIAClient:
     # ------------------------------------------------------------------
 
     def list_browser_isolation_profiles(self) -> List[Dict]:
-        if self._govcloud:
-            data = self.zia_get("/zia/api/v1/browserIsolation/profiles")
-            return data if isinstance(data, list) else []
-        result, resp, err = self._sdk.zia.cloud_browser_isolation.list_isolation_profiles()
-        return _to_dicts(_unwrap(result, resp, err))
+        # Always use direct HTTP — the SDK omits the profileSeq field which is
+        # required to set smartIsolationProfileId when enabling Smart Isolation.
+        data = self.zia_get("/zia/api/v1/browserIsolation/profiles")
+        return data if isinstance(data, list) else []
 
     # ------------------------------------------------------------------
     # Location Management

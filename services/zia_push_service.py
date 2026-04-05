@@ -148,22 +148,24 @@ SKIP_NAMED: dict = {
     # The SDK SandboxRules model omits default_rule, so _is_zscaler_managed can't
     # detect it via the boolean field.  Guard by name as a belt-and-suspenders fallback.
     "sandbox_rule":       {"Default BA Rule"},
+    # "Smart Isolation One Click Rule" is auto-provisioned by the enableSmartIsolation
+    # toggle in browser_control_settings.  The API does return predefined=True for it,
+    # but guard by name as well so the rule is never accidentally wiped or re-created
+    # from a baseline captured before predefined was present in raw_config.
+    "ssl_inspection_rule": {"Smart Isolation One Click Rule"},
 }
 
 # Rule types that can be provisioned by one-click settings toggles.
 # After pushing settings singletons, these types are re-fetched from the target
 # so that newly provisioned rules can be matched and ID-remapped.
+# Governing settings singletons:
+#   url_filter_cloud_app_settings — O365/UCaaS/CIPA toggles
+#   browser_control_settings      — Smart Isolation toggle (ssl_inspection_rule)
 _ONE_CLICK_RULE_TYPES: set = {
     "url_filtering_rule",     # CIPA Compliance Rule  (enableCIPACompliance)
-    "ssl_inspection_rule",    # O365 One Click, UCaaS One Click, Smart Isolation One Click
+    "ssl_inspection_rule",    # O365 One Click, UCaaS One Click, Smart Isolation One Click Rule
     "firewall_rule",          # O365 One Click, UCaaS One Click, Block malicious IPs
     "firewall_dns_rule",      # O365 One Click, UCaaS One Click, DNS risk rules
-}
-
-# Settings resource types whose push may provision new one-click rules in the target.
-_SETTINGS_WITH_TOGGLE_RULES: set = {
-    "url_filter_cloud_app_settings",  # O365, UCaaS, CIPA toggles
-    "browser_control_settings",       # Smart Browser Isolation toggle
 }
 
 # Fields always stripped from raw_config before comparison and before push.
@@ -691,6 +693,23 @@ class ZIAPushService:
                                  __one_click_pending=True)
                         )
                         continue
+                    # Settings singletons always exist in every tenant — queue an
+                    # update even when the DB has no entry (e.g. first push before
+                    # import, or stale DB).  Use the hardcoded singleton ID "1".
+                    _SETTINGS_SINGLETONS = {
+                        "url_filter_cloud_app_settings",
+                        "advanced_settings",
+                        "browser_control_settings",
+                    }
+                    if rtype in _SETTINGS_SINGLETONS and _is_writable(raw_config):
+                        pending.setdefault(rtype, []).append(
+                            dict(entry,
+                                 __action="update",
+                                 __target_id="1",
+                                 __display_name=display_name,
+                                 __managed=True)
+                        )
+                        continue
                     skipped.append(PushRecord(rtype, display_name, "skipped"))
                     continue
 
@@ -710,6 +729,17 @@ class ZIAPushService:
                 # in the target tenant (e.g. user DLP engine id=61 in source vs.
                 # unnamed system engine id=61 in target).
                 existing_entry = self._find_existing_user(existing_for_type, name)
+
+                # Custom URL category slots (CUSTOM_01, CUSTOM_02, …) have a stable
+                # string ID that is identical across tenants but often have an empty
+                # display name.  _find_existing_user skips empty names, so fall back
+                # to a direct slot-ID lookup when the name match fails.
+                if (not existing_entry
+                        and not name
+                        and rtype == "url_category"
+                        and source_id
+                        and source_id in existing_for_type):
+                    existing_entry = existing_for_type[source_id]
 
                 if existing_entry:
                     target_id = existing_entry["id"]
@@ -1208,6 +1238,42 @@ class ZIAPushService:
         if resource_type == "cloud_app_control_rule":
             return self._push_cloud_app_rule(name, source_id, raw_config, action, target_id)
 
+        # browser_control_settings: GET-then-merge to obtain the target's live
+        # smartIsolationProfileId and smartIsolationProfile (profileSeq is only
+        # available from this endpoint — /browserIsolation/profiles always returns 0).
+        if resource_type == "browser_control_settings" and action == "update":
+            try:
+                current = self._client.zia_get("/zia/api/v1/browserControlSettings")
+                payload = self._build_payload(resource_type, raw_config)
+                warnings: List[str] = []
+                norm_warning = payload.pop("__norm_warning", None)
+                if norm_warning:
+                    warnings.append(norm_warning)
+                if payload.get("enableSmartBrowserIsolation"):
+                    target_seq = current.get("smartIsolationProfileId")
+                    target_profile = current.get("smartIsolationProfile")
+                    if target_seq and target_profile:
+                        # Inject the target's own profile reference so the API accepts
+                        # the enableSmartBrowserIsolation flag.
+                        payload["smartIsolationProfileId"] = target_seq
+                        payload["smartIsolationProfile"] = target_profile
+                    else:
+                        # Smart Isolation has never been activated on this tenant.
+                        # The API requires a valid profileSeq which only exists after
+                        # the first manual activation — it cannot be bootstrapped via API.
+                        payload.pop("enableSmartBrowserIsolation", None)
+                        warnings.append(
+                            "enableSmartBrowserIsolation not applied — Smart Isolation "
+                            "has not been activated on this tenant; enable it once via "
+                            "the web UI, then re-push to keep it in sync"
+                        )
+                self._client.update_browser_control_settings(target_id, payload)
+                rec = PushRecord(resource_type=resource_type, name=name, status="updated")
+                rec.warnings.extend(warnings)
+                return rec
+            except Exception as exc:
+                return self._classify_error(resource_type, name, exc)
+
         # Predefined DLP dictionaries: only confidence_threshold can be synced.
         # GET the full camelCase payload, overwrite confidenceThreshold, PUT back.
         if (resource_type == "dlp_dictionary"
@@ -1243,12 +1309,16 @@ class ZIAPushService:
             full_payload = self._build_payload(resource_type, raw_config)
             # GET the raw camelCase payload from the API (SDK as_dict() returns
             # snake_case which the API rejects; also strip server-set read-only fields).
+            # ssl_inspection_rule requires `order` in the payload — a restricted
+            # {id, name} update fails with "order cannot be null".  Use GET-then-PUT
+            # to preserve the target's current state while satisfying the API contract.
             _RULE_API_PATHS = {
-                "firewall_rule":     "/zia/api/v1/firewallFilteringRules",
+                "firewall_rule":       "/zia/api/v1/firewallFilteringRules",
+                "ssl_inspection_rule": "/zia/api/v1/sslInspectionRules",
             }
             _RO_FIELDS = {"lastModifiedTime", "lastModifiedBy", "accessControl",
-                          "defaultDnsRuleNameUsed"}
-            if resource_type == "firewall_rule":
+                          "defaultDnsRuleNameUsed", "predefined", "defaultRule"}
+            if resource_type in _RULE_API_PATHS:
                 # GET raw camelCase, strip server-set RO fields, PUT back.
                 # Order is NOT updated — handled by insertion_point mechanism.
                 try:
@@ -1313,6 +1383,10 @@ class ZIAPushService:
             ("zpa_app_segments","zpa_app_segment",   "provision ZPA app segments, then re-enable"),
         ]
         record_warnings: List[str] = []
+        # Extract warnings embedded by normalizers as __norm_warning sentinel keys.
+        norm_warning = payload.pop("__norm_warning", None)
+        if norm_warning:
+            record_warnings.append(norm_warning)
         scope_was_stripped = False
         for field, rtype, hint in _SCOPE_CHECKS:
             baseline_vals = raw_config.get(field) or []
@@ -1790,9 +1864,11 @@ class ZIAPushService:
                 cfg["cbi_profile"] = {"id": matched["id"], "name": matched.get("name", ""),
                                       "url": matched.get("url", "")}
             else:
-                # Fall back to default profile if available
+                # Fall back to default profile if available.
+                # Direct HTTP uses camelCase (defaultProfile); handle both just in case.
                 default = next(
-                    (p for p in self._cbi_profile_map.values() if p.get("default_profile")),
+                    (p for p in self._cbi_profile_map.values()
+                     if p.get("defaultProfile") or p.get("default_profile")),
                     None,
                 )
                 if default:
@@ -1925,33 +2001,23 @@ class ZIAPushService:
 
     def _norm_browser_control_settings(self, cfg: dict) -> dict:
         cfg.pop("name", None)
-        # smartIsolationProfileId is a tenant-specific UUID; remap by profile name.
-        # The API response includes smartIsolationProfile {id, name, url} alongside
-        # the flat smartIsolationProfileId — use the name for cross-tenant remapping.
-        profile_obj = cfg.get("smart_isolation_profile") or cfg.get("smartIsolationProfile")
-        if profile_obj and isinstance(profile_obj, dict):
-            profile_name = (profile_obj.get("name") or "").lower()
-            matched = self._cbi_profile_map.get(profile_name)
-            if matched:
-                cfg["smart_isolation_profile_id"] = matched["id"]
-                cfg["smart_isolation_profile"] = {
-                    "id": matched["id"],
-                    "name": matched.get("name", ""),
-                    "url": matched.get("url", ""),
-                }
-            else:
-                # No matching profile in target — strip isolation profile fields
-                # so the setting saves without a dangling UUID reference.
-                cfg.pop("smart_isolation_profile_id", None)
-                cfg.pop("smartIsolationProfileId", None)
-                cfg.pop("smart_isolation_profile", None)
-                cfg.pop("smartIsolationProfile", None)
+        # browserControlSettings is stored from direct HTTP (zia_get), so all keys are
+        # camelCase.  The API also expects camelCase on PUT.  Always use camelCase here.
+        #
+        # smartIsolationProfile / smartIsolationProfileId are tenant-specific.
+        # The /browserIsolation/profiles endpoint always returns profileSeq=0 and is
+        # therefore useless for resolving these values.  Strip all source profile fields
+        # here; _push_one will inject the target's live values via GET-then-merge.
+        cfg.pop("smartIsolationProfileId", None)
+        cfg.pop("smartIsolationProfile", None)
+        cfg.pop("smart_isolation_profile_id", None)
+        cfg.pop("smart_isolation_profile", None)
         # smartIsolationUsers / smartIsolationGroups are env-specific references;
-        # strip IDs that don't exist in the target.
+        # strip IDs that don't exist in the target.  The API uses camelCase.
         self._norm_ref_fields(cfg,
             resolved_fields=(
-                ("smart_isolation_users",  "user"),
-                ("smart_isolation_groups", "group"),
+                ("smartIsolationUsers",  "user"),
+                ("smartIsolationGroups", "group"),
             ),
         )
         return cfg
@@ -2158,9 +2224,12 @@ def _is_zscaler_managed(resource_type: str, raw_config: dict) -> bool:
     - bandwidth_class: name.startswith("BANDWIDTH_CAT_") — no type field; name is the signal
     - url_category: custom_category==False and non-numeric ID (Zscaler-defined categories)
     - dlp_engine: custom_dlp_engine==False
-    - SKIP_NAMED: hardcoded names lacking the predefined flag but still system-owned
+    - SKIP_NAMED: hardcoded names that are system-owned regardless of predefined flag
+      Includes: "Smart Isolation One Click Rule" (ssl_inspection_rule, predefined=True in API
+      but guarded by name as belt-and-suspenders in case raw_config was captured without it)
     """
-    if resource_type in ("url_filter_cloud_app_settings", "advanced_settings"):
+    if resource_type in ("url_filter_cloud_app_settings", "advanced_settings",
+                         "browser_control_settings"):
         return True  # singletons — always present in every tenant, never created/deleted
     if raw_config.get("predefined"):
         return True
