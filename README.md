@@ -7,10 +7,10 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.15
+## What's New — v1.0.16
 
-- **SSL Inspection rule ordering with Smart Browser Isolation** — when pushing to a target where Smart Browser Isolation isn't enabled, the push now detects the unprovisioned "Smart Isolation One Click Rule" and renumbers the remaining SSL Inspection rules to fill the gap, maintaining the correct relative order starting at 1.
-- **Tab completion for file/path prompts** — all file and directory path prompts across ZCC, ZIA, and setup now support tab-to-complete.
+- **ZDX fully functional** — the ZDX client was previously targeting `/zdx/api/v1` (returns 404). All ZDX features — device lookup, user lookup, app scores, deep trace — are now working via the SDK's `/zdx/v1` endpoint.
+- **ZPA SDK cleanup** — removed a stale monkey-patch for `ServiceEdgeControllerAPI` that was confirmed fixed in zscaler-sdk-python 1.9.20.
 
 ---
 
@@ -252,3 +252,30 @@ Plugins are pip-installable packages distributed via a private GitHub repository
 **Workaround:** After pushing a baseline that includes Smart Isolation, log in to the target tenant's ZIA admin console and enable Smart Browser Isolation manually. All other `browser_control_settings` fields (CBI profile, etc.) push correctly.
 
 **Rule ordering:** When the source tenant has Smart Isolation enabled (and thus "Smart Isolation One Click Rule" at order 1), the push automatically detects that the rule could not be provisioned on the target and renumbers the remaining SSL Inspection rules to fill the gap — so they remain in the correct relative order starting at 1.
+
+---
+
+### SDK known issues (zscaler-sdk-python)
+
+The following SDK limitations affect this project. Workarounds are in place for each and will be revisited as the SDK is updated.
+
+#### ZIA — Browser Isolation `profileSeq` missing (`lib/zia_client.py`)
+`CBIProfileAPI.list_profiles()` returns objects that omit the `profileSeq` field. This field is required to set `smartIsolationProfileId` when remapping CBI profiles cross-tenant. Workaround: `list_browser_isolation_profiles()` uses direct HTTP against `/zia/api/v1/browserIsolation/profiles`.
+
+#### ZIA — URL Categories lite endpoint missing (`lib/zia_client.py`)
+The SDK has no `/urlCategories/lite` equivalent. Workaround: `list_url_categories_lite()` uses direct HTTP.
+
+#### ZCC — `download_disable_reasons` content-type validation (`lib/zcc_client.py`)
+`DevicesAPI.download_disable_reasons()` raises if the API response `Content-Type` is not `application/octet-stream` and the CSV header does not start with `"User","Device type"`. The actual response columns are `User, UDID, Platform, Service, Disable Time, Disable Reason`. Workaround: `download_disable_reasons()` uses direct HTTP and writes raw bytes.
+
+#### ZCC — Entitlement update methods accept no payload (`lib/zcc_client.py`)
+`EntitlementAPI.update_zpa_group_entitlement()` and `update_zdx_group_entitlement()` send an empty body (`{}`). Workaround: `update_zpa_entitlements()` / `update_zdx_entitlements()` use direct HTTP PUT with the actual payload.
+
+#### ZIdentity — Password and MFA endpoints not in SDK (`lib/zidentity_client.py`)
+`reset_password`, `update_password`, and `skip_mfa` are not implemented in the SDK. Workaround: direct HTTP against `/zidentity/api/v1/users/{id}:resetpassword`, `:updatepassword`, and `:setskipmfa`.
+
+#### ZDX — `get_device_apps` / `get_device_app` model deserialization (`lib/zdx_client.py`)
+Both endpoints return a plain JSON array, but the SDK passes the entire array to `DeviceActiveApplications` as a single object, causing all fields (`id`, `name`, `score`) to deserialize as `None`. Workaround: `list_device_apps()` and `get_device_app()` use `resp.get_body()` to access the raw response directly, bypassing the broken model.
+
+#### ZDX — `list_devices` / `list_users` wrapped responses (`lib/zdx_client.py`)
+Both methods return a single-element list containing a wrapper object (`Devices` / `ActiveUsers`) rather than iterating the item list. Workaround: unwrap via `result[0].devices` and `result[0].users` respectively before returning.

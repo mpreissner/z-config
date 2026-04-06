@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.16] - 2026-04-06
+
+### Fixed
+
+#### ZPA
+- **Remove stale SDK monkey-patch** — the `ServiceEdgeControllerAPI._zpa` workaround (applied when SDK 1.9.x first shipped this API) is confirmed fixed in zscaler-sdk-python 1.9.20 and has been removed.
+
+#### ZDX
+- **Migrate ZDX client to SDK** — the previous `ZDXClient` was targeting `/zdx/api/v1` which returns 404. All ZDX functionality was non-functional. Rewritten to use `sdk.zdx.*` via the OneAPI `ZscalerClient`, fixing device lookup, user lookup, app scores, and deep trace. Base URL confirmed as `/zdx/v1` against a live tenant.
+
+### Changed
+
+- **SDK known issues documented** — added `### SDK known issues` section to README covering all active direct-HTTP bypasses: ZIA Browser Isolation `profileSeq`, ZIA URL Categories lite, ZCC `download_disable_reasons`, ZCC entitlement updates, ZIdentity password/MFA endpoints, and ZDX model deserialization bugs.
+
+---
+
 ## [1.0.15] - 2026-04-06
 
 ### Fixed

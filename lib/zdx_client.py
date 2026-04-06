@@ -1,117 +1,137 @@
-"""ZDX (Zscaler Digital Experience) API client.
+"""ZDX (Zscaler Digital Experience) API client — SDK-backed.
 
-Uses direct HTTP with an OAuth2 client_credentials token — no SDK module
-exists for ZDX. Token is cached with a 30-second early-refresh buffer.
+Uses the zscaler-sdk-python ZDXService via the same ZscalerClient instance
+pattern as ZIAClient/ZPAClient.  No separate token management required.
+
+OneAPI endpoint base: /zdx/v1  (confirmed against Postman collection and
+live tenant — NOT /zdx/api/v1 which returns 404).
 """
 
-import time
 from typing import Dict, List, Optional
 
-import requests
+from zscaler import ZscalerClient
 
 from .auth import ZscalerAuth
 
 
+def _unwrap(result, resp, err):
+    if err:
+        raise RuntimeError(str(err))
+    return result
+
+
+def _to_dict(obj) -> dict:
+    """Convert an SDK model object to a plain dict.
+
+    Falls back to vars() when as_dict() returns an empty dict — works around
+    a known SDK bug in DeviceActiveApplications where as_dict() is a no-op.
+    """
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "as_dict"):
+        d = obj.as_dict()
+        if d:
+            return d
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+    return {}
+
+
+def _to_dicts(items) -> List[Dict]:
+    if not items:
+        return []
+    return [_to_dict(i) for i in items]
+
+
 class ZDXClient:
-    """Direct-HTTP client for the Zscaler Digital Experience (ZDX) API."""
+    """SDK-backed client for the Zscaler Digital Experience (ZDX) API."""
 
-    def __init__(self, auth: ZscalerAuth, oneapi_base_url: str = "https://api.zsapi.net"):
-        self.auth = auth
-        self._base = f"{oneapi_base_url}/zdx/api/v1"
-        self._token: Optional[str] = None
-        self._token_expires_at: float = 0.0
-
-    # ------------------------------------------------------------------
-    # Auth helpers
-    # ------------------------------------------------------------------
-
-    def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 30:
-            return self._token
-        resp = requests.post(
-            f"{self.auth.zidentity_base_url}/oauth2/v1/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self.auth.client_id,
-                "client_secret": self.auth.client_secret,
-                "audience": "https://api.zscaler.com",
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self._token = data["access_token"]
-        self._token_expires_at = time.time() + data.get("expires_in", 3600)
-        return self._token
-
-    def _get(self, path: str, params: Optional[dict] = None) -> dict:
-        resp = requests.get(
-            f"{self._base}/{path}",
-            headers={"Authorization": f"Bearer {self._get_token()}"},
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
-
-    def _post(self, path: str, json: Optional[dict] = None) -> dict:
-        resp = requests.post(
-            f"{self._base}/{path}",
-            headers={"Authorization": f"Bearer {self._get_token()}"},
-            json=json,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
-
-    def _delete(self, path: str) -> None:
-        resp = requests.delete(
-            f"{self._base}/{path}",
-            headers={"Authorization": f"Bearer {self._get_token()}"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-
-    # ------------------------------------------------------------------
-    # Time range helper
-    # ------------------------------------------------------------------
-
-    def _time_range(self, hours: int) -> dict:
-        """Return `from`/`to` query params as Unix timestamps."""
-        now = int(time.time())
-        return {"from": now - hours * 3600, "to": now}
+    def __init__(self, auth: ZscalerAuth):
+        self._sdk = ZscalerClient({
+            "clientId": auth.client_id,
+            "clientSecret": auth.client_secret,
+            "vanityDomain": auth.vanity_domain,
+        })
 
     # ------------------------------------------------------------------
     # Devices
     # ------------------------------------------------------------------
 
     def list_devices(self, search: Optional[str] = None, hours: int = 2) -> List[Dict]:
-        params = self._time_range(hours)
+        params: dict = {"since": hours}
         if search:
             params["q"] = search
-        result = self._get("devices", params=params)
-        return result.get("devices") or result if isinstance(result, list) else []
+        result, resp, err = self._sdk.zdx.devices.list_devices(query_params=params)
+        wrapper = _unwrap(result, resp, err)
+        # SDK returns [Devices({devices: [...], next_offset: ...})]
+        devices = wrapper[0].devices if wrapper else []
+        return _to_dicts(devices)
 
     def get_device(self, device_id: str) -> Dict:
-        return self._get(f"devices/{device_id}")
+        result, resp, err = self._sdk.zdx.devices.get_device(device_id)
+        items = _unwrap(result, resp, err)
+        return _to_dict(items[0]) if items else {}
 
     def get_device_health(self, device_id: str, hours: int) -> Dict:
-        params = self._time_range(hours)
-        return self._get(f"devices/{device_id}/healthmetrics", params=params)
+        """Return health data as {metrics: [{metric, value, unit}]}.
+
+        The SDK returns a list of {category, instances:[{metrics:[{metric, unit,
+        datapoints:[{timestamp, value}]}]}]}.  We flatten it to the most recent
+        non-negative value per series so the menu table renders cleanly.
+        The full SDK payload is preserved under 'raw' for the JSON fallback view.
+        """
+        result, resp, err = self._sdk.zdx.devices.get_health_metrics(
+            device_id, query_params={"since": hours}
+        )
+        categories = _unwrap(result, resp, err) or []
+        flat: List[Dict] = []
+        raw = []
+        for cat in categories:
+            cat_dict = _to_dict(cat)
+            raw.append(cat_dict)
+            category = cat_dict.get("category") or ""
+            for inst in cat_dict.get("instances") or []:
+                for m in inst.get("metrics") or []:
+                    metric_name = f"{category}.{m.get('metric', '')}"
+                    unit = m.get("unit") or ""
+                    datapoints = m.get("datapoints") or []
+                    # Most recent non-negative value
+                    value = next(
+                        (dp["value"] for dp in reversed(datapoints)
+                         if dp.get("value", -1) >= 0),
+                        None,
+                    )
+                    flat.append({"metric": metric_name, "value": value, "unit": unit})
+        return {"metrics": flat, "raw": raw}
 
     def get_device_events(self, device_id: str, hours: int) -> List[Dict]:
-        params = self._time_range(hours)
-        result = self._get(f"devices/{device_id}/events", params=params)
-        return result.get("events") or result if isinstance(result, list) else []
+        result, resp, err = self._sdk.zdx.devices.get_events(
+            device_id, query_params={"since": hours}
+        )
+        return _to_dicts(_unwrap(result, resp, err))
 
     def list_device_apps(self, device_id: str, hours: int) -> List[Dict]:
-        params = self._time_range(hours)
-        result = self._get(f"devices/{device_id}/apps", params=params)
-        return result.get("apps") or result if isinstance(result, list) else []
+        # SDK bug: DeviceActiveApplications deserializes the plain-array response
+        # as a single object, yielding all-None fields.  Use resp.get_body() directly.
+        _, resp, err = self._sdk.zdx.devices.get_device_apps(
+            device_id, query_params={"since": hours}
+        )
+        if err:
+            raise RuntimeError(str(err))
+        body = resp.get_body()
+        return body if isinstance(body, list) else []
 
-    def get_device_app(self, device_id: str, app_id: str, hours: int) -> Dict:
-        params = self._time_range(hours)
-        return self._get(f"devices/{device_id}/apps/{app_id}", params=params)
+    def get_device_app(self, device_id: str, app_id: str, hours: int) -> List[Dict]:
+        # Same plain-array response pattern — use resp.get_body() for correctness.
+        _, resp, err = self._sdk.zdx.devices.get_device_app(
+            device_id, app_id, query_params={"since": hours}
+        )
+        if err:
+            raise RuntimeError(str(err))
+        body = resp.get_body()
+        return body if isinstance(body, list) else ([body] if body else [])
 
     # ------------------------------------------------------------------
     # Users
@@ -121,25 +141,27 @@ class ZDXClient:
         params: dict = {}
         if search:
             params["q"] = search
-        result = self._get("users", params=params)
-        return result.get("users") or result if isinstance(result, list) else []
+        result, resp, err = self._sdk.zdx.users.list_users(query_params=params)
+        wrapper = _unwrap(result, resp, err)
+        # SDK returns [ActiveUsers({users: [...]})]
+        users = wrapper[0].users if wrapper else []
+        return _to_dicts(users)
 
     # ------------------------------------------------------------------
     # Apps (global)
     # ------------------------------------------------------------------
 
     def list_apps(self, hours: int = 2) -> List[Dict]:
-        params = self._time_range(hours)
-        result = self._get("apps", params=params)
-        return result.get("apps") or result if isinstance(result, list) else []
+        result, resp, err = self._sdk.zdx.apps.list_apps(query_params={"since": hours})
+        return _to_dicts(_unwrap(result, resp, err))
 
     # ------------------------------------------------------------------
     # Deep Trace
     # ------------------------------------------------------------------
 
     def list_deep_traces(self, device_id: str) -> List[Dict]:
-        result = self._get(f"devices/{device_id}/deeptraces")
-        return result.get("deeptraces") or result if isinstance(result, list) else []
+        result, resp, err = self._sdk.zdx.troubleshooting.list_deeptraces(device_id)
+        return _to_dicts(_unwrap(result, resp, err))
 
     def start_deep_trace(
         self,
@@ -147,13 +169,22 @@ class ZDXClient:
         session_name: str,
         app_id: Optional[str] = None,
     ) -> Dict:
-        payload: dict = {"sessionName": session_name}
+        kwargs: dict = {"session_name": session_name}
         if app_id:
-            payload["appId"] = app_id
-        return self._post(f"devices/{device_id}/deeptraces", json=payload)
+            kwargs["app_id"] = app_id
+        result, resp, err = self._sdk.zdx.troubleshooting.start_deeptrace(
+            device_id, **kwargs
+        )
+        return _to_dict(_unwrap(result, resp, err))
 
     def get_deep_trace(self, device_id: str, trace_id: str) -> Dict:
-        return self._get(f"devices/{device_id}/deeptraces/{trace_id}")
+        result, resp, err = self._sdk.zdx.troubleshooting.get_deeptrace(
+            device_id, trace_id
+        )
+        return _to_dict(_unwrap(result, resp, err))
 
     def stop_deep_trace(self, device_id: str, trace_id: str) -> None:
-        self._delete(f"devices/{device_id}/deeptraces/{trace_id}")
+        result, resp, err = self._sdk.zdx.troubleshooting.delete_deeptrace(
+            device_id, trace_id
+        )
+        _unwrap(result, resp, err)
