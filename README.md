@@ -7,10 +7,10 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.15
+## What's New — v1.0.16
 
-- **SSL Inspection rule ordering with Smart Browser Isolation** — when pushing to a target where Smart Browser Isolation isn't enabled, the push now detects the unprovisioned "Smart Isolation One Click Rule" and renumbers the remaining SSL Inspection rules to fill the gap, maintaining the correct relative order starting at 1.
-- **Tab completion for file/path prompts** — all file and directory path prompts across ZCC, ZIA, and setup now support tab-to-complete.
+- **ZDX fully functional** — the ZDX client was previously targeting `/zdx/api/v1` (returns 404). All ZDX features — device lookup, user lookup, app scores, deep trace — are now working via the SDK's `/zdx/v1` endpoint.
+- **ZPA SDK cleanup** — removed a stale monkey-patch for `ServiceEdgeControllerAPI` that was confirmed fixed in zscaler-sdk-python 1.9.20.
 
 ---
 
