@@ -133,4 +133,4 @@ def get_zdx_client(tenant=None):
         return None, None
 
     auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc), govcloud=tenant.govcloud)
-    return ZDXClient(auth, tenant.oneapi_base_url), tenant
+    return ZDXClient(auth), tenant
