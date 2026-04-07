@@ -123,6 +123,11 @@ class ZPAClient:
         config.pop("udp_port_ranges", None)
         return self.update_application(app_id, config)
 
+    def delete_application(self, app_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.application_segment.delete_segment(app_id)
+        _unwrap(result, resp, err)
+        return True
+
     # ------------------------------------------------------------------
     # PRA Portals
     # ------------------------------------------------------------------
@@ -157,6 +162,20 @@ class ZPAClient:
         result, resp, err = self._sdk.zpa.pra_credential.list_credentials()
         return _to_dicts(_unwrap(result, resp, err))
 
+    def create_pra_credential(self, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.pra_credential.add_credential(**kwargs)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_pra_credential(self, credential_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.pra_credential.update_credential(credential_id, **kwargs)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_pra_credential(self, credential_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.pra_credential.delete_credential(credential_id)
+        _unwrap(result, resp, err)
+        return True
+
     # ------------------------------------------------------------------
     # Segment Groups
     # ------------------------------------------------------------------
@@ -169,6 +188,16 @@ class ZPAClient:
         result, resp, err = self._sdk.zpa.segment_groups.add_group(name=name, enabled=enabled)
         return _to_dict(_unwrap(result, resp, err))
 
+    def update_segment_group(self, group_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.segment_groups.update_group(group_id, **kwargs)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_segment_group(self, group_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.segment_groups.delete_group(group_id)
+        _unwrap(result, resp, err)
+        return True
+
     # ------------------------------------------------------------------
     # Server Groups
     # ------------------------------------------------------------------
@@ -180,6 +209,16 @@ class ZPAClient:
     def create_server_group(self, name: str, enabled: bool = True) -> Dict:
         result, resp, err = self._sdk.zpa.server_groups.add_group(name=name, enabled=enabled)
         return _to_dict(_unwrap(result, resp, err))
+
+    def update_server_group(self, group_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.server_groups.update_group(group_id, **kwargs)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_server_group(self, group_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.server_groups.delete_group(group_id)
+        _unwrap(result, resp, err)
+        return True
 
     # ------------------------------------------------------------------
     # App Connectors & Connector Groups
@@ -304,6 +343,78 @@ class ZPAClient:
         if err:
             raise RuntimeError(str(err))
 
+    # Timeout policy rules
+    def create_timeout_rule(self, name: str, action: str, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.add_timeout_rule(
+            name=name, action=action, **kwargs
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_timeout_rule(self, rule_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.policies.update_timeout_rule(rule_id, **kwargs)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_timeout_rule(self, rule_id: str) -> None:
+        _, _, err = self._sdk.zpa.policies.delete_rule("timeout", rule_id)
+        if err:
+            raise RuntimeError(str(err))
+
+    # Forwarding policy rules (SDK: add_client_forwarding_rule)
+    def create_forwarding_rule(self, name: str, action: str, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.add_client_forwarding_rule(
+            name=name, action=action, **kwargs
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_forwarding_rule(self, rule_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.policies.update_client_forwarding_rule(
+            rule_id, **kwargs
+        )
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_forwarding_rule(self, rule_id: str) -> None:
+        _, _, err = self._sdk.zpa.policies.delete_rule("client_forwarding", rule_id)
+        if err:
+            raise RuntimeError(str(err))
+
+    # Inspection policy rules (SDK: add_app_protection_rule — no generic inspection create)
+    def create_inspection_rule(self, name: str, action: str, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.add_app_protection_rule(
+            name=name, action=action, **kwargs
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_inspection_rule(self, rule_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.policies.update_app_protection_rule(
+            rule_id, **kwargs
+        )
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_inspection_rule(self, rule_id: str) -> None:
+        _, _, err = self._sdk.zpa.policies.delete_rule("inspection", rule_id)
+        if err:
+            raise RuntimeError(str(err))
+
+    # Isolation policy rules
+    def create_isolation_rule(self, name: str, action: str, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.policies.add_isolation_rule(
+            name=name, action=action, **kwargs
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_isolation_rule(self, rule_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.policies.update_isolation_rule(rule_id, **kwargs)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_isolation_rule(self, rule_id: str) -> None:
+        _, _, err = self._sdk.zpa.policies.delete_rule("isolation", rule_id)
+        if err:
+            raise RuntimeError(str(err))
+
     # ------------------------------------------------------------------
     # PRA Consoles
     # ------------------------------------------------------------------
@@ -394,3 +505,17 @@ class ZPAClient:
     def list_lss_configs(self) -> List[Dict]:
         result, resp, err = self._sdk.zpa.lss.list_configs()
         return _to_dicts(_unwrap(result, resp, err))
+
+    def create_lss_config(self, **kwargs) -> Dict:
+        result, resp, err = self._sdk.zpa.lss.add_lss_config(**kwargs)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_lss_config(self, lss_id: str, **kwargs) -> bool:
+        result, resp, err = self._sdk.zpa.lss.update_lss_config(lss_id, **kwargs)
+        _unwrap(result, resp, err)
+        return True
+
+    def delete_lss_config(self, lss_id: str) -> bool:
+        result, resp, err = self._sdk.zpa.lss.delete_lss_config(lss_id)
+        _unwrap(result, resp, err)
+        return True
