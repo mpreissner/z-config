@@ -4296,6 +4296,8 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
         )
         console.print()
         is_migration = questionary.confirm("Is this a migration?", default=False).ask()
+        if is_migration is None:
+            return False
         if not is_migration:
             return True
 
@@ -4411,7 +4413,7 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
             )
         else:
             console.print(
-                f"[red]Migration readiness: LOW[/red] — only {overall_pct:.0f}% of identity "
+                f"[yellow]Migration readiness: LOW[/yellow] — only {overall_pct:.0f}% of identity "
                 "scoping criteria found in target. Many policy conditions will have operand "
                 "values stripped, leaving rules with reduced or no scoping."
             )
@@ -4425,7 +4427,7 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
                 "Coverage is below 80%. Proceed anyway?", default=False
             ).ask()
 
-        if not proceed:
+        if proceed is None or not proceed:
             return False
         return True
 
