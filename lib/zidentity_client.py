@@ -59,7 +59,7 @@ class ZIdentityClient:
 
     def __init__(self, auth: ZscalerAuth, oneapi_base_url: str = "https://api.zsapi.net"):
         self.auth = auth
-        self._direct_base = f"{oneapi_base_url}/zidentity/api/v1"
+        self._direct_base = f"{oneapi_base_url}/ziam/admin/api/v1"
         self._sdk = ZscalerClient({
             "clientId": auth.client_id,
             "clientSecret": auth.client_secret,

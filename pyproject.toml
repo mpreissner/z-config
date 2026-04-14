@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.33.0",
     "truststore>=0.9.0",
-    "zscaler-sdk-python>=1.9.20",
+    "zscaler-sdk-python>=1.9.21",
     "rich>=13.7.0",
     "questionary>=2.0.0",
     "pyfiglet>=1.0.2",

@@ -288,7 +288,7 @@ The SDK has no `/urlCategories/lite` equivalent. Workaround: `list_url_categorie
 `EntitlementAPI.update_zpa_group_entitlement()` and `update_zdx_group_entitlement()` send an empty body (`{}`). Workaround: `update_zpa_entitlements()` / `update_zdx_entitlements()` use direct HTTP PUT with the actual payload.
 
 #### ZIdentity — Password and MFA endpoints not in SDK (`lib/zidentity_client.py`)
-`reset_password`, `update_password`, and `skip_mfa` are not implemented in the SDK. Workaround: direct HTTP against `/zidentity/api/v1/users/{id}:resetpassword`, `:updatepassword`, and `:setskipmfa`.
+`reset_password`, `update_password`, and `skip_mfa` are not implemented in the SDK. Workaround: direct HTTP against `/ziam/admin/api/v1/users/{id}:resetpassword`, `:updatepassword`, and `:setskipmfa`.
 
 #### ZDX — `get_device_apps` / `get_device_app` model deserialization (`lib/zdx_client.py`)
 Both endpoints return a plain JSON array, but the SDK passes the entire array to `DeviceActiveApplications` as a single object, causing all fields (`id`, `name`, `score`) to deserialize as `None`. Workaround: `list_device_apps()` and `get_device_app()` use `resp.get_body()` to access the raw response directly, bypassing the broken model.
