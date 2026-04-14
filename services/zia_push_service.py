@@ -1106,11 +1106,14 @@ class ZIAPushService:
         if not delete_candidates:
             return []
 
-        # Collect (rtype, zia_id) pairs to check
+        # Collect (rtype, zia_id) pairs to check.
+        # status format is "pending_delete:<zia_id>"; skip malformed entries.
         pairs: List[tuple] = []
         rtypes_to_check: set = set()
         for rec in delete_candidates:
             zia_id = rec.status.partition(":")[2]
+            if not zia_id:
+                continue
             pairs.append((rec.resource_type, zia_id, rec))
             rtypes_to_check.add(rec.resource_type)
 

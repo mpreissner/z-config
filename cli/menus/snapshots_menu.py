@@ -33,6 +33,10 @@ from services.snapshot_service import (
 
 console = Console()
 
+# Sentinel for an explicit "← Cancel" choice in snapshot pickers.
+# Distinguishes intentional cancellation from Ctrl+C (questionary returns None).
+_CANCEL = object()
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -471,7 +475,7 @@ def _render_restore_dry_run(dry_run, delete_candidates, snap_name: str) -> None:
     The Delete column is populated from delete_candidates (resources absent from
     the snapshot), not from dry_run.to_delete (which reflects cross-tenant logic).
     """
-    from services.zia_push_service import WIPE_ORDER, PUSH_ORDER
+    from services.zia_push_service import PUSH_ORDER
 
     # Build per-type counts
     summary: dict = {}
@@ -718,8 +722,9 @@ def _pick_snapshot_from_list(snaps, prompt: str = "Select snapshot:"):
             f"  [{ts.strftime('%Y-%m-%d %H:%M:%S')}]"
         )
         choices.append(questionary.Choice(label, value=snap))
-    choices.append(questionary.Choice("← Cancel", value=None))
-    return questionary.select(prompt, choices=choices).ask()
+    choices.append(questionary.Choice("← Cancel", value=_CANCEL))
+    result = questionary.select(prompt, choices=choices).ask()
+    return None if (result is None or result is _CANCEL) else result
 
 
 # ---------------------------------------------------------------------------
