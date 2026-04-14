@@ -275,7 +275,7 @@ class ZCCClient:
         """Download disable-reasons CSV via direct HTTP.
 
         startDate and endDate (YYYY-MM-DD) are required by the API.
-        The SDK wrapper for this endpoint is still broken (as of 1.9.20) — it
+        The SDK wrapper for this endpoint is still broken (as of 1.9.21) — it
         raises if the Content-Type is not application/octet-stream AND the CSV
         header does not start with '"User","Device type"'. The actual response
         columns are: User, UDID, Platform, Service, Disable Time, Disable Reason.

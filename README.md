@@ -7,11 +7,9 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.18
+## What's New — v1.0.19
 
-- **Restore Snapshot — dedicated rollback flow** — Restore now has its own pipeline distinct from Apply Baseline. Shows a unified dry-run (creates, updates, deletes, skips) with a single confirmation, runs creates/updates first then deletes in dependency order, and performs two verification passes (creates/updates, then deletions).
-- **Verify pass 1 accuracy** — resources queued for deletion are excluded from the post-push discrepancy table so the create/update result is not obscured by expected-present resources.
-- **`classify_snapshot_deletes()` / `verify_deleted()`** — two new `ZIAPushService` methods powering the restore pipeline.
+- **zscaler-sdk-python 1.9.21 compatibility** — ZIdentity direct HTTP paths updated from `/zidentity/api/v1` to `/ziam/admin/api/v1` following the SDK's ZIdentity service migration. The old path returns HTTP 401 on GovCloud and would break on commercial. Verified against both environments. SDK floor bumped to `>=1.9.21`.
 
 ---
 
@@ -288,7 +286,7 @@ The SDK has no `/urlCategories/lite` equivalent. Workaround: `list_url_categorie
 `EntitlementAPI.update_zpa_group_entitlement()` and `update_zdx_group_entitlement()` send an empty body (`{}`). Workaround: `update_zpa_entitlements()` / `update_zdx_entitlements()` use direct HTTP PUT with the actual payload.
 
 #### ZIdentity — Password and MFA endpoints not in SDK (`lib/zidentity_client.py`)
-`reset_password`, `update_password`, and `skip_mfa` are not implemented in the SDK. Workaround: direct HTTP against `/zidentity/api/v1/users/{id}:resetpassword`, `:updatepassword`, and `:setskipmfa`.
+`reset_password`, `update_password`, and `skip_mfa` are not implemented in the SDK. Workaround: direct HTTP against `/ziam/admin/api/v1/users/{id}:resetpassword`, `:updatepassword`, and `:setskipmfa`. (Path updated from `/zidentity/api/v1` in v1.0.19 to match the 1.9.21 SDK migration.)
 
 #### ZDX — `get_device_apps` / `get_device_app` model deserialization (`lib/zdx_client.py`)
 Both endpoints return a plain JSON array, but the SDK passes the entire array to `DeviceActiveApplications` as a single object, causing all fields (`id`, `name`, `score`) to deserialize as `None`. Workaround: `list_device_apps()` and `get_device_app()` use `resp.get_body()` to access the raw response directly, bypassing the broken model.

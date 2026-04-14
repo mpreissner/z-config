@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.19] - 2026-04-14
+
+### Fixed
+
+#### ZIdentity — SDK 1.9.21 path migration
+- **Updated direct HTTP base path** — `ZIdentityClient._direct_base` updated from `/zidentity/api/v1` to `/ziam/admin/api/v1` to match the ZIdentity service migration introduced in zscaler-sdk-python 1.9.21. The old path returns HTTP 401 on GovCloud and would break on commercial. Verified against both commercial and GovCloud tenants.
+- **SDK floor bumped to `>=1.9.21`** — `pyproject.toml` dependency updated accordingly.
+
+---
+
 ## [1.0.18] - 2026-04-14
 
 ### Added
