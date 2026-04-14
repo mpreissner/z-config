@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.17] - 2026-04-14
+
+### Fixed
+
+#### ZIA Baseline Push
+- **Scope-stripped rules stay DISABLED through remediation** — rules inserted as DISABLED because required scope resources (locations, groups, users, ZPA app segments) do not exist in the target tenant were being re-enabled when remediation ran. The update path now enforces `state=DISABLED` whenever scope is still stripped, matching the create-time behaviour. The rule self-heals once the admin adds the missing resource.
+- **Delete dependency ordering in wipe-first mode** — `execute_deletes` now sorts by `WIPE_ORDER` so dependent rules (e.g. `url_filtering_rule`) are deleted before the objects they reference (`url_category`, `ip_source_group`). Previously, custom URL categories could fail to delete because filtering rules referencing them had not been removed yet.
+
+### Added
+
+#### ZIA Config Snapshots
+- **Restore Snapshot** — new option in the ZIA Config Snapshots menu that applies a saved snapshot directly against its original tenant without requiring an intermediate JSON export. Reuses the full dry-run → push → verify → remediate → activate flow via the existing Apply Baseline pipeline.
+
+### Changed
+
+#### Startup & Tenant Switching
+- **Auth check at initial launch** — selecting a tenant on first launch now runs the same credential verification, org info fetch, and subscription-change check that was previously only triggered on tenant switch.
+- **Org info always displayed on activation** — the ZIA cloud, tenant ID, ZPA customer ID/cloud, and subscription retrieval status are now shown whenever a tenant is activated (launch or switch), regardless of whether the data has changed since the last check.
+
+---
+
 ## [1.0.16] - 2026-04-06
 
 ### Fixed

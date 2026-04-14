@@ -106,7 +106,7 @@ def zia_menu():
         elif choice == "import":
             _import_zia_config(client, tenant)
         elif choice == "snapshots":
-            snapshots_menu(tenant, "ZIA")
+            snapshots_menu(tenant, "ZIA", client=client)
         elif choice == "apply_baseline":
             apply_baseline_menu(client, tenant)
         elif choice == "reset_na":

@@ -7,10 +7,12 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.16
+## What's New — v1.0.17
 
-- **ZDX fully functional** — the ZDX client was previously targeting `/zdx/api/v1` (returns 404). All ZDX features — device lookup, user lookup, app scores, deep trace — are now working via the SDK's `/zdx/v1` endpoint.
-- **ZPA SDK cleanup** — removed a stale monkey-patch for `ServiceEdgeControllerAPI` that was confirmed fixed in zscaler-sdk-python 1.9.20.
+- **Restore Snapshot** — ZIA Config Snapshots now includes a Restore option that applies a saved snapshot directly against its original tenant without requiring a JSON export first. Runs the full dry-run → push → verify → remediate → activate flow.
+- **Scope-stripped rules stay DISABLED through remediation** — rules inserted as DISABLED (because required scope resources don't exist in the target) no longer get re-enabled when remediation runs.
+- **Delete ordering in wipe-first mode** — dependent rules are now deleted before the objects they reference (e.g. URL filtering rules before custom URL categories), preventing constraint failures during wipe-first pushes.
+- **Auth check at initial launch** — selecting a tenant on first launch now runs the same credential verification and org info sync that previously only ran on tenant switch.
 
 ---
 
@@ -23,7 +25,7 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 - **ZDX** — Device health, app performance, user lookup, application scores, deep trace
 - **ZIdentity** — Users (list/search/reset-password/set-password/skip-MFA), Groups (list/search/members/add-remove), API Clients (list/search/secrets/delete)
 - **Config Import** — 27 ZPA + 42 ZIA + 6 ZCC resource types pulled into a local SQLite cache with SHA-256 change detection
-- **Config Snapshots** — save, compare (field-level diff), export, and delete point-in-time snapshots for ZPA and ZIA
+- **Config Snapshots** — save, compare (field-level diff), export, restore (ZIA only), and delete point-in-time snapshots for ZPA and ZIA
 - **Audit Log** — immutable record of every operation
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
 - **Auto-update** — silent PyPI check on startup; shows changelog and upgrades in-place via pipx or pip

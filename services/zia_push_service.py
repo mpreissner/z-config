@@ -1021,6 +1021,11 @@ class ZIAPushService:
         Deletes are intentionally separated from push_classified so the caller
         can present the proposed deletes and require confirmation.
         """
+        # Sort by WIPE_ORDER so rules are deleted before the objects they reference
+        # (e.g. url_filtering_rule before url_category, firewall_rule before ip_source_group).
+        _order = {t: i for i, t in enumerate(WIPE_ORDER)}
+        to_delete = sorted(to_delete, key=lambda r: _order.get(r.resource_type, len(WIPE_ORDER)))
+
         records: List[PushRecord] = []
         for rec in to_delete:
             zia_id = rec.status.partition(":")[2]
@@ -1425,9 +1430,12 @@ class ZIAPushService:
                 record_warnings.append(
                     f"{field} scope stripped — {hint}: {', '.join(names)}"
                 )
-        if scope_was_stripped and action == "create":
+        if scope_was_stripped:
             payload = dict(payload, state="DISABLED")
-            record_warnings.insert(0, "rule inserted DISABLED — scope fields stripped (see below)")
+            if action == "create":
+                record_warnings.insert(0, "rule inserted DISABLED — scope fields stripped (see below)")
+            else:
+                record_warnings.insert(0, "rule kept DISABLED — scope fields still stripped; resolve manually before enabling (see below)")
 
         # Detect cbi_profile remapped to a different profile (name mismatch or fallback to default).
         if resource_type == "url_filtering_rule":

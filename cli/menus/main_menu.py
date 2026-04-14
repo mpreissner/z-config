@@ -125,10 +125,74 @@ def _test_token(zidentity_url: str, client_id: str, client_secret: str):
         return False, str(e)
 
 
+def verify_and_activate_tenant(tenant) -> bool:
+    """Verify credentials for *tenant* and set it as the active tenant.
+
+    Called both from the initial launch flow (z_config.py) and from
+    _switch_tenant() so the credential check is consistent in both paths.
+
+    Returns True if the tenant was activated (credentials OK or user forced),
+    False if the user cancelled or chose to edit credentials instead.
+    """
+    from cli.session import set_active_tenant
+    from services.config_service import decrypt_secret, get_tenant as _reload_tenant
+
+    secret = decrypt_secret(tenant.client_secret_enc)
+
+    with console.status(f"[cyan]Verifying credentials for {tenant.name}...[/cyan]"):
+        ok, err = _test_token(tenant.zidentity_base_url, tenant.client_id, secret)
+
+    if not ok:
+        console.print(f"[red]✗ Token failed for {tenant.name}:[/red] {err}")
+        action = questionary.select(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("Edit credentials", value="edit"),
+                questionary.Choice("Continue anyway (credentials may be a transient issue)", value="force"),
+                questionary.Choice("Cancel", value="cancel"),
+            ],
+        ).ask()
+        if action == "edit":
+            _edit_tenant_credentials(tenant.name)
+        elif action == "force":
+            set_active_tenant(tenant)
+            console.print(f"[yellow]⚠ Active tenant set to [bold]{tenant.name}[/bold] (token unverified)[/yellow]")
+            return True
+        return False
+
+    console.print("[green]✓ Credentials verified.[/green]")
+
+    _, subs_changed = _fetch_and_apply_org_info(
+        tenant.name,
+        tenant.zidentity_base_url,
+        tenant.client_id,
+        secret,
+        old_tenant=tenant,
+        oneapi_base_url=tenant.oneapi_base_url,
+        force_show=True,
+    )
+
+    # Reload from DB so the active tenant reflects the freshly written org info fields
+    set_active_tenant(_reload_tenant(tenant.name) or tenant)
+    console.print(f"[green]✓ Active tenant: [bold]{tenant.name}[/bold][/green]")
+
+    if subs_changed:
+        console.print(Panel(
+            "[yellow]Subscription changes detected for this tenant.[/yellow]\n"
+            "Features or products may have been added or removed.\n\n"
+            "[bold]Recommendation:[/bold] Run [cyan]Import Config[/cyan] for ZIA, ZPA, and ZCC "
+            "to ensure your local database reflects the current tenant state.",
+            title="[bold yellow]⚠ Subscriptions Changed[/bold yellow]",
+            border_style="yellow",
+        ))
+
+    return True
+
+
 def _switch_tenant():
     from cli.menus import select_tenant
-    from cli.session import set_active_tenant, get_active_tenant, has_zia_pending
-    from services.config_service import decrypt_secret, list_tenants
+    from cli.session import get_active_tenant, has_zia_pending
+    from services.config_service import list_tenants
 
     current = get_active_tenant()
     if current and has_zia_pending(current.id):
@@ -151,55 +215,7 @@ def _switch_tenant():
     if not tenant:
         return
 
-    secret = decrypt_secret(tenant.client_secret_enc)
-
-    with console.status(f"[cyan]Verifying credentials for {tenant.name}...[/cyan]"):
-        ok, err = _test_token(tenant.zidentity_base_url, tenant.client_id, secret)
-
-    if not ok:
-        console.print(f"[red]✗ Token failed for {tenant.name}:[/red] {err}")
-        action = questionary.select(
-            "What would you like to do?",
-            choices=[
-                questionary.Choice("Edit credentials", value="edit"),
-                questionary.Choice("Switch anyway (credentials may be transient issue)", value="force"),
-                questionary.Choice("Cancel", value="cancel"),
-            ],
-        ).ask()
-        if action == "edit":
-            _edit_tenant_credentials(tenant.name)
-        elif action == "force":
-            set_active_tenant(tenant)
-            console.print(f"[yellow]⚠ Active tenant set to [bold]{tenant.name}[/bold] (token unverified)[/yellow]")
-            questionary.press_any_key_to_continue("Press any key to continue...").ask()
-        return
-
-    console.print("[green]✓ Credentials verified.[/green]")
-
-    _, subs_changed = _fetch_and_apply_org_info(
-        tenant.name,
-        tenant.zidentity_base_url,
-        tenant.client_id,
-        secret,
-        old_tenant=tenant,
-        oneapi_base_url=tenant.oneapi_base_url,
-    )
-
-    # Reload from DB so the active tenant reflects the freshly written org info fields
-    from services.config_service import get_tenant as _reload_tenant
-    set_active_tenant(_reload_tenant(tenant.name) or tenant)
-    console.print(f"[green]✓ Active tenant: [bold]{tenant.name}[/bold][/green]")
-
-    if subs_changed:
-        console.print(Panel(
-            "[yellow]Subscription changes detected for this tenant.[/yellow]\n"
-            "Features or products may have been added or removed.\n\n"
-            "[bold]Recommendation:[/bold] Run [cyan]Import Config[/cyan] for ZIA, ZPA, and ZCC "
-            "to ensure your local database reflects the current tenant state.",
-            title="[bold yellow]⚠ Subscriptions Changed[/bold yellow]",
-            border_style="yellow",
-        ))
-
+    verify_and_activate_tenant(tenant)
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
@@ -249,12 +265,14 @@ def _fetch_and_apply_org_info(
     client_secret: str,
     old_tenant=None,
     oneapi_base_url: str = "https://api.zsapi.net",
+    force_show: bool = False,
 ) -> tuple:
     """Fetch orgInformation + subscriptions and persist to DB.
 
     Returns (success: bool, subscriptions_changed: bool).
 
-    Prints a summary table when any field is first populated or has changed.
+    Prints a summary table when any field is first populated or has changed,
+    or unconditionally when force_show=True (e.g. on tenant activation).
     Pass old_tenant (TenantConfig) to enable change detection; omit for add/edit flows
     where the summary should always be shown.
     """
@@ -292,7 +310,7 @@ def _fetch_and_apply_org_info(
         or old_tenant.zpa_customer_id != zpa_customer_id
         or old_tenant.zpa_tenant_cloud != zpa_tenant_cloud
     )
-    show_summary = first_time or org_changed or subscriptions_changed
+    show_summary = force_show or first_time or org_changed or subscriptions_changed
 
     update_tenant(
         name=tenant_name,

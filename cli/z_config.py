@@ -107,7 +107,6 @@ def main():
     from cli.banner import render_banner
     from cli.menus import select_tenant
     from cli.menus.main_menu import main_menu
-    from cli.session import set_active_tenant
     from cli.update_checker import check_for_updates, check_plugin_updates
     from rich.console import Console
 
@@ -124,7 +123,10 @@ def main():
         _run_data_migrations(console)
         tenant = select_tenant()
         if tenant:
-            set_active_tenant(tenant)
+            import questionary
+            from cli.menus.main_menu import verify_and_activate_tenant
+            verify_and_activate_tenant(tenant)
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
     main_menu()
 
