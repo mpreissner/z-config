@@ -38,21 +38,27 @@ console = Console()
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def snapshots_menu(tenant, product: str) -> None:
+def snapshots_menu(tenant, product: str, client=None) -> None:
     while True:
         render_banner()
+        choices = [
+            questionary.Choice("Save Snapshot", value="save"),
+            questionary.Choice("List Snapshots", value="list"),
+            questionary.Choice("Compare Snapshot to Current DB", value="compare_current"),
+            questionary.Choice("Compare Two Snapshots", value="compare_two"),
+            questionary.Choice("Export Snapshot to JSON", value="export"),
+        ]
+        if product == "ZIA" and client is not None:
+            choices.append(questionary.Choice("Restore Snapshot", value="restore"))
+        choices += [
+            questionary.Choice("Delete Snapshot", value="delete"),
+            questionary.Separator(),
+            questionary.Choice("← Back", value="back"),
+        ]
+
         choice = questionary.select(
             f"Config Snapshots — {product}",
-            choices=[
-                questionary.Choice("Save Snapshot", value="save"),
-                questionary.Choice("List Snapshots", value="list"),
-                questionary.Choice("Compare Snapshot to Current DB", value="compare_current"),
-                questionary.Choice("Compare Two Snapshots", value="compare_two"),
-                questionary.Choice("Export Snapshot to JSON", value="export"),
-                questionary.Choice("Delete Snapshot", value="delete"),
-                questionary.Separator(),
-                questionary.Choice("← Back", value="back"),
-            ],
+            choices=choices,
             use_indicator=True,
         ).ask()
 
@@ -66,6 +72,8 @@ def snapshots_menu(tenant, product: str) -> None:
             _compare_two_snapshots(tenant, product)
         elif choice == "export":
             _export_snapshot(tenant, product)
+        elif choice == "restore":
+            _restore_snapshot(tenant, client)
         elif choice == "delete":
             _delete_snapshot(tenant, product)
         elif choice in ("back", None):
@@ -232,6 +240,26 @@ def _export_snapshot(tenant, product: str) -> None:
 
     console.print(f"[green]✓ Exported to {full_path}[/green]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _restore_snapshot(tenant, client) -> None:
+    snap = _pick_snapshot(tenant, "ZIA")
+    if snap is None:
+        return
+
+    # Deferred import to avoid circular dependency (zia_menu → snapshots_menu → zia_menu).
+    from cli.menus.zia_menu import apply_baseline_menu
+
+    baseline = {
+        "product": "ZIA",
+        "resources": snap.snapshot["resources"],
+    }
+    apply_baseline_menu(
+        client,
+        tenant,
+        baseline=baseline,
+        baseline_path=f"snapshot:{snap.name}",
+    )
 
 
 def _delete_snapshot(tenant, product: str) -> None:
