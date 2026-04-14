@@ -7,12 +7,11 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.17
+## What's New — v1.0.18
 
-- **Restore Snapshot** — ZIA Config Snapshots now includes a Restore option that applies a saved snapshot directly against its original tenant without requiring a JSON export first. Runs the full dry-run → push → verify → remediate → activate flow.
-- **Scope-stripped rules stay DISABLED through remediation** — rules inserted as DISABLED (because required scope resources don't exist in the target) no longer get re-enabled when remediation runs.
-- **Delete ordering in wipe-first mode** — dependent rules are now deleted before the objects they reference (e.g. URL filtering rules before custom URL categories), preventing constraint failures during wipe-first pushes.
-- **Auth check at initial launch** — selecting a tenant on first launch now runs the same credential verification and org info sync that previously only ran on tenant switch.
+- **Restore Snapshot — dedicated rollback flow** — Restore now has its own pipeline distinct from Apply Baseline. Shows a unified dry-run (creates, updates, deletes, skips) with a single confirmation, runs creates/updates first then deletes in dependency order, and performs two verification passes (creates/updates, then deletions).
+- **Verify pass 1 accuracy** — resources queued for deletion are excluded from the post-push discrepancy table so the create/update result is not obscured by expected-present resources.
+- **`classify_snapshot_deletes()` / `verify_deleted()`** — two new `ZIAPushService` methods powering the restore pipeline.
 
 ---
 
@@ -254,6 +253,21 @@ Plugins are pip-installable packages distributed via a private GitHub repository
 **Workaround:** After pushing a baseline that includes Smart Isolation, log in to the target tenant's ZIA admin console and enable Smart Browser Isolation manually. All other `browser_control_settings` fields (CBI profile, etc.) push correctly.
 
 **Rule ordering:** When the source tenant has Smart Isolation enabled (and thus "Smart Isolation One Click Rule" at order 1), the push automatically detects that the rule could not be provisioned on the target and renumbers the remaining SSL Inspection rules to fill the gap — so they remain in the correct relative order starting at 1.
+
+---
+
+### Cross-Cloud Baseline Push — Commercial to GovCloud
+
+**Symptom:** Pushing a commercial ZIA baseline JSON export to a GovCloud tenant (via Apply Baseline or Restore Snapshot) produces a significant number of errors and failures.
+
+**Cause:** Under investigation. Likely contributing factors include:
+- API path and payload differences between commercial and GovCloud endpoints for certain resource types
+- Resource ID namespacing differences — objects referenced by ID in the commercial baseline (e.g. URL categories, IP groups, locations) may not resolve correctly against GovCloud IDs
+- GovCloud-specific resource types or entitlements that have no commercial equivalent (and vice versa), causing the normalizer to generate invalid payloads
+
+**Workaround:** Cross-cloud commercial → GovCloud baseline pushes are not currently supported. For GovCloud tenants, use Import Config to populate the local database from the GovCloud tenant directly, then use that as the baseline source.
+
+**Status:** Tracked for a future release. Same-cloud pushes (commercial → commercial, GovCloud → GovCloud) are unaffected.
 
 ---
 

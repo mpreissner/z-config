@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.18] - 2026-04-14
+
+### Added
+
+#### ZIA Config Snapshots — Dedicated Restore Flow
+- **Restore Snapshot redesigned** — replaced the stub that delegated to Apply Baseline with a dedicated same-tenant rollback pipeline. Key differences from Apply Baseline:
+  - **Unified dry-run** — creates, updates, deletes, and skips shown together before any changes are made; single confirmation to proceed
+  - **Correct execution order** — creates/updates run first, then deletes in `WIPE_ORDER` (rules before their referenced objects), eliminating dependency constraint failures
+  - **Two verify passes** — pass 1 confirms creates/updates landed (with remediation offer); pass 2 confirms deleted resources are actually gone
+  - **Pending-delete resources excluded from verify pass 1** — resources queued for deletion no longer appear as discrepancies after creates/updates, since they are expected to still be present at that stage
+- **`classify_snapshot_deletes()`** — new `ZIAPushService` method identifying DB resources absent from the snapshot without running a redundant import
+- **`verify_deleted()`** — new `ZIAPushService` method that re-imports targeted resource types and confirms deleted IDs are no longer present in the live tenant
+
+### Known Issues (tracked for future work)
+
+#### Cross-Cloud Baseline Push — Commercial to GovCloud
+Pushing a commercial ZIA baseline JSON export to a GovCloud tenant produces errors and failures. Root causes are under investigation. Do not use Apply Baseline or Restore Snapshot for commercial → GovCloud cross-cloud pushes until this is resolved. See README Known Issues for details.
+
+---
+
 ## [1.0.17] - 2026-04-14
 
 ### Fixed

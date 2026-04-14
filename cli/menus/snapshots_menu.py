@@ -33,6 +33,10 @@ from services.snapshot_service import (
 
 console = Console()
 
+# Sentinel for an explicit "← Cancel" choice in snapshot pickers.
+# Distinguishes intentional cancellation from Ctrl+C (questionary returns None).
+_CANCEL = object()
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -246,20 +250,437 @@ def _restore_snapshot(tenant, client) -> None:
     snap = _pick_snapshot(tenant, "ZIA")
     if snap is None:
         return
+    restore_snapshot_menu(tenant, client, snap)
 
-    # Deferred import to avoid circular dependency (zia_menu → snapshots_menu → zia_menu).
-    from cli.menus.zia_menu import apply_baseline_menu
 
-    baseline = {
-        "product": "ZIA",
-        "resources": snap.snapshot["resources"],
-    }
-    apply_baseline_menu(
-        client,
-        tenant,
-        baseline=baseline,
-        baseline_path=f"snapshot:{snap.name}",
+def restore_snapshot_menu(tenant, client, snap) -> None:
+    """Full restore flow for a ZIA snapshot."""
+    # Deferred imports — zia_menu imports snapshots_menu at module level.
+    from cli.menus.zia_menu import _zia_changed
+    from services.zia_push_service import ZIAPushService
+
+    render_banner()
+    console.print(f"\n[bold]Restore Snapshot — {snap.name}[/bold]")
+    ts = snap.created_at.replace(tzinfo=timezone.utc).astimezone()
+    console.print(f"  [dim]Created:[/dim]   {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+    console.print(f"  [dim]Resources:[/dim] {snap.resource_count}")
+    if snap.comment:
+        console.print(f"  [dim]Comment:[/dim]   {snap.comment}")
+    console.print()
+
+    service = ZIAPushService(client, tenant_id=tenant.id)
+    baseline = {"product": "ZIA", "resources": snap.snapshot["resources"]}
+
+    # Step 5: classify
+    with console.status("[cyan]Classifying snapshot vs live state...[/cyan]") as status:
+        def _progress(rtype, done, total):
+            status.update(f"[cyan]Importing: {rtype} ({done}/{total})[/cyan]")
+
+        dry_run = service.classify_baseline(baseline, import_progress_callback=_progress)
+        delete_candidates = service.classify_snapshot_deletes(snap.snapshot["resources"])
+
+    # Step 6: dry-run display
+    _render_restore_dry_run(dry_run, delete_candidates, snap.name)
+
+    # Step 7: nothing to do
+    if (dry_run.create_count == 0
+            and dry_run.update_count == 0
+            and len(delete_candidates) == 0):
+        console.print("[green]Nothing to restore — tenant already matches this snapshot.[/green]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    # Step 8: single confirmation
+    confirmed = questionary.confirm(
+        f"Apply restore of snapshot '{snap.name}' to {tenant.name}?",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    push_records: list = []
+    verify1_result = None
+
+    # Step 9: push creates + updates
+    if dry_run.create_count > 0 or dry_run.update_count > 0:
+        current_pass = [0]
+        console.print()
+        with console.status("[cyan]Pushing creates and updates...[/cyan]") as status:
+            def _push_progress(pass_num, rtype, rec):
+                if pass_num != current_pass[0]:
+                    current_pass[0] = pass_num
+                status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+
+            push_records = service.push_classified(dry_run, progress_callback=_push_progress)
+
+        created  = sum(1 for r in push_records if r.is_created)
+        updated  = sum(1 for r in push_records if r.is_updated)
+        failed   = sum(1 for r in push_records if r.is_failed)
+        console.print(f"  [green]Created:[/green]  {created}")
+        console.print(f"  [cyan]Updated:[/cyan]  {updated}")
+        if failed:
+            console.print(f"  [red]Failed:[/red]   {failed}")
+
+    # Step 10: verify pass 1 (creates/updates)
+    if push_records:
+        console.print()
+        with console.status("[cyan]Verifying creates and updates...[/cyan]") as status:
+            def _verify1_progress(rtype, done, total):
+                status.update(f"[cyan]Verifying: {rtype} ({done}/{total})[/cyan]")
+            try:
+                verify1_result = service.verify_push(
+                    baseline,
+                    import_progress_callback=_verify1_progress,
+                )
+            except Exception as exc:
+                console.print(f"[yellow]⚠ Verify pass 1 failed: {exc}[/yellow]")
+                verify1_result = None
+
+        if verify1_result is not None:
+            v_creates, v_updates, v_deletes = verify1_result.changes_by_action()
+            # Exclude resources already queued for deletion — they're expected to
+            # still be present at this point since deletes haven't run yet.
+            pending_deletes = {(r.resource_type, r.name) for r in delete_candidates}
+            v_deletes = [(rtype, name) for rtype, name in v_deletes
+                         if (rtype, name) not in pending_deletes]
+            discrepancies = len(v_creates) + len(v_updates) + len(v_deletes)
+            if discrepancies == 0:
+                console.print("[green]✓ Creates/updates confirmed.[/green]")
+            else:
+                console.print(
+                    f"[bold yellow]⚠ {discrepancies} discrepancy(ies) after push:[/bold yellow]"
+                )
+                disc_table = Table(show_lines=False)
+                disc_table.add_column("Issue", style="yellow")
+                disc_table.add_column("Resource Type")
+                disc_table.add_column("Name")
+                for rtype, name in v_creates:
+                    disc_table.add_row("Not created", rtype, name)
+                for rtype, name in v_updates:
+                    disc_table.add_row("Config mismatch", rtype, name)
+                for rtype, name in v_deletes:
+                    disc_table.add_row("Not deleted", rtype, name)
+                console.print(disc_table)
+
+                remediate = questionary.confirm(
+                    f"Attempt to remediate {discrepancies} discrepancy(ies)?", default=True
+                ).ask()
+                if remediate:
+                    rem_pass = [0]
+                    with console.status("[cyan]Remediating...[/cyan]") as status:
+                        def _rem_progress(pass_num, rtype, rec):
+                            if pass_num != rem_pass[0]:
+                                rem_pass[0] = pass_num
+                            status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+                        rem_records = service.push_classified(
+                            verify1_result, progress_callback=_rem_progress
+                        )
+                    rem_created = sum(1 for r in rem_records if r.is_created)
+                    rem_updated = sum(1 for r in rem_records if r.is_updated)
+                    rem_failed  = sum(1 for r in rem_records if r.is_failed)
+                    console.print(
+                        f"  [green]Created:[/green] {rem_created}  "
+                        f"[cyan]Updated:[/cyan] {rem_updated}  "
+                        f"[red]Failed:[/red] {rem_failed}"
+                    )
+                    push_records = push_records + rem_records
+
+    delete_records: list = []
+
+    # Step 11: execute deletes
+    if delete_candidates:
+        console.print()
+        with console.status("[red]Deleting resources absent from snapshot...[/red]") as status:
+            def _del_progress(_, rtype, rec):
+                status.update(f"[red]Deleting {rtype} — {rec.name}[/red]")
+
+            delete_records = service.execute_deletes(
+                delete_candidates, progress_callback=_del_progress
+            )
+
+        deleted_count   = sum(1 for r in delete_records if r.is_deleted)
+        del_failed_count = sum(1 for r in delete_records if r.is_failed)
+        console.print(f"  [red]Deleted:[/red]  {deleted_count}")
+        if del_failed_count:
+            console.print(f"  [red]Failed:[/red]   {del_failed_count}")
+
+        # Activate deletions (mirrors apply_baseline wipe-first pattern)
+        if deleted_count > 0:
+            console.print()
+            console.print("[dim]Activating deletions...[/dim]")
+            try:
+                client.activate()
+            except Exception as e:
+                console.print(f"[yellow]⚠ Activation after deletes failed: {e} — proceeding anyway[/yellow]")
+
+    # Step 12: verify pass 2 (deletions)
+    verify2_result: list = []
+    if delete_candidates:
+        console.print()
+        with console.status("[cyan]Verifying deletions...[/cyan]") as status:
+            def _verify2_progress(rtype, done, total):
+                status.update(f"[cyan]Verifying deletions: {rtype} ({done}/{total})[/cyan]")
+            try:
+                verify2_result = service.verify_deleted(
+                    delete_candidates,
+                    import_progress_callback=_verify2_progress,
+                )
+            except Exception as exc:
+                console.print(f"[yellow]⚠ Verify pass 2 failed: {exc}[/yellow]")
+                verify2_result = []
+
+        if verify2_result:
+            console.print(
+                f"[bold yellow]⚠ {len(verify2_result)} resource(s) still present after delete:[/bold yellow]"
+            )
+            still_table = Table(show_lines=False)
+            still_table.add_column("Resource Type", style="yellow")
+            still_table.add_column("Name")
+            for r in verify2_result:
+                still_table.add_row(r.resource_type, r.name)
+            console.print(still_table)
+        else:
+            console.print("[green]✓ Deletions confirmed.[/green]")
+
+    # Step 13: mark pending
+    console.print()
+    _zia_changed()
+
+    # Step 14: write restore log
+    log_path = _write_restore_log(
+        snap, tenant, dry_run, delete_candidates,
+        push_records, delete_records, verify1_result, verify2_result,
     )
+    if log_path:
+        console.print(f"[dim]Restore log: {log_path}[/dim]")
+
+    # Step 15: offer activation
+    console.print()
+    activate_now = questionary.confirm(
+        "Activate changes in ZIA now?", default=True
+    ).ask()
+    if activate_now:
+        try:
+            result = client.activate()
+            state = result.get("status", "UNKNOWN") if result else "UNKNOWN"
+            console.print(f"[green]✓ Activated — status: {state}[/green]")
+        except Exception as e:
+            console.print(f"[red]✗ Activation failed: {e}[/red]")
+
+    # Step 16: done
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+_MAX_DETAIL = 30
+
+
+def _render_restore_dry_run(dry_run, delete_candidates, snap_name: str) -> None:
+    """Print a unified dry-run summary for the restore flow.
+
+    The Delete column is populated from delete_candidates (resources absent from
+    the snapshot), not from dry_run.to_delete (which reflects cross-tenant logic).
+    """
+    from services.zia_push_service import PUSH_ORDER
+
+    # Build per-type counts
+    summary: dict = {}
+    for r in dry_run.skipped:
+        row = summary.setdefault(r.resource_type, {"create": 0, "update": 0, "delete": 0, "skip": 0})
+        row["skip"] += 1
+    for rtype, entries in dry_run.pending.items():
+        row = summary.setdefault(rtype, {"create": 0, "update": 0, "delete": 0, "skip": 0})
+        for e in entries:
+            if e.get("__action") == "create":
+                row["create"] += 1
+            else:
+                row["update"] += 1
+    for r in delete_candidates:
+        row = summary.setdefault(r.resource_type, {"create": 0, "update": 0, "delete": 0, "skip": 0})
+        row["delete"] += 1
+
+    console.print(f"\n[bold]Restore Dry Run — snapshot: '{snap_name}'[/bold]\n")
+
+    if summary:
+        tbl = Table(show_lines=False)
+        tbl.add_column("Resource Type")
+        tbl.add_column("Create",  justify="right", style="green")
+        tbl.add_column("Update",  justify="right", style="cyan")
+        tbl.add_column("Delete",  justify="right", style="red")
+        tbl.add_column("Skip",    justify="right", style="dim")
+
+        # Show types in a stable order (PUSH_ORDER first, then alphabetical remainders)
+        ordered_types = [t for t in PUSH_ORDER if t in summary]
+        ordered_types += sorted(k for k in summary if k not in ordered_types)
+
+        for rtype in ordered_types:
+            counts = summary[rtype]
+            tbl.add_row(
+                rtype,
+                str(counts["create"]) if counts["create"] else "—",
+                str(counts["update"]) if counts["update"] else "—",
+                str(counts["delete"]) if counts["delete"] else "—",
+                str(counts["skip"])   if counts["skip"]   else "—",
+            )
+        console.print(tbl)
+
+    # Per-action detail lists
+    creates_list  = [(rtype, e.get("__display_name") or e.get("name") or "?")
+                     for rtype, entries in dry_run.pending.items()
+                     for e in entries if e.get("__action") == "create"]
+    updates_list  = [(rtype, e.get("__display_name") or e.get("name") or "?")
+                     for rtype, entries in dry_run.pending.items()
+                     for e in entries if e.get("__action") != "create"]
+    deletes_list  = [(r.resource_type, r.name) for r in delete_candidates]
+
+    if creates_list:
+        console.print(f"\n[green]To create ({len(creates_list)}):[/green]")
+        for rtype, name in creates_list[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(creates_list) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(creates_list) - _MAX_DETAIL} more[/dim]")
+
+    if updates_list:
+        console.print(f"\n[cyan]To update ({len(updates_list)}):[/cyan]")
+        for rtype, name in updates_list[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(updates_list) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(updates_list) - _MAX_DETAIL} more[/dim]")
+
+    if deletes_list:
+        console.print(f"\n[red]To delete ({len(deletes_list)}):[/red]")
+        for rtype, name in deletes_list[:_MAX_DETAIL]:
+            console.print(f"  [dim]{rtype}:[/dim] {name}")
+        if len(deletes_list) > _MAX_DETAIL:
+            console.print(f"  [dim]... and {len(deletes_list) - _MAX_DETAIL} more[/dim]")
+
+    total_creates = len(creates_list)
+    total_updates = len(updates_list)
+    total_deletes = len(deletes_list)
+    total_skips   = sum(1 for r in dry_run.skipped)
+    console.print(
+        f"\n[dim]Total: {total_creates} create(s), {total_updates} update(s), "
+        f"{total_deletes} delete(s), {total_skips} skip(s)[/dim]"
+    )
+
+
+def _write_restore_log(
+    snap,
+    tenant,
+    dry_run,
+    delete_candidates,
+    push_records,
+    delete_records,
+    verify1,
+    verify2,
+):
+    """Write a full restore log to the zs-config data directory.
+
+    Returns the path written, or None if writing failed.
+    """
+    import platform
+    from pathlib import Path
+
+    try:
+        from datetime import datetime, timezone as tz
+        ts = datetime.now(tz.utc).strftime("%Y%m%d-%H%M%S")
+        if platform.system() == "Windows":
+            import os as _os
+            log_dir = Path(_os.environ.get("APPDATA", Path.home())) / "zs-config" / "logs"
+        else:
+            log_dir = Path.home() / ".local" / "share" / "zs-config" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"zia-restore-{ts}.log"
+
+        lines = []
+        lines.append(f"ZIA Snapshot Restore Log — {datetime.now(tz.utc).isoformat()}")
+        lines.append(f"Tenant   : {tenant.name} (id={tenant.id})")
+        lines.append(f"Snapshot : {snap.name} (id={snap.id})")
+        if snap.comment:
+            lines.append(f"Comment  : {snap.comment}")
+        lines.append("")
+
+        lines.append("=== Dry-Run Classification ===")
+        lines.append(f"  To create       : {dry_run.create_count}")
+        lines.append(f"  To update       : {dry_run.update_count}")
+        lines.append(f"  To delete       : {len(delete_candidates)}")
+        lines.append(f"  Skipped         : {dry_run.skip_count}")
+        lines.append("")
+
+        # Push results
+        created = sum(1 for r in push_records if r.is_created)
+        updated = sum(1 for r in push_records if r.is_updated)
+        failed  = sum(1 for r in push_records if r.is_failed)
+        lines.append("=== Push Results (creates/updates) ===")
+        lines.append(f"  Created : {created}")
+        lines.append(f"  Updated : {updated}")
+        lines.append(f"  Failed  : {failed}")
+        lines.append("")
+
+        if push_records:
+            lines.append("=== Push Records ===")
+            for r in push_records:
+                lines.append(f"  [{r.status}] {r.resource_type} :: {r.name}")
+            lines.append("")
+
+        push_failures = [r for r in push_records if r.is_failed]
+        if push_failures:
+            lines.append("=== Push Failures (full detail) ===")
+            for r in push_failures:
+                lines.append(f"  {r.resource_type} :: {r.name}")
+                lines.append(f"    {r.failure_reason}")
+            lines.append("")
+
+        # Delete results
+        if delete_records:
+            del_deleted = sum(1 for r in delete_records if r.is_deleted)
+            del_failed  = sum(1 for r in delete_records if r.is_failed)
+            lines.append("=== Delete Results ===")
+            lines.append(f"  Deleted : {del_deleted}")
+            lines.append(f"  Failed  : {del_failed}")
+            lines.append("")
+            lines.append("=== Delete Records ===")
+            for r in delete_records:
+                lines.append(f"  [{r.status}] {r.resource_type} :: {r.name}")
+            lines.append("")
+
+        # Verify pass 1
+        if verify1 is not None:
+            v_creates, v_updates, v_deletes = verify1.changes_by_action()
+            disc = len(v_creates) + len(v_updates) + len(v_deletes)
+            lines.append("=== Verify Pass 1 (creates/updates) ===")
+            lines.append(f"  Discrepancies : {disc}")
+            for rtype, name in v_creates:
+                lines.append(f"  [not_created] {rtype} :: {name}")
+            for rtype, name in v_updates:
+                lines.append(f"  [config_mismatch] {rtype} :: {name}")
+            for rtype, name in v_deletes:
+                lines.append(f"  [not_deleted] {rtype} :: {name}")
+            lines.append("")
+
+        # Verify pass 2
+        lines.append("=== Verify Pass 2 (deletions) ===")
+        if verify2:
+            lines.append(f"  Still present : {len(verify2)}")
+            for r in verify2:
+                lines.append(f"  [still_present] {r.resource_type} :: {r.name}")
+        else:
+            lines.append("  All deletions confirmed.")
+        lines.append("")
+
+        # Manual-action warnings
+        warned = [r for r in push_records if r.warnings]
+        if warned:
+            lines.append("=== Manual Action Required ===")
+            for r in warned:
+                for w in r.warnings:
+                    lines.append(f"  {r.resource_type} :: {r.name}")
+                    lines.append(f"    {w}")
+            lines.append("")
+
+        log_file.write_text("\n".join(lines), encoding="utf-8")
+        return str(log_file)
+    except Exception:
+        return None
 
 
 def _delete_snapshot(tenant, product: str) -> None:
@@ -306,8 +727,9 @@ def _pick_snapshot_from_list(snaps, prompt: str = "Select snapshot:"):
             f"  [{ts.strftime('%Y-%m-%d %H:%M:%S')}]"
         )
         choices.append(questionary.Choice(label, value=snap))
-    choices.append(questionary.Choice("← Cancel", value=None))
-    return questionary.select(prompt, choices=choices).ask()
+    choices.append(questionary.Choice("← Cancel", value=_CANCEL))
+    result = questionary.select(prompt, choices=choices).ask()
+    return None if (result is None or result is _CANCEL) else result
 
 
 # ---------------------------------------------------------------------------

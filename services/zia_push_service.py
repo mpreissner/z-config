@@ -1035,6 +1035,110 @@ class ZIAPushService:
             records.append(delete_rec)
         return records
 
+    def classify_snapshot_deletes(
+        self,
+        snapshot_resources: Dict[str, List[dict]],
+    ) -> List[PushRecord]:
+        """Identify resources present in the DB that are absent from the snapshot.
+
+        Does NOT run an import — the caller is expected to have already run
+        classify_baseline() (which imports live state) immediately before calling
+        this method, so the DB reflects current tenant state.
+
+        Returns a list of PushRecord with status="pending_delete:<zia_id>",
+        sorted in WIPE_ORDER so execute_deletes() can consume it directly.
+
+        Args:
+            snapshot_resources: The "resources" dict from a RestorePoint snapshot,
+                shape: {resource_type: [{"id": ..., "name": ..., "raw_config": {...}}, ...]}
+        """
+        existing = self._load_existing_from_db()
+        candidates: List[PushRecord] = []
+
+        for rtype in WIPE_ORDER:
+            if rtype in SKIP_TYPES:
+                continue
+            if rtype not in _DELETE_METHODS:
+                continue
+            if rtype in ("allowlist", "denylist"):
+                continue  # no per-item delete path
+
+            snap_ids = {
+                str(entry["id"])
+                for entry in snapshot_resources.get(rtype, [])
+                if "id" in entry
+            }
+
+            for zia_id, entry in existing.get(rtype, {}).items():
+                raw = entry.get("raw_config", {})
+                if _is_zscaler_managed(rtype, raw):
+                    continue
+                name = entry.get("name", "")
+                if name in SKIP_NAMED.get(rtype, set()):
+                    continue
+                if zia_id in snap_ids:
+                    continue  # resource is in the snapshot — keep it
+                candidates.append(PushRecord(
+                    resource_type=rtype,
+                    name=name or zia_id,
+                    status=f"pending_delete:{zia_id}",
+                    warnings=[],
+                ))
+
+        return candidates
+
+    def verify_deleted(
+        self,
+        delete_candidates: List[PushRecord],
+        import_progress_callback: Optional[Callable] = None,
+    ) -> List[PushRecord]:
+        """Confirm that resources from delete_candidates are no longer present.
+
+        Runs a fresh import of the relevant resource types, then returns a list
+        of PushRecord entries (from delete_candidates) whose zia_id still appears
+        in the live tenant.  An empty return list means all deletes confirmed.
+
+        Args:
+            delete_candidates: The list returned by classify_snapshot_deletes()
+                and consumed by execute_deletes() — used to extract zia_ids to check.
+            import_progress_callback: Optional progress callback.
+        """
+        if not delete_candidates:
+            return []
+
+        # Collect (rtype, zia_id) pairs to check.
+        # status format is "pending_delete:<zia_id>"; skip malformed entries.
+        pairs: List[tuple] = []
+        rtypes_to_check: set = set()
+        for rec in delete_candidates:
+            zia_id = rec.status.partition(":")[2]
+            if not zia_id:
+                continue
+            pairs.append((rec.resource_type, zia_id, rec))
+            rtypes_to_check.add(rec.resource_type)
+
+        # Fresh import of only the affected resource types
+        from services.zia_import_service import ZIAImportService
+        import_svc = ZIAImportService(self._client, self._tenant_id)
+        import_svc.run(
+            resource_types=list(rtypes_to_check),
+            progress_callback=import_progress_callback,
+        )
+
+        existing = self._load_existing_from_db()
+
+        still_present: List[PushRecord] = []
+        for rtype, zia_id, original_rec in pairs:
+            if zia_id in existing.get(rtype, {}):
+                still_present.append(PushRecord(
+                    resource_type=rtype,
+                    name=original_rec.name,
+                    status="failed:still_present",
+                    warnings=[],
+                ))
+
+        return still_present
+
     def push_baseline(
         self,
         baseline: dict,
