@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.0.20] - 2026-04-15
+
+### Fixed
+
+#### ZPA Access Policy — CSV Import/Sync local DB sync
+- **Reorder-only runs now trigger DB sync** — `_sync_policy_rules` previously skipped the post-mutation `ZPAImportService` call when a sync resulted in only a rule reorder (no creates/updates/deletes), leaving the local DB with stale `rule_order` values. Fixed by including `result.reordered` in the sync trigger condition.
+- **DB sync failures now surfaced** — both `_sync_policy_rules` and `_bulk_create_policy_rules` now check the `SyncLog.status` returned by `ZPAImportService.run()` and display an appropriate warning or error instead of unconditionally printing success. This makes silent failures (e.g. `policy_access` auto-disabled due to a prior 401) visible to the user.
+
+---
+
 ## [1.0.19] - 2026-04-14
 
 ### Fixed

@@ -3180,8 +3180,13 @@ def _bulk_create_policy_rules(client, tenant):
     if result.created:
         from services.zpa_import_service import ZPAImportService
         with console.status(f"Syncing {result.created} new rule(s) to local DB..."):
-            ZPAImportService(client, tenant.id).run(resource_types=["policy_access"])
-        console.print("[green]✓ Local DB updated.[/green]")
+            sync_log = ZPAImportService(client, tenant.id).run(resource_types=["policy_access"])
+        if sync_log and sync_log.status == "SUCCESS":
+            console.print("[green]✓ Local DB updated.[/green]")
+        elif sync_log and sync_log.status == "PARTIAL":
+            console.print("[yellow]⚠ Local DB partially updated — some resources may be stale.[/yellow]")
+        else:
+            console.print("[red]✗ Local DB sync failed — run Import Config to refresh.[/red]")
 
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
@@ -3310,11 +3315,16 @@ def _sync_policy_rules(client, tenant):
     for err in result.errors:
         console.print(f"  [red]Error:[/red] {err}")
 
-    if result.updated or result.created or result.deleted:
+    if result.updated or result.created or result.deleted or result.reordered:
         from services.zpa_import_service import ZPAImportService
         with console.status("Syncing changes to local DB..."):
-            ZPAImportService(client, tenant.id).run(resource_types=["policy_access"])
-        console.print("[green]✓ Local DB updated.[/green]")
+            sync_log = ZPAImportService(client, tenant.id).run(resource_types=["policy_access"])
+        if sync_log and sync_log.status == "SUCCESS":
+            console.print("[green]✓ Local DB updated.[/green]")
+        elif sync_log and sync_log.status == "PARTIAL":
+            console.print("[yellow]⚠ Local DB partially updated — some resources may be stale.[/yellow]")
+        else:
+            console.print("[red]✗ Local DB sync failed — run Import Config to refresh.[/red]")
 
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
