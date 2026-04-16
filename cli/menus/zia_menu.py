@@ -9,6 +9,8 @@ from lib.defaults import DEFAULT_WORK_DIR
 
 console = Console()
 
+_CANCEL = object()
+
 
 def _rule_order_key(n):
     """Sort key: positive integers ascending first, then negative integers descending.
@@ -62,7 +64,7 @@ def zia_menu():
                 questionary.Choice("Cloud Applications", value="cloud_applications"),
                 questionary.Choice("Cloud App Control", value="cloud_app_control"),
                 questionary.Separator("── Baseline ──"),
-                questionary.Choice("Apply Baseline from JSON", value="apply_baseline"),
+                questionary.Choice("Apply Snapshot from Another Tenant", value="cross_tenant_snap"),
                 questionary.Separator(),
                 questionary.Choice("Activation", value="activation"),
                 questionary.Choice("Import Config", value="import"),
@@ -107,8 +109,22 @@ def zia_menu():
             _import_zia_config(client, tenant)
         elif choice == "snapshots":
             snapshots_menu(tenant, "ZIA", client=client)
-        elif choice == "apply_baseline":
-            apply_baseline_menu(client, tenant)
+        elif choice == "cross_tenant_snap":
+            source_tenant, snap = _pick_cross_tenant_snapshot(tenant)
+            if source_tenant is None or snap is None:
+                pass  # user cancelled; loop continues
+            else:
+                baseline_path = f"{source_tenant.name}/{snap.name}"
+                baseline = {
+                    "product": "ZIA",
+                    "tenant_name": source_tenant.name,
+                    "snapshot_name": snap.name,
+                    "comment": snap.comment or "",
+                    "created_at": snap.created_at.isoformat() + "Z",
+                    "resource_count": snap.resource_count,
+                    "resources": snap.snapshot["resources"],
+                }
+                apply_baseline_menu(client, tenant, baseline=baseline, baseline_path=baseline_path)
         elif choice == "reset_na":
             _reset_zia_na_resources(client, tenant)
         elif choice in ("back", None):
@@ -4317,6 +4333,62 @@ def _delete_cloud_app_rule(client, tenant, rule_type: str):
 
 
 # ------------------------------------------------------------------
+# Cross-Tenant Snapshot Picker
+# ------------------------------------------------------------------
+
+def _pick_cross_tenant_snapshot(current_tenant):
+    """Prompt user to select a source tenant (excluding current_tenant) then a ZIA
+    snapshot from that tenant.
+
+    Returns a tuple (source_tenant, snap: RestorePoint) or (None, None).
+    """
+    from datetime import timezone
+    from db.database import get_session
+    from services.config_service import list_tenants
+    from services.snapshot_service import list_snapshots
+
+    other_tenants = [t for t in list_tenants() if t.id != current_tenant.id]
+    if not other_tenants:
+        console.print("[yellow]No other tenants are configured.[/yellow]")
+        return None, None
+
+    tenant_choices = [questionary.Choice(t.name, value=t) for t in other_tenants]
+    tenant_choices.append(questionary.Choice("<- Cancel", value=_CANCEL))
+    source_tenant = questionary.select(
+        "Select source tenant:",
+        choices=tenant_choices,
+        use_indicator=True,
+    ).ask()
+    if source_tenant is None or source_tenant is _CANCEL:
+        return None, None
+
+    with get_session() as session:
+        snaps = list_snapshots(source_tenant.id, "ZIA", session)
+
+    if not snaps:
+        console.print(f"[yellow]No ZIA snapshots found for {source_tenant.name}.[/yellow]")
+        return None, None
+
+    snap_choices = []
+    for snap in snaps:
+        local_ts = snap.created_at.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        comment_suffix = f"  {snap.comment}" if snap.comment else ""
+        label = f"{snap.name}  [{local_ts}]  {snap.resource_count} resources{comment_suffix}"
+        snap_choices.append(questionary.Choice(label, value=snap))
+    snap_choices.append(questionary.Choice("<- Cancel", value=_CANCEL))
+
+    selected_snap = questionary.select(
+        f"Select snapshot from {source_tenant.name}:",
+        choices=snap_choices,
+        use_indicator=True,
+    ).ask()
+    if selected_snap is None or selected_snap is _CANCEL:
+        return None, None
+
+    return source_tenant, selected_snap
+
+
+# ------------------------------------------------------------------
 # Apply Baseline from JSON
 # ------------------------------------------------------------------
 
@@ -4415,37 +4487,48 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
     from services.zia_push_service import SKIP_TYPES, ZIAPushService
 
     render_banner()
-    console.print("\n[bold]Apply Baseline from JSON[/bold]")
-    console.print("[dim]Reads a ZIA snapshot export file and pushes it to the live tenant.[/dim]\n")
+
+    # Determine source context for display strings.
+    # A cross-tenant baseline_path looks like "TenantA/snap-name" (no leading slash).
+    # A file-based baseline_path is an absolute filesystem path.
+    import os as _os
+    _is_file_source = baseline_path is None or _os.path.isabs(str(baseline_path))
+    if _is_file_source:
+        _page_title    = "Apply Baseline from JSON"
+        _page_subtitle = "Reads a ZIA snapshot export file and pushes it to the live tenant."
+        _table_title   = "Baseline File Contents"
+        _count_col     = "In File"
+        _err_prefix    = "baseline file"
+    else:
+        _src_tenant  = baseline.get("tenant_name", baseline_path.split("/")[0]) if baseline else baseline_path.split("/")[0]
+        _snap_name   = baseline.get("snapshot_name", "") if baseline else ""
+        _page_title    = "Apply Snapshot from Another Tenant"
+        _page_subtitle = f"Applying snapshot '{_snap_name}' from {_src_tenant} to {tenant.name}."
+        _table_title   = "Snapshot Contents"
+        _count_col     = "Count"
+        _err_prefix    = "snapshot"
+
+    console.print(f"\n[bold]{_page_title}[/bold]")
+    console.print(f"[dim]{_page_subtitle}[/dim]\n")
 
     if baseline is None:
-        path = questionary.path("Path to baseline JSON file:", default=str(DEFAULT_WORK_DIR)).ask()
-        if not path:
-            return
-        baseline_path = path.strip()
-        try:
-            with open(baseline_path) as fh:
-                baseline = json.load(fh)
-        except Exception as e:
-            console.print(f"[red]✗ Could not read file: {e}[/red]")
-            questionary.press_any_key_to_continue("Press any key to continue...").ask()
-            return
+        return
 
     if baseline.get("product") != "ZIA":
-        console.print("[red]✗ Invalid baseline file — 'product' must be 'ZIA'.[/red]")
+        console.print(f"[red]✗ Invalid {_err_prefix} — 'product' must be 'ZIA'.[/red]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
     resources = baseline.get("resources")
     if not resources:
-        console.print("[red]✗ Baseline file has no 'resources' key.[/red]")
+        console.print(f"[red]✗ {_err_prefix.capitalize()} has no 'resources' key.[/red]")
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    # ── Step 1: show what's in the file ───────────────────────────────────
-    file_table = Table(title="Baseline File Contents", show_lines=False)
+    # ── Step 1: show what's in the baseline ───────────────────────────────
+    file_table = Table(title=_table_title, show_lines=False)
     file_table.add_column("Resource Type")
-    file_table.add_column("In File", justify="right")
+    file_table.add_column(_count_col, justify="right")
     pushable_types = 0
     for rtype, entries in sorted(resources.items()):
         count = len(entries) if isinstance(entries, list) else 1

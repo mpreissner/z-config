@@ -1,15 +1,11 @@
 """Config Snapshots menu.
 
-Allows users to save, list, compare, export, and delete point-in-time
+Allows users to save, list, compare, and delete point-in-time
 snapshots of a tenant's ZPA or ZIA configuration.
 """
 
 import json
-import os
-import re
 from datetime import datetime, timezone
-
-from lib.defaults import DEFAULT_WORK_DIR
 
 import questionary
 from rich.console import Console
@@ -50,7 +46,6 @@ def snapshots_menu(tenant, product: str, client=None) -> None:
             questionary.Choice("List Snapshots", value="list"),
             questionary.Choice("Compare Snapshot to Current DB", value="compare_current"),
             questionary.Choice("Compare Two Snapshots", value="compare_two"),
-            questionary.Choice("Export Snapshot to JSON", value="export"),
         ]
         if product == "ZIA" and client is not None:
             choices.append(questionary.Choice("Restore Snapshot", value="restore"))
@@ -74,8 +69,6 @@ def snapshots_menu(tenant, product: str, client=None) -> None:
             _compare_to_current(tenant, product)
         elif choice == "compare_two":
             _compare_two_snapshots(tenant, product)
-        elif choice == "export":
-            _export_snapshot(tenant, product)
         elif choice == "restore":
             _restore_snapshot(tenant, client)
         elif choice == "delete":
@@ -213,37 +206,6 @@ def _compare_two_snapshots(tenant, product: str) -> None:
 
     lines = _render_diff(diff, view_mode, label_a=snap_a.name, label_b=snap_b.name)
     scroll_view(lines, header_ansi=capture_banner())
-
-
-def _export_snapshot(tenant, product: str) -> None:
-    snap = _pick_snapshot(tenant, product)
-    if snap is None:
-        return
-
-    export_dir = questionary.path("Export directory:", default=str(DEFAULT_WORK_DIR)).ask()
-    if not export_dir:
-        return
-
-    sanitized = re.sub(r"[^\w\-]", "-", snap.name)
-    filename = f"{tenant.name}-{product}-{sanitized}.json"
-    full_path = os.path.join(export_dir, filename)
-
-    envelope = {
-        "product": product,
-        "tenant_name": tenant.name,
-        "snapshot_name": snap.name,
-        "comment": snap.comment or "",
-        "created_at": snap.created_at.isoformat() + "Z",
-        "resource_count": snap.resource_count,
-        "resources": snap.snapshot["resources"],
-    }
-
-    os.makedirs(export_dir, exist_ok=True)
-    with open(full_path, "w", encoding="utf-8") as f:
-        json.dump(envelope, f, indent=2)
-
-    console.print(f"[green]✓ Exported to {full_path}[/green]")
-    questionary.press_any_key_to_continue("Press any key to continue...").ask()
 
 
 def _restore_snapshot(tenant, client) -> None:

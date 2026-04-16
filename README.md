@@ -7,9 +7,10 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.19
+## What's New — v1.0.20
 
-- **zscaler-sdk-python 1.9.21 compatibility** — ZIdentity direct HTTP paths updated from `/zidentity/api/v1` to `/ziam/admin/api/v1` following the SDK's ZIdentity service migration. The old path returns HTTP 401 on GovCloud and would break on commercial. Verified against both environments. SDK floor bumped to `>=1.9.21`.
+- **ZPA Access Policy CSV sync — reorder-only runs now trigger DB sync** — previously, a sync that resulted in only a rule reorder (no creates/updates/deletes) skipped the post-mutation local DB refresh, leaving cached `rule_order` values stale. Fixed.
+- **ZPA Access Policy CSV sync — DB sync failures now surfaced** — both the import-sync and bulk-create flows now check the `SyncLog` status returned by `ZPAImportService` and display a warning or error on failure, instead of silently printing success when the underlying sync job failed (e.g. `policy_access` auto-disabled after a prior 401).
 
 ---
 
