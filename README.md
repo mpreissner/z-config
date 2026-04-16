@@ -7,8 +7,9 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 
 ---
 
-## What's New — v1.0.20
+## What's New — v1.1.0
 
+- **ZIA — Apply Snapshot from Another Tenant** — push any saved ZIA snapshot from another configured tenant directly to the active tenant, using the same wipe-or-delta workflow as a standard restore. No file export or import required; snapshots are read directly from the local database.
 - **ZPA Access Policy CSV sync — reorder-only runs now trigger DB sync** — previously, a sync that resulted in only a rule reorder (no creates/updates/deletes) skipped the post-mutation local DB refresh, leaving cached `rule_order` values stale. Fixed.
 - **ZPA Access Policy CSV sync — DB sync failures now surfaced** — both the import-sync and bulk-create flows now check the `SyncLog` status returned by `ZPAImportService` and display a warning or error on failure, instead of silently printing success when the underlying sync job failed (e.g. `policy_access` auto-disabled after a prior 401).
 
@@ -17,17 +18,16 @@ Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity 
 ## Features
 
 - **ZPA** — App Connectors & Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups, Access Policy (list/search/export/import-sync from CSV with dry-run, bulk reorder, and orphan delete), PRA Portals & Consoles, Service Edges, Certificate Management (upload/rotate/delete), Identity & Directory (SAML Attributes, SCIM User Attributes, SCIM Groups), Policy Scoping Reference export, Apps & Groups Reference export
-- **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4 rules, DNS filter, IPS — list/search/enable-disable/export/import-sync from CSV), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), **Apply Baseline from JSON** (wipe-first or delta push with ID remapping, cross-tenant rule ordering, scope-aware disable), Policy Activation
+- **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4 rules, DNS filter, IPS — list/search/enable-disable/export/import-sync from CSV), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), **Apply Snapshot from Another Tenant** (wipe-first or delta push with ID remapping, cross-tenant rule ordering, scope-aware disable), Policy Activation
 - **ZIA IP Groups** — Source and Destination IPv4 Groups: list, search, create, edit, delete, and bulk create from CSV
 - **ZCC** — Devices (list/search/remove/OTP lookup/password lookup/CSV export), Trusted Networks, Forwarding Profiles, Admin Users, Entitlements, App Profiles (manage bypass apps/activate/delete), Bypass App Definitions
 - **ZDX** — Device health, app performance, user lookup, application scores, deep trace
 - **ZIdentity** — Users (list/search/reset-password/set-password/skip-MFA), Groups (list/search/members/add-remove), API Clients (list/search/secrets/delete)
 - **Config Import** — 27 ZPA + 42 ZIA + 6 ZCC resource types pulled into a local SQLite cache with SHA-256 change detection
-- **Config Snapshots** — save, compare (field-level diff), export, restore (ZIA only), and delete point-in-time snapshots for ZPA and ZIA
+- **Config Snapshots** — save, compare (field-level diff), restore (ZIA only — wipe-or-delta, including cross-tenant), and delete point-in-time snapshots for ZPA and ZIA
 - **Audit Log** — immutable record of every operation
 - **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
 - **Auto-update** — silent PyPI check on startup; shows changelog and upgrades in-place via pipx or pip
-- **Plugin Manager** (`Ctrl+]`) — browse, install, and uninstall optional plugins from the private plugin repository; GitHub Device Flow OAuth with collaborator-gated access
 
 ---
 
@@ -157,7 +157,7 @@ Rules missing from the CSV are deleted. The final `bulk_reorder_rules()` call ma
 
 **Cloud Apps** — Cloud Applications (list/search), Cloud App Control (full CRUD by rule type)
 
-**Bottom** — Activation, Import Config (37 resource types), Config Snapshots, Reset N/A Resource Types
+**Bottom** — Activation, Import Config (37 resource types), Config Snapshots (save / compare / restore / cross-tenant apply / delete), Reset N/A Resource Types
 
 #### Firewall Rule CSV sync
 
@@ -198,21 +198,6 @@ Select a time window (2 / 4 / 8 / 24 hours) on entry. Sections: Device Lookup & 
 **API Clients** — list, search, view details and secrets, add/delete secrets, delete client
 
 ---
-
-### Plugin Manager
-
-Accessed via **`Ctrl+]`** from the main menu (not listed as a visible menu item).
-
-Plugins are pip-installable packages distributed via a private GitHub repository. Access requires a GitHub account that has been added as a collaborator on the plugin repository — contact the repository owner to request access.
-
-**Authentication flow:**
-
-1. Open the plugin manager (`Ctrl+]`) and select **Log in with GitHub**
-2. A browser window opens — complete the Device Flow OAuth prompt (MFA supported)
-3. On success, zs-config verifies your GitHub token has collaborator access to the plugin repository before saving it. If your account is not listed as a collaborator, login fails with a clear message
-4. Once authenticated, **Browse available plugins** lists plugins from the manifest and offers install via pip — no SSH key or manual git configuration required
-
-**Token storage:** `~/.config/zs-config/github_token` (chmod 600)
 
 ### Settings
 
@@ -257,14 +242,14 @@ Plugins are pip-installable packages distributed via a private GitHub repository
 
 ### Cross-Cloud Baseline Push — Commercial to GovCloud
 
-**Symptom:** Pushing a commercial ZIA baseline JSON export to a GovCloud tenant (via Apply Baseline or Restore Snapshot) produces a significant number of errors and failures.
+**Symptom:** Pushing a commercial ZIA baseline to a GovCloud tenant (via Restore Snapshot or cross-tenant apply) produces a significant number of errors and failures.
 
 **Cause:** Under investigation. Likely contributing factors include:
 - API path and payload differences between commercial and GovCloud endpoints for certain resource types
 - Resource ID namespacing differences — objects referenced by ID in the commercial baseline (e.g. URL categories, IP groups, locations) may not resolve correctly against GovCloud IDs
 - GovCloud-specific resource types or entitlements that have no commercial equivalent (and vice versa), causing the normalizer to generate invalid payloads
 
-**Workaround:** Cross-cloud commercial → GovCloud baseline pushes are not currently supported. For GovCloud tenants, use Import Config to populate the local database from the GovCloud tenant directly, then use that as the baseline source.
+**Workaround:** Cross-cloud commercial → GovCloud pushes are not currently supported. For GovCloud tenants, use Import Config to populate the local database from the GovCloud tenant directly, then use that as the snapshot source.
 
 **Status:** Tracked for a future release. Same-cloud pushes (commercial → commercial, GovCloud → GovCloud) are unaffected.
 

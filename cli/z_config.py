@@ -113,6 +113,15 @@ def main():
     console = Console()
 
     init_db()
+
+    # ── Complete any deferred plugin install (branch override flow) ────────
+    from lib.plugin_manager import get_pending_plugin_install, clear_pending_plugin_install
+    _pending = get_pending_plugin_install()
+    if _pending:
+        from cli.menus.plugin_menu import _complete_pending_install
+        _complete_pending_install(_pending)
+        clear_pending_plugin_install()
+
     render_banner()
     zs_update_found = check_for_updates()
     if not zs_update_found:
