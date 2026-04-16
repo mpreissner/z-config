@@ -23,7 +23,15 @@ def plugin_menu() -> None:
         from lib.github_auth import get_token, is_authenticated, verify_token
         from lib.plugin_manager import (
             get_installed_plugins, get_plugin_channel, get_plugin_branch_overrides,
+            get_pending_plugin_install, clear_pending_plugin_install,
         )
+
+        # ── Complete any deferred install from a previous branch-override ──
+        pending = get_pending_plugin_install()
+        if pending:
+            _complete_pending_install(pending)
+            clear_pending_plugin_install()
+            continue
 
         installed  = get_installed_plugins()
         channel    = get_plugin_channel()
@@ -307,6 +315,32 @@ def _do_install(plugin: dict) -> None:
         questionary.press_any_key_to_continue("Press any key...").ask()
 
 
+def _complete_pending_install(pending: dict) -> None:
+    """Auto-run a deferred plugin install that was queued by _branch_override_menu."""
+    from lib.plugin_manager import install_plugin
+
+    package = pending.get("package", "plugin")
+    url     = pending.get("url", "")
+
+    render_banner()
+    console.print(Panel(
+        f"Completing deferred install of [bold]{package}[/bold]...",
+        border_style="cyan",
+        title="Plugin Manager",
+    ))
+    console.print(f"[dim]  {url}[/dim]\n")
+
+    with console.status(f"[cyan]Installing {package}...[/cyan]"):
+        success, message = install_plugin(url)
+
+    if success:
+        console.print(f"[green]✓ {message}[/green]")
+    else:
+        console.print(f"[red]✗ Installation failed:[/red]\n{message}")
+
+    questionary.press_any_key_to_continue("Press any key...").ask()
+
+
 def _install_plugin_by_url() -> None:
     """Fallback: install directly from a git URL (no manifest needed)."""
     url = questionary.text(
@@ -438,33 +472,37 @@ def _branch_override_menu(installed: list[dict], overrides: dict) -> None:
             action_label = target_branch
             install_url = url_for_branch(base_url, target_branch)
 
-    # ── Step 4: confirm and reinstall ─────────────────────────────────────
+    # ── Step 4: confirm, uninstall, defer reinstall to next launch ────────
     confirmed = questionary.confirm(
-        f"Reinstall {pkg} from '{action_label}' and restart?",
+        f"Switch {pkg} to '{action_label}' and restart?",
         default=False,
     ).ask()
     if not confirmed:
         return
 
-    console.print(f"[dim]  {install_url}[/dim]\n")
-    with console.status(f"[cyan]Installing {pkg} @ {action_label}...[/cyan]"):
-        from lib.plugin_manager import uninstall_plugin
-        uninstall_plugin(pkg)
-        success, message = install_plugin(install_url)
+    from lib.plugin_manager import (
+        set_pending_plugin_install, uninstall_plugin,
+    )
 
-    if success:
-        set_plugin_branch_override(pkg, target_branch)  # None clears the override
-        console.print(f"[green]✓ {message}[/green]")
-        console.print(Panel(
-            f"[green]{pkg} switched to [bold]{action_label}[/bold].[/green] "
-            "zs-config will now exit — please re-launch to activate the update.",
-            border_style="green",
-        ))
-        questionary.press_any_key_to_continue("Press any key to exit...").ask()
-        sys.exit(0)
-    else:
-        console.print(f"[red]✗ Installation failed:[/red]\n{message}")
+    console.print()
+    with console.status(f"[cyan]Uninstalling {pkg}...[/cyan]"):
+        ok, msg = uninstall_plugin(pkg)
+
+    if not ok:
+        console.print(f"[red]✗ Uninstall failed:[/red]\n{msg}")
         questionary.press_any_key_to_continue("Press any key...").ask()
+        return
+
+    set_plugin_branch_override(pkg, target_branch)   # None clears the override
+    set_pending_plugin_install(pkg, install_url)
+    console.print(f"[green]✓ {pkg} uninstalled.[/green]")
+    console.print(Panel(
+        f"[green]{pkg} will be reinstalled from [bold]{action_label}[/bold] on relaunch.[/green]\n"
+        "zs-config will now exit — please re-launch to complete the switch.",
+        border_style="green",
+    ))
+    questionary.press_any_key_to_continue("Press any key to exit...").ask()
+    sys.exit(0)
 
 
 def _uninstall_plugin(installed: list[dict]) -> None:

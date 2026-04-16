@@ -290,6 +290,32 @@ def get_plugin_branch_overrides() -> dict:
         return {}
 
 
+def get_pending_plugin_install() -> Optional[dict]:
+    """Return a pending deferred plugin install as {package, url}, or None."""
+    import json
+    from db.database import get_setting
+    raw = get_setting("plugin_pending_install")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def set_pending_plugin_install(package: str, url: str) -> None:
+    """Store a plugin install to be completed on the next launch."""
+    import json
+    from db.database import set_setting
+    set_setting("plugin_pending_install", json.dumps({"package": package, "url": url}))
+
+
+def clear_pending_plugin_install() -> None:
+    """Clear any pending plugin install record."""
+    from db.database import set_setting
+    set_setting("plugin_pending_install", None)
+
+
 def set_plugin_branch_override(package_name: str, branch: Optional[str]) -> None:
     """Set or clear a branch override for a specific package.
 
