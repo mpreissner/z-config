@@ -37,6 +37,14 @@ _PLUGIN_GROUP   = "zs_config.plugins"
 _MANIFEST_REPO  = "mpreissner/zs-plugins"
 _MANIFEST_FILE  = "manifest.json"
 
+# Keyword used to filter feature branches per plugin package.
+# Branches under feature/ are included only if the keyword appears in the name.
+# Add an entry here whenever a new plugin is added to zs-plugins.
+_PLUGIN_BRANCH_FILTERS: dict[str, str] = {
+    "palo-tools":          "pan",
+    "zia-snapshot-tools":  "snap",
+}
+
 
 # ---------------------------------------------------------------------------
 # Installed plugins (entry point discovery)
@@ -129,6 +137,47 @@ def fetch_manifest(ref: Optional[str] = None) -> tuple[Optional[list], Optional[
         return data.get("plugins", []), None
     except Exception as exc:
         return None, f"Failed to fetch manifest: {exc}"
+
+
+def fetch_plugin_branches(package_name: str) -> tuple[list[str], Optional[str]]:
+    """Fetch feature branches for a plugin from the zs-plugins repo.
+
+    Filters to branches starting with 'feature/' and containing the keyword
+    defined in _PLUGIN_BRANCH_FILTERS for the given package.  If no keyword is
+    defined the full feature/* list is returned unfiltered.
+
+    Returns (sorted_branch_list, None) on success or ([], error_message) on failure.
+    """
+    token = get_token()
+    if not token:
+        return [], "Not authenticated — log in first."
+
+    keyword = _PLUGIN_BRANCH_FILTERS.get(package_name)
+
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{_MANIFEST_REPO}/branches",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept":        "application/vnd.github+json",
+            },
+            params={"per_page": 100},
+            timeout=10,
+        )
+        if resp.status_code == 401:
+            return [], "GitHub token expired or revoked — please re-authenticate."
+        if resp.status_code == 403:
+            return [], "Access denied — you may not have access to this plugin repository."
+        if resp.status_code == 404:
+            return [], "Repository not found."
+        resp.raise_for_status()
+
+        branches = [b["name"] for b in resp.json() if b["name"].startswith("feature/")]
+        if keyword:
+            branches = [b for b in branches if keyword in b]
+        return sorted(branches), None
+    except Exception as exc:
+        return [], f"Failed to fetch branches: {exc}"
 
 
 # ---------------------------------------------------------------------------
