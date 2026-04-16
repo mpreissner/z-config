@@ -448,7 +448,7 @@ def _branch_override_menu(installed: list[dict], overrides: dict) -> None:
 
     console.print(f"[dim]  {install_url}[/dim]\n")
     with console.status(f"[cyan]Installing {pkg} @ {action_label}...[/cyan]"):
-        success, message = install_plugin(install_url)
+        success, message = install_plugin(install_url, force=True)
 
     if success:
         set_plugin_branch_override(pkg, target_branch)  # None clears the override

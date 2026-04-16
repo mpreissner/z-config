@@ -226,11 +226,14 @@ def _askpass_env(token: str) -> tuple[dict, str]:
     return env, path
 
 
-def install_plugin(install_url: str) -> tuple[bool, str]:
+def install_plugin(install_url: str, force: bool = False) -> tuple[bool, str]:
     """Install a plugin using pip.
 
     Validates that the URL points to github.com, then installs with the GitHub
     token passed via GIT_ASKPASS so it does not appear in the process listing.
+
+    Pass force=True to add --force-reinstall, which is required when switching
+    to a lower version (e.g. reverting a branch override).
 
     Returns (True, success_message) or (False, error_output).
     """
@@ -241,9 +244,14 @@ def install_plugin(install_url: str) -> tuple[bool, str]:
     token = get_token()
     env, askpass_path = _askpass_env(token) if token else (None, None)
 
+    cmd = [sys.executable, "-m", "pip", "install"]
+    if force:
+        cmd.append("--force-reinstall")
+    cmd.append(url)
+
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", url],
+            cmd,
             capture_output=True,
             text=True,
             timeout=120,
