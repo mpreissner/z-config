@@ -13,14 +13,17 @@ The auto-generated OpenAPI docs are available at:
 
 import os
 import sys
+import secrets
 
 # Ensure repo root is importable when run via uvicorn from repo root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import pathlib
 
@@ -28,14 +31,61 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.routers import system, zia, zpa
+from api.routers import auth as auth_router, tenants as tenants_router
+from api.auth_utils import decode_token
+from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from db.database import init_db
+    jwt_secret = os.environ.get("JWT_SECRET", "")
+    if len(jwt_secret) < 32:
+        sys.exit("FATAL: JWT_SECRET must be set and at least 32 characters.")
+
+    from db.database import init_db, get_session
+    from db.models import User
+    from api.auth_utils import hash_password
     init_db()
+
+    with get_session() as session:
+        admin_exists = session.query(User).filter_by(role="admin", is_active=True).first()
+
+    if not admin_exists:
+        initial_password = os.environ.get("ADMIN_INITIAL_PASSWORD") or secrets.token_urlsafe(15)
+        print(f"[zs-config] Admin account created. Initial password: {initial_password}", flush=True)
+        with get_session() as session:
+            admin = User(
+                username="admin",
+                role="admin",
+                password_hash=hash_password(initial_password),
+                force_password_change=True,
+                is_active=True,
+            )
+            session.add(admin)
+
     yield
+
+
+class ForcePasswordChangeMiddleware(BaseHTTPMiddleware):
+    _EXEMPT = {
+        "/api/v1/auth/change-password", "/api/v1/auth/login",
+        "/api/v1/auth/logout", "/api/v1/auth/refresh",
+        "/health", "/docs", "/openapi.json", "/redoc",
+    }
+
+    async def dispatch(self, request, call_next):
+        if request.url.path in self._EXEMPT:
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            try:
+                payload = decode_token(auth.removeprefix("Bearer "))
+                if payload.get("fpc"):
+                    return JSONResponse({"detail": "password_change_required"}, status_code=403)
+            except Exception:
+                pass
+        return await call_next(request)
 
 
 app = FastAPI(
@@ -47,6 +97,8 @@ app = FastAPI(
     version=VERSION,
     lifespan=lifespan,
 )
+
+app.add_middleware(ForcePasswordChangeMiddleware)
 
 # Allow the future GUI (any origin in dev, lock down in production)
 app.add_middleware(
@@ -60,6 +112,8 @@ app.add_middleware(
 app.include_router(zpa.router, prefix="/api/v1/zpa", tags=["ZPA"])
 app.include_router(zia.router, prefix="/api/v1/zia", tags=["ZIA"])
 app.include_router(system.router)
+app.include_router(auth_router.router)
+app.include_router(tenants_router.router)
 
 
 @app.get("/health", tags=["System"])
@@ -67,27 +121,13 @@ def health():
     return {"status": "ok", "version": VERSION}
 
 
-@app.get("/api/v1/tenants", tags=["System"])
-def list_tenants():
-    from services.config_service import list_tenants as _list
-    tenants = _list()
-    return [
-        {
-            "id": t.id,
-            "name": t.name,
-            "zidentity_base_url": t.zidentity_base_url,
-            "oneapi_base_url": t.oneapi_base_url,
-            "govcloud": t.govcloud,
-            "zpa_customer_id": t.zpa_customer_id,
-            "notes": t.notes,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        }
-        for t in tenants
-    ]
-
-
 @app.get("/api/v1/audit", tags=["System"])
-def get_audit_log(tenant_id: int = None, product: str = None, limit: int = 100):
+def get_audit_log(
+    tenant_id: int = None,
+    product: str = None,
+    limit: int = 100,
+    user: AuthUser = Depends(require_auth),
+):
     from services import audit_service
     logs = audit_service.get_recent(tenant_id=tenant_id, product=product, limit=limit)
     return [

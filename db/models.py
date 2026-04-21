@@ -269,3 +269,25 @@ class AppSettings(Base):
 
     def __repr__(self) -> str:
         return f"<AppSettings key={self.key!r} value={self.value!r}>"
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("sso_provider", "sso_subject", name="uq_user_sso"),
+    )
+    id                    = Column(Integer, primary_key=True)
+    username              = Column(String(255), unique=True, nullable=False)
+    email                 = Column(String(512), nullable=True)
+    role                  = Column(String(32), nullable=False, default="user")
+    password_hash         = Column(Text, nullable=True)
+    force_password_change = Column(Boolean, nullable=False, default=False)
+    sso_provider          = Column(String(64), nullable=True)
+    sso_subject           = Column(String(512), nullable=True)
+    is_active             = Column(Boolean, nullable=False, default=True)
+    created_at            = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at            = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_login_at         = Column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<User username={self.username!r} role={self.role!r}>"
