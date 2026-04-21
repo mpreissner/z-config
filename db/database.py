@@ -93,6 +93,7 @@ def _migrate(engine) -> None:
         "ALTER TABLE zpa_resources ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT 'tenant'",
         "ALTER TABLE zpa_resources ADD COLUMN candidate_status VARCHAR(32)",
         "ALTER TABLE users ADD COLUMN last_login_at DATETIME",
+        "ALTER TABLE tenant_configs ADD COLUMN last_validation_error TEXT",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

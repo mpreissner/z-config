@@ -55,6 +55,9 @@ ENV ZSCALER_DB_PATH=/data/db/zscaler.db
 ENV ZS_PLUGIN_DIR=/data/plugins
 ENV PYTHONUSERBASE=/data/plugins
 ENV PYTHONUNBUFFERED=1
+# Point HOME at the persistent DB volume so the Fernet key file
+# (~/.config/zs-config/secret.key) survives container restarts and image upgrades.
+ENV HOME=/data/db
 
 EXPOSE 8000
 

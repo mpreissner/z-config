@@ -30,6 +30,7 @@ class TenantConfig(Base):
     zia_cloud = Column(String(255), nullable=True)          # e.g. "zscalertwo.net"; from orgInformation.cloudName
     zia_subscriptions = Column(JSON, nullable=True)         # full response from GET /subscriptions
     notes = Column(Text, nullable=True)
+    last_validation_error = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     govcloud = Column(Boolean, default=False, nullable=False)
     zpa_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
