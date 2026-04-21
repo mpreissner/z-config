@@ -21,7 +21,7 @@ def require_auth(authorization: Optional[str] = Header(default=None)) -> AuthUse
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return AuthUser(
-        user_id=payload["sub"],
+        user_id=int(payload["sub"]),
         username=payload["username"],
         role=payload["role"],
         force_password_change=payload.get("fpc", False),

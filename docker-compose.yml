@@ -4,9 +4,8 @@ services:
     image: zs-config:latest
     restart: unless-stopped
     ports:
-      # Bind to localhost only — no auth is implemented yet.
-      # Change to "0.0.0.0:8000:8000" deliberately for a server deployment
-      # once ALLOWED_ORIGINS is locked down and auth is added.
+      # Bound to localhost for local dev. Change to "0.0.0.0:8000:8000"
+      # for a server deployment (set ALLOWED_ORIGINS accordingly).
       - "127.0.0.1:8000:8000"
     volumes:
       - zs-db:/data/db
@@ -16,6 +15,7 @@ services:
       ZSCALER_DB_PATH: /data/db/zscaler.db
       ZS_PLUGIN_DIR: /data/plugins
       PYTHONUSERBASE: /data/plugins
+      JWT_SECRET: ${JWT_SECRET}
       # Lock down CORS in production — comma-separated list of allowed origins
       # ALLOWED_ORIGINS: "https://your-host.example.com"
       # Optional: supply a corporate CA bundle

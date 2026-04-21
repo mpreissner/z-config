@@ -76,7 +76,7 @@ def refresh_token(response: Response, refresh_token: Optional[str] = Cookie(defa
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
     with get_session() as session:
-        user = session.query(User).filter_by(id=payload["sub"], is_active=True).first()
+        user = session.query(User).filter_by(id=int(payload["sub"]), is_active=True).first()
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         access = issue_access_token(user)
