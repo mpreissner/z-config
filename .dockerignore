@@ -1,0 +1,31 @@
+# Node dependencies and Vite cache (built inside Docker, not from host)
+web/node_modules/
+web/.vite/
+
+# Frontend build output (built inside Docker stage 1, not from host)
+api/static/
+
+# Database files
+*.db
+
+# Secrets
+.env
+*.env
+
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Reference / internal notes
+reference/
+notes/
+
+# Git history
+.git/
+
+# Claude
+.claude/

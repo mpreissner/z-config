@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  zs-config:
+    build: .
+    image: zs-config:latest
+    restart: unless-stopped
+    ports:
+      # Bind to localhost only — no auth is implemented yet.
+      # Change to "0.0.0.0:8000:8000" deliberately for a server deployment
+      # once ALLOWED_ORIGINS is locked down and auth is added.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - zs-db:/data/db
+      - zs-plugins:/data/plugins
+    environment:
+      ZS_CONTAINER_MODE: "1"
+      ZSCALER_DB_PATH: /data/db/zscaler.db
+      ZS_PLUGIN_DIR: /data/plugins
+      PYTHONUSERBASE: /data/plugins
+      # Lock down CORS in production — comma-separated list of allowed origins
+      # ALLOWED_ORIGINS: "https://your-host.example.com"
+      # Optional: supply a corporate CA bundle
+      # REQUESTS_CA_BUNDLE: /data/db/ca-bundle.pem
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  zs-db:
+  zs-plugins:
