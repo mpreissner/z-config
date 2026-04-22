@@ -2,7 +2,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
-from api.dependencies import require_admin, AuthUser
+from api.dependencies import require_admin, require_auth, check_tenant_access, AuthUser
 from lib.conf_writer import build_zidentity_url, GOVCLOUD_ONEAPI_URL
 
 COMMERCIAL_ONEAPI_URL = "https://api.zsapi.net"
@@ -66,19 +66,30 @@ class TenantUpdate(BaseModel):
 
 
 @router.get("")
-def list_tenants(user: AuthUser = Depends(require_admin)):
+def list_tenants(user: AuthUser = Depends(require_auth)):
     from services.config_service import list_tenants as _list
-    return [_serialize(t) for t in _list()]
+    all_tenants = _list()
+    if user.role == "admin":
+        return [_serialize(t) for t in all_tenants]
+    from db.database import get_session
+    from db.models import UserTenantEntitlement
+    with get_session() as session:
+        entitled = {
+            row.tenant_id
+            for row in session.query(UserTenantEntitlement).filter_by(user_id=user.user_id).all()
+        }
+    return [_serialize(t) for t in all_tenants if t.id in entitled]
 
 
 @router.get("/{tenant_id}")
-def get_tenant(tenant_id: int, user: AuthUser = Depends(require_admin)):
+def get_tenant(tenant_id: int, user: AuthUser = Depends(require_auth)):
     from db.database import get_session
     from db.models import TenantConfig
     with get_session() as session:
         t = session.query(TenantConfig).filter_by(id=tenant_id, is_active=True).first()
     if not t:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    check_tenant_access(tenant_id, user)
     return _serialize(t)
 
 

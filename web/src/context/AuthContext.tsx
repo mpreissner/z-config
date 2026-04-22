@@ -57,6 +57,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setReady(true));
   }, [login]);
 
+  // Proactively refresh before the access token expires (at 90% of remaining TTL).
+  // Effect re-runs each time exp changes (i.e. after every successful refresh).
+  useEffect(() => {
+    if (!auth.user) return;
+    const remaining = auth.user.exp - Date.now() / 1000;
+    if (remaining <= 0) return;
+    const delay = Math.max(remaining * 0.9, 10) * 1000;
+    const timer = setTimeout(() => {
+      apiFetch<{ access_token: string }>("/api/v1/auth/refresh", { method: "POST" })
+        .then((r) => login(r.access_token))
+        .catch(() => logout());
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [auth.user?.exp, login, logout]);
+
   if (!ready) return null;
 
   return (

@@ -2,13 +2,13 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/Layout";
 import { PrivateRoute } from "./components/PrivateRoute";
 import TenantsPage from "./pages/TenantsPage";
+import TenantPage from "./pages/TenantPage";
 import AuditPage from "./pages/AuditPage";
-import ZiaPage from "./pages/ZiaPage";
-import ZpaPage from "./pages/ZpaPage";
 import LoginPage from "./pages/LoginPage";
 import ChangePasswordPage from "./pages/ChangePasswordPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import AdminEntitlementsPage from "./pages/AdminEntitlementsPage";
+import AdminSettingsPage from "./pages/AdminSettingsPage";
 import { useAuth } from "./context/AuthContext";
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
@@ -29,9 +29,10 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<Navigate to="/tenants" replace />} />
                 <Route path="/tenants" element={<TenantsPage />} />
+                <Route path="/tenants/:id" element={<TenantPage />} />
                 <Route path="/audit" element={<AuditPage />} />
-                <Route path="/zia/:tenant" element={<ZiaPage />} />
-                <Route path="/zpa/:tenant" element={<ZpaPage />} />
+                <Route path="/zia/:tenant" element={<Navigate to="/tenants" replace />} />
+                <Route path="/zpa/:tenant" element={<Navigate to="/tenants" replace />} />
                 <Route
                   path="/admin/users"
                   element={<AdminRoute><AdminUsersPage /></AdminRoute>}
@@ -39,6 +40,10 @@ export default function App() {
                 <Route
                   path="/admin/entitlements"
                   element={<AdminRoute><AdminEntitlementsPage /></AdminRoute>}
+                />
+                <Route
+                  path="/admin/settings"
+                  element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
                 />
               </Routes>
             </Layout>

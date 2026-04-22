@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, Link } from "react-router-dom";
 import {
   fetchTenants,
   createTenant,
@@ -431,7 +432,7 @@ function ValidationBadge({ tenant }: { tenant: Tenant }) {
   );
 }
 
-// ── Main page ────────────────────────────────────────────────────────────────
+// ── Kebab menu ───────────────────────────────────────────────────────────────
 
 type ModalState =
   | { type: "none" }
@@ -439,6 +440,127 @@ type ModalState =
   | { type: "edit"; tenant: Tenant }
   | { type: "delete"; tenant: Tenant }
   | { type: "import"; tenant: Tenant };
+
+function KebabMenu({
+  tenant,
+  onAction,
+}: {
+  tenant: Tenant;
+  onAction: (action: "import" | "edit" | "delete", t: Tenant) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        className="p-1 rounded hover:bg-gray-200 text-gray-500 hover:text-gray-700"
+        title="Actions"
+      >
+        <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+          <path d="M10 3a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm0 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm0 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3z" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-36 bg-white border border-gray-200 rounded-md shadow-lg z-20">
+          <button
+            onClick={(e) => { e.stopPropagation(); setOpen(false); onAction("import", tenant); }}
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Import
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); setOpen(false); onAction("edit", tenant); }}
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Edit
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); setOpen(false); onAction("delete", tenant); }}
+            className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Card view ────────────────────────────────────────────────────────────────
+
+function TenantCard({
+  tenant,
+  isAdmin,
+  onAction,
+}: {
+  tenant: Tenant;
+  isAdmin: boolean;
+  onAction: (action: "import" | "edit" | "delete", t: Tenant) => void;
+}) {
+  const navigate = useNavigate();
+
+  return (
+    <div
+      onClick={() => navigate(`/tenants/${tenant.id}`)}
+      className="relative bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md hover:border-zs-500 transition-all cursor-pointer"
+    >
+      {isAdmin && (
+        <div className="absolute top-3 right-3" onClick={(e) => e.stopPropagation()}>
+          <KebabMenu tenant={tenant} onAction={onAction} />
+        </div>
+      )}
+      <div className="pr-6 space-y-2">
+        <p className="font-semibold text-gray-900 text-sm">{tenant.name}</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <ValidationBadge tenant={tenant} />
+          {tenant.zia_cloud && (
+            <span className="font-mono text-xs text-gray-500">{tenant.zia_cloud}</span>
+          )}
+          {tenant.govcloud && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+              GovCloud
+            </span>
+          )}
+        </div>
+        {tenant.notes && (
+          <p className="text-xs text-gray-400 line-clamp-2">
+            {tenant.notes.length > 80 ? tenant.notes.slice(0, 80) + "…" : tenant.notes}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── View toggle icons ────────────────────────────────────────────────────────
+
+function GridIcon({ active }: { active: boolean }) {
+  return (
+    <svg className={`h-4 w-4 ${active ? "text-zs-600" : "text-gray-400"}`} fill="currentColor" viewBox="0 0 20 20">
+      <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 13a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+    </svg>
+  );
+}
+
+function ListIcon({ active }: { active: boolean }) {
+  return (
+    <svg className={`h-4 w-4 ${active ? "text-zs-600" : "text-gray-400"}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+    </svg>
+  );
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
 
 export default function TenantsPage() {
   const { data: tenants, isLoading, error } = useQuery({
@@ -450,18 +572,65 @@ export default function TenantsPage() {
   const [modal, setModal] = useState<ModalState>({ type: "none" });
   const closeModal = () => setModal({ type: "none" });
 
+  const [view, setView] = useState<"grid" | "list">(() => {
+    const stored = localStorage.getItem("tenants_view");
+    return stored === "list" ? "list" : "grid";
+  });
+  const [search, setSearch] = useState("");
+
+  function changeView(v: "grid" | "list") {
+    setView(v);
+    localStorage.setItem("tenants_view", v);
+  }
+
+  function handleAction(action: "import" | "edit" | "delete", t: Tenant) {
+    setModal({ type: action, tenant: t });
+  }
+
+  const filtered = (tenants ?? []).filter((t) =>
+    t.name.toLowerCase().includes(search.toLowerCase())
+  );
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-semibold text-gray-900">Tenants</h1>
-        {isAdmin && (
+        <div className="flex items-center gap-2">
           <button
-            onClick={() => setModal({ type: "create" })}
-            className="bg-zs-500 hover:bg-zs-600 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors"
+            onClick={() => changeView("grid")}
+            className={`p-1.5 rounded ${view === "grid" ? "bg-gray-100" : "hover:bg-gray-100"}`}
+            title="Grid view"
           >
-            Add Tenant
+            <GridIcon active={view === "grid"} />
           </button>
-        )}
+          <button
+            onClick={() => changeView("list")}
+            className={`p-1.5 rounded ${view === "list" ? "bg-gray-100" : "hover:bg-gray-100"}`}
+            title="List view"
+          >
+            <ListIcon active={view === "list"} />
+          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setModal({ type: "create" })}
+              className="ml-2 bg-zs-500 hover:bg-zs-600 text-white text-sm font-medium px-4 py-2 rounded-md transition-colors"
+            >
+              Add Tenant
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Search bar */}
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="Search tenants..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full sm:w-72 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+        />
       </div>
 
       {isLoading && <LoadingSpinner />}
@@ -470,7 +639,22 @@ export default function TenantsPage() {
           message={error instanceof Error ? error.message : "Failed to load tenants"}
         />
       )}
-      {tenants && (
+
+      {tenants && view === "grid" && (
+        <>
+          {filtered.length === 0 ? (
+            <p className="text-sm text-gray-500 py-8 text-center">No tenants found.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filtered.map((t) => (
+                <TenantCard key={t.id} tenant={t} isAdmin={isAdmin} onAction={handleAction} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {tenants && view === "list" && (
         <div className="overflow-hidden shadow ring-1 ring-black ring-opacity-5 rounded-lg">
           <table className="min-w-full divide-y divide-gray-300">
             <thead className="bg-gray-50">
@@ -486,17 +670,23 @@ export default function TenantsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 bg-white">
-              {tenants.length === 0 && (
+              {filtered.length === 0 && (
                 <tr>
                   <td colSpan={isAdmin ? 6 : 5} className="py-8 text-center text-sm text-gray-500">
-                    No tenants configured.
+                    No tenants found.
                   </td>
                 </tr>
               )}
-              {tenants.map((t) => (
+              {filtered.map((t) => (
                 <tr key={t.id} className="hover:bg-gray-50">
                   <td className="whitespace-nowrap py-3 pl-4 pr-3 text-sm font-medium text-gray-900">
-                    {t.name}
+                    <Link
+                      to={`/tenants/${t.id}`}
+                      className="text-zs-600 hover:text-zs-700 hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {t.name}
+                    </Link>
                     {t.notes && <p className="text-xs text-gray-400 font-normal">{t.notes}</p>}
                   </td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm text-gray-500">
@@ -513,26 +703,7 @@ export default function TenantsPage() {
                   </td>
                   {isAdmin && (
                     <td className="whitespace-nowrap px-3 py-3 text-sm">
-                      <div className="flex items-center gap-3">
-                        <button
-                          onClick={() => setModal({ type: "import", tenant: t })}
-                          className="text-indigo-600 hover:text-indigo-700 font-medium text-xs"
-                        >
-                          Import
-                        </button>
-                        <button
-                          onClick={() => setModal({ type: "edit", tenant: t })}
-                          className="text-zs-500 hover:text-zs-600 font-medium text-xs"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => setModal({ type: "delete", tenant: t })}
-                          className="text-red-600 hover:text-red-700 font-medium text-xs"
-                        >
-                          Delete
-                        </button>
-                      </div>
+                      <KebabMenu tenant={t} onAction={handleAction} />
                     </td>
                   )}
                 </tr>

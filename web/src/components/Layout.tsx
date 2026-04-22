@@ -4,18 +4,10 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchHealth } from "../api/system";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { useAuth } from "../context/AuthContext";
+import zLogo from "../assets/z-logo.jpg";
 
 interface LayoutProps {
   children: ReactNode;
-}
-
-function ZscalerMark() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="28" height="28" rx="6" fill="white" fillOpacity="0.15" />
-      <text x="5" y="21" fontFamily="Arial, sans-serif" fontWeight="bold" fontSize="18" fill="white">Z</text>
-    </svg>
-  );
 }
 
 function StatusIndicator() {
@@ -46,6 +38,7 @@ const baseNavItems = [
 const adminNavItems = [
   { to: "/admin/users", label: "Users" },
   { to: "/admin/entitlements", label: "Tenant Access" },
+  { to: "/admin/settings", label: "Settings" },
 ];
 
 export default function Layout({ children }: LayoutProps) {
@@ -61,7 +54,7 @@ export default function Layout({ children }: LayoutProps) {
     <div className="flex h-screen bg-gray-50">
       <aside className="w-56 bg-zs-500 flex flex-col">
         <div className="flex items-center gap-3 px-4 py-5">
-          <ZscalerMark />
+          <img src={zLogo} alt="Z" className="h-8 w-8 rounded-md object-cover" />
           <span className="text-lg font-semibold text-white tracking-tight">zs-config</span>
         </div>
         <nav className="flex-1 px-2 space-y-1">

@@ -2,6 +2,7 @@ import { useState, FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { login } from "../api/auth";
+import zLogo from "../assets/z-logo.jpg";
 
 export default function LoginPage() {
   const { login: setToken } = useAuth();
@@ -34,10 +35,7 @@ export default function LoginPage() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="w-full max-w-sm">
         <div className="bg-zs-500 rounded-t-xl px-8 py-6 flex items-center gap-3">
-          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-            <rect width="32" height="32" rx="8" fill="white" fillOpacity="0.15" />
-            <text x="6" y="24" fontFamily="Arial, sans-serif" fontWeight="bold" fontSize="22" fill="white">Z</text>
-          </svg>
+          <img src={zLogo} alt="Z" className="h-9 w-9 rounded-lg object-cover" />
           <div>
             <div className="text-white font-bold text-lg leading-none">zs-config</div>
             <div className="text-blue-200 text-xs">Zscaler Management</div>

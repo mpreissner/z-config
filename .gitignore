@@ -49,3 +49,6 @@ api/static/*
 web/node_modules/
 web/dist/
 web/.vite/
+
+# Other
+scripts/dump_tenant_creds.py
