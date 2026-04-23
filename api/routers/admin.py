@@ -1,12 +1,17 @@
+import os
+import shutil
+import sys
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 
 from api.dependencies import require_admin, AuthUser
 from api.auth_utils import hash_password
-from db.database import get_session
+from db.database import get_session, init_db, get_db_url
 from db.models import User, UserTenantEntitlement, TenantConfig
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
@@ -198,3 +203,70 @@ def delete_entitlement(entitlement_id: int, _: AuthUser = Depends(require_admin)
         if not ent:
             raise HTTPException(status_code=404, detail="Entitlement not found")
         session.delete(ent)
+
+
+# ── Database Import ───────────────────────────────────────────────────────────
+
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+@router.post("/import-db")
+async def import_database(
+    db_file: UploadFile = File(...),
+    key_file: UploadFile = File(default=None),
+    _: AuthUser = Depends(require_admin),
+):
+    """Replace the running database and (optionally) the encryption key.
+
+    Accepts multipart/form-data with:
+      - db_file  — SQLite database exported from a TUI zs-config install
+      - key_file — secret.key Fernet key file (optional; omit if tenant secrets
+                   were not encrypted or you are importing into a fresh install
+                   that has not yet encrypted anything)
+
+    The endpoint writes the new files and reinitialises the SQLAlchemy engine.
+    A page reload is required after import.
+    """
+    db_path_str = os.environ.get("ZSCALER_DB_PATH")
+    if not db_path_str:
+        raise HTTPException(status_code=400, detail="ZSCALER_DB_PATH is not set; cannot determine where to write the database")
+
+    db_path = Path(db_path_str)
+    key_dir = db_path.parent
+
+    # Read and validate the SQLite file
+    db_bytes = await db_file.read()
+    if len(db_bytes) < 16 or db_bytes[:16] != _SQLITE_MAGIC:
+        raise HTTPException(status_code=422, detail="Uploaded file is not a valid SQLite database")
+
+    # Write atomically: write to a temp file first, then replace
+    tmp_db = db_path.with_suffix(".tmp")
+    try:
+        tmp_db.write_bytes(db_bytes)
+        if sys.platform != "win32":
+            tmp_db.chmod(0o600)
+        shutil.move(str(tmp_db), str(db_path))
+    except Exception as exc:
+        tmp_db.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to write database: {exc}")
+
+    # Write key file if provided
+    if key_file is not None:
+        key_bytes = await key_file.read()
+        key_str = key_bytes.decode().strip()
+        # Validate — must be a 44-char base64url string (Fernet key)
+        if len(key_str) != 44:
+            raise HTTPException(status_code=422, detail="Key file does not look like a valid Fernet key (expected 44 characters)")
+        key_out = key_dir / "secret.key"
+        key_out.write_text(key_str)
+        if sys.platform != "win32":
+            key_out.chmod(0o600)
+
+    # Reinitialise the database engine against the new file
+    try:
+        init_db()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Database reinitialisation failed: {exc}")
+
+    return {"ok": True, "message": "Database imported successfully. Reload the page to continue."}
+

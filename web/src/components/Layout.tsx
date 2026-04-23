@@ -126,46 +126,61 @@ export default function Layout({ children }: LayoutProps) {
         <nav className="flex-1 px-2 overflow-y-auto space-y-1">
           {/* Tenants section */}
           <div>
-            <div className="flex items-center rounded-md text-sm font-medium text-blue-100 hover:bg-zs-600 hover:text-white transition-colors">
+            {isAdmin ? (
               <NavLink
                 to="/tenants"
                 className={({ isActive }) =>
-                  `flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                    isActive ? "bg-white text-zs-500 font-semibold" : ""
+                  `block px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                    isActive ? "bg-white text-zs-500 font-semibold" : "text-blue-100 hover:bg-zs-600 hover:text-white"
                   }`
                 }
               >
                 Tenants
               </NavLink>
-              <button
-                onClick={() => setTenantsOpen((v) => !v)}
-                className="px-2 py-2 rounded-r-md hover:bg-zs-600 transition-colors"
-                title={tenantsOpen ? "Collapse" : "Expand"}
-              >
-                <svg
-                  className={`h-3.5 w-3.5 transition-transform ${tenantsOpen ? "" : "-rotate-90"}`}
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-            </div>
-            {tenantsOpen && (
-              <div className="mt-0.5 ml-2 space-y-0.5">
-                {sorted.map((tenant) => (
-                  <TenantNavItem
-                    key={tenant.id}
-                    tenant={tenant}
-                    isActive={activeTenantId === tenant.id}
-                    onClick={() => handleTenantClick(tenant)}
-                  />
-                ))}
-                {sorted.length === 0 && (
-                  <p className="px-3 py-1 text-xs text-blue-300 italic">No tenants</p>
+            ) : (
+              <>
+                <div className="flex items-center rounded-md text-sm font-medium text-blue-100 hover:bg-zs-600 hover:text-white transition-colors">
+                  <NavLink
+                    to="/tenants"
+                    className={({ isActive }) =>
+                      `flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                        isActive ? "bg-white text-zs-500 font-semibold" : ""
+                      }`
+                    }
+                  >
+                    Tenants
+                  </NavLink>
+                  <button
+                    onClick={() => setTenantsOpen((v) => !v)}
+                    className="px-2 py-2 rounded-r-md hover:bg-zs-600 transition-colors"
+                    title={tenantsOpen ? "Collapse" : "Expand"}
+                  >
+                    <svg
+                      className={`h-3.5 w-3.5 transition-transform ${tenantsOpen ? "" : "-rotate-90"}`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                </div>
+                {tenantsOpen && (
+                  <div className="mt-0.5 ml-2 space-y-0.5">
+                    {sorted.map((tenant) => (
+                      <TenantNavItem
+                        key={tenant.id}
+                        tenant={tenant}
+                        isActive={activeTenantId === tenant.id}
+                        onClick={() => handleTenantClick(tenant)}
+                      />
+                    ))}
+                    {sorted.length === 0 && (
+                      <p className="px-3 py-1 text-xs text-blue-300 italic">No tenants</p>
+                    )}
+                  </div>
                 )}
-              </div>
+              </>
             )}
           </div>
 

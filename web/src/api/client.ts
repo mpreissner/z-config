@@ -19,8 +19,9 @@ export function setTokenGetter(fn: () => string | null) {
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = _getToken?.();
+  const isFormData = init?.body instanceof FormData;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
     ...(init?.headers as Record<string, string> | undefined),
   };
   if (token) headers["Authorization"] = `Bearer ${token}`;

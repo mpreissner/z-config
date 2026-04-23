@@ -74,3 +74,10 @@ export function createEntitlement(user_id: number, tenant_id: number): Promise<E
 export function deleteEntitlement(id: number): Promise<void> {
   return apiFetch(`/api/v1/admin/entitlements/${id}`, { method: "DELETE" });
 }
+
+export function importDatabase(dbFile: File, keyFile?: File): Promise<{ ok: boolean; message: string }> {
+  const form = new FormData();
+  form.append("db_file", dbFile);
+  if (keyFile) form.append("key_file", keyFile);
+  return apiFetch("/api/v1/admin/import-db", { method: "POST", body: form });
+}

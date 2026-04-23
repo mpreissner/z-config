@@ -10,7 +10,7 @@ const PAGE_SIZE = 25;
 export default function AuditPage() {
   const [page, setPage] = useState(0);
 
-  const { data: entries, isLoading, error } = useQuery({
+  const { data: entries, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["audit", { limit: 500 }],
     queryFn: () => fetchAuditLog({ limit: 500 }),
   });
@@ -22,7 +22,25 @@ export default function AuditPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-gray-900 mb-6">Audit Log</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold text-gray-900">Audit Log</h1>
+        <button
+          onClick={() => { setPage(0); refetch(); }}
+          disabled={isFetching}
+          title="Refresh"
+          className="p-2 rounded-md text-gray-500 hover:text-gray-700 hover:bg-gray-100 disabled:opacity-40 transition-colors"
+        >
+          <svg
+            className={`h-5 w-5 ${isFetching ? "animate-spin" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
+      </div>
 
       {isLoading && <LoadingSpinner />}
       {error && (

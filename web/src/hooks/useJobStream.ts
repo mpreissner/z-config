@@ -22,7 +22,14 @@ export function useJobStream<T = unknown>(jobId: string | null) {
   const [streamError, setStreamError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId) {
+      setProgressEvents([]);
+      setLatestByPhase({});
+      setJobStatus("idle");
+      setResult(null);
+      setStreamError(null);
+      return;
+    }
     setJobStatus("running");
     setProgressEvents([]);
     setLatestByPhase({});

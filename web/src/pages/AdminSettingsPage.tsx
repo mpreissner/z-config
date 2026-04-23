@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchSettings, patchSettings, SystemSettings } from "../api/system";
+import { importDatabase } from "../api/admin";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
 
@@ -348,6 +349,87 @@ export default function AdminSettingsPage() {
           </div>
         </FieldRow>
       </SectionCard>
+
+      {/* ── Import Database ───────────────────────────────────────────────── */}
+      <ImportDatabaseCard />
     </div>
+  );
+}
+
+// ── Import Database card ──────────────────────────────────────────────────────
+
+function ImportDatabaseCard() {
+  const [dbFile, setDbFile] = useState<File | null>(null);
+  const [keyFile, setKeyFile] = useState<File | null>(null);
+  const [result, setResult] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const dbRef = useRef<HTMLInputElement>(null);
+  const keyRef = useRef<HTMLInputElement>(null);
+
+  async function handleImport() {
+    if (!dbFile) return;
+    setLoading(true);
+    setResult(null);
+    setErr(null);
+    try {
+      const res = await importDatabase(dbFile, keyFile ?? undefined);
+      setResult(res.message);
+      setDbFile(null);
+      setKeyFile(null);
+      if (dbRef.current) dbRef.current.value = "";
+      if (keyRef.current) keyRef.current.value = "";
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Import failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <SectionCard title="Import Database">
+      <p className="text-xs text-gray-500">
+        Replace the running database with one exported from a local TUI-based zs-config install.
+        Use the <code className="bg-gray-100 px-1 rounded text-xs font-mono">scripts/export_tui_db.sh</code> script
+        to export the database and encryption key from a local install.
+      </p>
+      <FieldRow
+        label="Database file"
+        hint="SQLite .db file exported from a local install."
+      >
+        <input
+          ref={dbRef}
+          type="file"
+          accept=".db,.sqlite,.sqlite3"
+          onChange={(e) => setDbFile(e.target.files?.[0] ?? null)}
+          className="text-sm text-gray-600 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-gray-100 file:text-gray-600 hover:file:bg-gray-200"
+        />
+        {dbFile && <p className="text-xs text-gray-400 mt-1">{dbFile.name} ({(dbFile.size / 1024).toFixed(1)} KB)</p>}
+      </FieldRow>
+      <FieldRow
+        label="Encryption key"
+        hint="secret.key file — required if the exported database contains encrypted tenant credentials."
+      >
+        <input
+          ref={keyRef}
+          type="file"
+          accept=".key,.txt"
+          onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)}
+          className="text-sm text-gray-600 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-gray-100 file:text-gray-600 hover:file:bg-gray-200"
+        />
+        {keyFile && <p className="text-xs text-gray-400 mt-1">{keyFile.name}</p>}
+      </FieldRow>
+      {err && <p className="text-xs text-red-600">{err}</p>}
+      {result && <p className="text-xs text-green-700 font-medium">{result}</p>}
+      <div>
+        <button
+          onClick={handleImport}
+          disabled={!dbFile || loading}
+          className="px-4 py-2 text-sm font-medium rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50 transition-colors"
+        >
+          {loading ? "Importing…" : "Import Database"}
+        </button>
+      </div>
+    </SectionCard>
   );
 }
