@@ -17,11 +17,10 @@ export default function LoginPage() {
 
   function postLogin(accessToken: string, forcePasswordChange: boolean, mfaEnrollRequired?: boolean) {
     setToken(accessToken);
-    if (mfaEnrollRequired) {
-      navigate("/mfa-enroll");
-    } else {
+    if (!mfaEnrollRequired) {
       navigate(forcePasswordChange ? "/change-password" : "/");
     }
+    // mfaEnrollRequired: token is stored, MfaEnrollModal renders automatically via App
   }
 
   async function handleSubmit(e: FormEvent) {

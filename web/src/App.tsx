@@ -7,7 +7,7 @@ import TenantWorkspacePage from "./pages/TenantWorkspacePage";
 import AuditPage from "./pages/AuditPage";
 import LoginPage from "./pages/LoginPage";
 import ChangePasswordPage from "./pages/ChangePasswordPage";
-import MfaEnrollPage from "./pages/MfaEnrollPage";
+import MfaEnrollModal from "./components/MfaEnrollModal";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import AdminEntitlementsPage from "./pages/AdminEntitlementsPage";
 import AdminSettingsPage from "./pages/AdminSettingsPage";
@@ -35,50 +35,54 @@ function RootRedirect() {
 }
 
 export default function App() {
+  const { mfaEnrollRequired } = useAuth();
+
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/change-password" element={<ChangePasswordPage />} />
-      <Route path="/mfa-enroll" element={<MfaEnrollPage />} />
-      <Route
-        path="/*"
-        element={
-          <PrivateRoute>
-            <Layout>
-              <Routes>
-                <Route path="/" element={<RootRedirect />} />
-                <Route path="/tenants" element={<TenantsPage />} />
-                <Route path="/tenants/:id" element={<Navigate to="/tenants" replace />} />
-                <Route path="/profile" element={<ProfilePage />} />
-                <Route path="/audit" element={<AuditPage />} />
-                {/* Tenant workspace routes */}
-                <Route path="/tenant/:id" element={<Navigate to="zia" replace />} />
-                <Route path="/tenant/:id/zia" element={<TenantWorkspacePage />} />
-                <Route path="/tenant/:id/zpa" element={<TenantWorkspacePage />} />
-                <Route path="/tenant/:id/zdx" element={<TenantWorkspacePage />} />
-                <Route path="/tenant/:id/zcc" element={<TenantWorkspacePage />} />
-                <Route path="/tenant/:id/zid" element={<TenantWorkspacePage />} />
-                {/* Legacy redirects */}
-                <Route path="/zia/:tenant" element={<Navigate to="/tenants" replace />} />
-                <Route path="/zpa/:tenant" element={<Navigate to="/tenants" replace />} />
-                {/* Admin routes */}
-                <Route
-                  path="/admin/users"
-                  element={<AdminRoute><AdminUsersPage /></AdminRoute>}
-                />
-                <Route
-                  path="/admin/entitlements"
-                  element={<AdminRoute><AdminEntitlementsPage /></AdminRoute>}
-                />
-                <Route
-                  path="/admin/settings"
-                  element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
-                />
-              </Routes>
-            </Layout>
-          </PrivateRoute>
-        }
-      />
-    </Routes>
+    <>
+      {mfaEnrollRequired && <MfaEnrollModal />}
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/change-password" element={<ChangePasswordPage />} />
+        <Route
+          path="/*"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <Routes>
+                  <Route path="/" element={<RootRedirect />} />
+                  <Route path="/tenants" element={<TenantsPage />} />
+                  <Route path="/tenants/:id" element={<Navigate to="/tenants" replace />} />
+                  <Route path="/profile" element={<ProfilePage />} />
+                  <Route path="/audit" element={<AuditPage />} />
+                  {/* Tenant workspace routes */}
+                  <Route path="/tenant/:id" element={<Navigate to="zia" replace />} />
+                  <Route path="/tenant/:id/zia" element={<TenantWorkspacePage />} />
+                  <Route path="/tenant/:id/zpa" element={<TenantWorkspacePage />} />
+                  <Route path="/tenant/:id/zdx" element={<TenantWorkspacePage />} />
+                  <Route path="/tenant/:id/zcc" element={<TenantWorkspacePage />} />
+                  <Route path="/tenant/:id/zid" element={<TenantWorkspacePage />} />
+                  {/* Legacy redirects */}
+                  <Route path="/zia/:tenant" element={<Navigate to="/tenants" replace />} />
+                  <Route path="/zpa/:tenant" element={<Navigate to="/tenants" replace />} />
+                  {/* Admin routes */}
+                  <Route
+                    path="/admin/users"
+                    element={<AdminRoute><AdminUsersPage /></AdminRoute>}
+                  />
+                  <Route
+                    path="/admin/entitlements"
+                    element={<AdminRoute><AdminEntitlementsPage /></AdminRoute>}
+                  />
+                  <Route
+                    path="/admin/settings"
+                    element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
+                  />
+                </Routes>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+      </Routes>
+    </>
   );
 }
