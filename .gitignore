@@ -52,4 +52,3 @@ web/.vite/
 
 # Other
 scripts/dump_tenant_creds.py
-scripts/export_tui_db.sh
