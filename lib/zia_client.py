@@ -159,7 +159,7 @@ class ZIAClient:
     def get_url_category(self, category_id: str) -> Dict:
         if self._govcloud:
             return self.zia_get(f"/zia/api/v1/urlCategories/{category_id}")
-        result, resp, err = self._sdk.zia.url_categories.get_url_category(category_id)
+        result, resp, err = self._sdk.zia.url_categories.get_category(category_id)
         return _to_dict(_unwrap(result, resp, err))
 
     def create_url_category(self, config: Dict) -> Dict:
@@ -666,17 +666,12 @@ class ZIAClient:
     # ------------------------------------------------------------------
 
     def get_url_filtering_rule(self, rule_id: str) -> Dict:
-        if self._govcloud:
-            return self.zia_get(f"/zia/api/v1/urlFilteringRules/{rule_id}")
-        result, resp, err = self._sdk.zia.url_filtering.get_rule(rule_id)
-        return _to_dict(_unwrap(result, resp, err))
+        # Always use direct HTTP — returns camelCase JSON from the API
+        return self.zia_get(f"/zia/api/v1/urlFilteringRules/{rule_id}")
 
     def update_url_filtering_rule(self, rule_id: str, config: Dict) -> bool:
-        if self._govcloud:
-            self.zia_put(f"/zia/api/v1/urlFilteringRules/{rule_id}", config)
-            return True
-        result, resp, err = self._sdk.zia.url_filtering.update_rule(rule_id, **config)
-        _unwrap(result, resp, err)
+        # Always use direct HTTP with the camelCase config dict
+        self.zia_put(f"/zia/api/v1/urlFilteringRules/{rule_id}", config)
         return True
 
     # ------------------------------------------------------------------
@@ -690,7 +685,7 @@ class ZIAClient:
         if self._govcloud:
             return self.zia_put(f"/zia/api/v1/urlCategories/{category_id}", {**cat, "urls": merged})
         result, resp, err = self._sdk.zia.url_categories.update_url_category(
-            category_id, urls=merged
+            category_id, configured_name=cat.get("configured_name"), urls=merged
         )
         return _to_dict(_unwrap(result, resp, err))
 
@@ -702,7 +697,7 @@ class ZIAClient:
         if self._govcloud:
             return self.zia_put(f"/zia/api/v1/urlCategories/{category_id}", {**cat, "urls": updated})
         result, resp, err = self._sdk.zia.url_categories.update_url_category(
-            category_id, urls=updated
+            category_id, configured_name=cat.get("configured_name"), urls=updated
         )
         return _to_dict(_unwrap(result, resp, err))
 

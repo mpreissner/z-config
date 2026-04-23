@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from api.schemas.zpa import CertificateRotateRequest
-from api.dependencies import require_auth, require_admin, AuthUser
+from api.dependencies import require_auth, AuthUser
 
 router = APIRouter()
 
@@ -50,14 +50,14 @@ def list_certificates(tenant: str, user: AuthUser = Depends(require_auth)):
 
 
 @router.delete("/{tenant}/certificates/{cert_id}")
-def delete_certificate(tenant: str, cert_id: str, user: AuthUser = Depends(require_admin)):
+def delete_certificate(tenant: str, cert_id: str, user: AuthUser = Depends(require_auth)):
     """Delete a certificate by ID."""
     success = _get_service(tenant, user).delete_certificate(cert_id)
     return {"deleted": success}
 
 
 @router.post("/{tenant}/certificates/rotate")
-def rotate_certificate(tenant: str, req: CertificateRotateRequest, user: AuthUser = Depends(require_admin)):
+def rotate_certificate(tenant: str, req: CertificateRotateRequest, user: AuthUser = Depends(require_auth)):
     """Certificate rotation is not supported via the web API. Use the CLI."""
     raise HTTPException(
         status_code=400,
@@ -80,17 +80,17 @@ def get_application(tenant: str, app_id: str, user: AuthUser = Depends(require_a
 
 
 @router.post("/{tenant}/applications", status_code=201)
-def create_application(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def create_application(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).create_application(**body)
 
 
 @router.put("/{tenant}/applications/{app_id}")
-def update_application(tenant: str, app_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def update_application(tenant: str, app_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).update_application(app_id, body)
 
 
 @router.delete("/{tenant}/applications/{app_id}")
-def delete_application(tenant: str, app_id: str, user: AuthUser = Depends(require_admin)):
+def delete_application(tenant: str, app_id: str, user: AuthUser = Depends(require_auth)):
     success = _get_service(tenant, user).delete_application(app_id, app_name=app_id)
     return {"deleted": success}
 
@@ -104,7 +104,7 @@ def patch_application_enabled(
     tenant: str,
     app_id: str,
     body: ApplicationEnabledPatch,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_auth),
 ):
     return _get_service(tenant, user).set_application_enabled(app_id, body.enabled)
 

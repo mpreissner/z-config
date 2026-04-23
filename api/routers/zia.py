@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from api.schemas.zia import UrlLookupRequest
-from api.dependencies import require_auth, require_admin, AuthUser
+from api.dependencies import require_auth, AuthUser
 
 router = APIRouter()
 
@@ -44,7 +44,7 @@ def get_activation_status(tenant: str, user: AuthUser = Depends(require_auth)):
 
 
 @router.post("/{tenant}/activation/activate")
-def activate(tenant: str, user: AuthUser = Depends(require_admin)):
+def activate(tenant: str, user: AuthUser = Depends(require_auth)):
     """Activate all pending ZIA configuration changes."""
     try:
         return _get_service(tenant, user).activate()
@@ -79,6 +79,16 @@ def url_lookup(tenant: str, req: UrlLookupRequest, user: AuthUser = Depends(requ
 def list_url_filtering_rules(tenant: str, user: AuthUser = Depends(require_auth)):
     """List all URL filtering rules."""
     return _get_service(tenant, user).list_url_filtering_rules()
+
+
+@router.get("/{tenant}/url-filtering-rules/{rule_id}")
+def get_url_filtering_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    """Get a single URL filtering rule by ID."""
+    try:
+        svc = _get_service(tenant, user)
+        return svc.client.get_url_filtering_rule(rule_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ------------------------------------------------------------------
@@ -134,7 +144,7 @@ class DenylistUpdateRequest(BaseModel):
 
 
 @router.put("/{tenant}/allowlist")
-def update_allowlist(tenant: str, body: AllowlistUpdateRequest, user: AuthUser = Depends(require_admin)):
+def update_allowlist(tenant: str, body: AllowlistUpdateRequest, user: AuthUser = Depends(require_auth)):
     """Replace the ZIA allowlist."""
     try:
         return _get_service(tenant, user).update_allowlist(body.whitelistUrls)
@@ -143,7 +153,7 @@ def update_allowlist(tenant: str, body: AllowlistUpdateRequest, user: AuthUser =
 
 
 @router.put("/{tenant}/denylist")
-def update_denylist(tenant: str, body: DenylistUpdateRequest, user: AuthUser = Depends(require_admin)):
+def update_denylist(tenant: str, body: DenylistUpdateRequest, user: AuthUser = Depends(require_auth)):
     """Replace the ZIA denylist."""
     try:
         return _get_service(tenant, user).update_denylist(body.blacklistUrls)
@@ -165,7 +175,7 @@ def get_url_category(tenant: str, category_id: str, user: AuthUser = Depends(req
 
 
 @router.post("/{tenant}/url-categories")
-def create_url_category(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def create_url_category(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     """Create a custom URL category."""
     try:
         return _get_service(tenant, user).create_url_category(body)
@@ -174,10 +184,32 @@ def create_url_category(tenant: str, body: Dict[str, Any], user: AuthUser = Depe
 
 
 @router.put("/{tenant}/url-categories/{category_id}")
-def update_url_category(tenant: str, category_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def update_url_category(tenant: str, category_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     """Update a custom URL category."""
     try:
         return _get_service(tenant, user).update_url_category(category_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CategoryUrlsRequest(BaseModel):
+    urls: List[str]
+
+
+@router.post("/{tenant}/url-categories/{category_id}/urls")
+def add_urls_to_category(tenant: str, category_id: str, body: CategoryUrlsRequest, user: AuthUser = Depends(require_auth)):
+    """Add URLs to a custom URL category."""
+    try:
+        return _get_service(tenant, user).add_urls_to_category(category_id, body.urls)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{tenant}/url-categories/{category_id}/urls")
+def remove_urls_from_category(tenant: str, category_id: str, body: CategoryUrlsRequest, user: AuthUser = Depends(require_auth)):
+    """Remove URLs from a custom URL category."""
+    try:
+        return _get_service(tenant, user).remove_urls_from_category(category_id, body.urls)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -187,7 +219,7 @@ def update_url_category(tenant: str, category_id: str, body: Dict[str, Any], use
 # ------------------------------------------------------------------
 
 @router.post("/{tenant}/url-filtering-rules")
-def create_url_filtering_rule(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def create_url_filtering_rule(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     """Create a URL filtering rule."""
     try:
         return _get_service(tenant, user).create_url_filtering_rule(body)
@@ -196,7 +228,7 @@ def create_url_filtering_rule(tenant: str, body: Dict[str, Any], user: AuthUser 
 
 
 @router.put("/{tenant}/url-filtering-rules/{rule_id}")
-def update_url_filtering_rule(tenant: str, rule_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def update_url_filtering_rule(tenant: str, rule_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     """Update a URL filtering rule."""
     try:
         return _get_service(tenant, user).update_url_filtering_rule(rule_id, body)
@@ -205,7 +237,7 @@ def update_url_filtering_rule(tenant: str, rule_id: str, body: Dict[str, Any], u
 
 
 @router.delete("/{tenant}/url-filtering-rules/{rule_id}")
-def delete_url_filtering_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_admin)):
+def delete_url_filtering_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
     """Delete a URL filtering rule."""
     try:
         _get_service(tenant, user).delete_url_filtering_rule(rule_id, rule_name="")
@@ -220,13 +252,12 @@ class RuleStateRequest(BaseModel):
 
 @router.patch("/{tenant}/url-filtering-rules/{rule_id}/state")
 def patch_url_filtering_rule_state(
-    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_admin)
+    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
 ):
     """Toggle the enabled/disabled state of a URL filtering rule."""
     try:
         svc = _get_service(tenant, user)
-        from lib.zia_client import ZIAClient as _ZIAClient  # noqa: F401 — ensure client is importable
-        rule = svc.client.get_url_filtering_rule(rule_id) if hasattr(svc, "client") else {}
+        rule = svc.client.get_url_filtering_rule(rule_id)
         rule["state"] = body.state
         return svc.update_url_filtering_rule(rule_id, rule)
     except Exception as e:
@@ -247,7 +278,7 @@ def get_zia_user(tenant: str, user_id: str, user: AuthUser = Depends(require_aut
 
 
 @router.post("/{tenant}/users")
-def create_zia_user(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def create_zia_user(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     """Create a ZIA user."""
     try:
         return _get_service(tenant, user).create_user(body)
@@ -256,7 +287,7 @@ def create_zia_user(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(
 
 
 @router.put("/{tenant}/users/{user_id}")
-def update_zia_user(tenant: str, user_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_admin)):
+def update_zia_user(tenant: str, user_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
     """Update a ZIA user."""
     try:
         return _get_service(tenant, user).update_user(user_id, body)
@@ -265,7 +296,7 @@ def update_zia_user(tenant: str, user_id: str, body: Dict[str, Any], user: AuthU
 
 
 @router.delete("/{tenant}/users/{user_id}")
-def delete_zia_user(tenant: str, user_id: str, user: AuthUser = Depends(require_admin)):
+def delete_zia_user(tenant: str, user_id: str, user: AuthUser = Depends(require_auth)):
     """Delete a ZIA user."""
     try:
         _get_service(tenant, user).delete_user(user_id)
@@ -285,7 +316,7 @@ def list_firewall_rules(tenant: str, user: AuthUser = Depends(require_auth)):
 
 @router.patch("/{tenant}/firewall-rules/{rule_id}/state")
 def patch_firewall_rule_state(
-    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_admin)
+    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
 ):
     try:
         return _get_service(tenant, user).toggle_firewall_rule(rule_id, body.state)
@@ -304,7 +335,7 @@ def list_ssl_inspection_rules(tenant: str, user: AuthUser = Depends(require_auth
 
 @router.patch("/{tenant}/ssl-inspection-rules/{rule_id}/state")
 def patch_ssl_inspection_rule_state(
-    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_admin)
+    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
 ):
     try:
         return _get_service(tenant, user).toggle_ssl_inspection_rule(rule_id, body.state)

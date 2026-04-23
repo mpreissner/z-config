@@ -19,8 +19,12 @@ import {
   fetchActivationStatus,
   activateTenant,
   fetchUrlCategories,
+  fetchUrlCategoryDetail,
+  addUrlsToCategory,
+  removeUrlsFromCategory,
   lookupUrls,
   fetchUrlFilteringRules,
+  fetchUrlFilteringRule,
   patchUrlFilteringRuleState,
   fetchUsers,
   fetchLocations,
@@ -43,6 +47,7 @@ import {
   createSnapshot,
   deleteSnapshot,
   UrlCategory,
+  UrlCategoryDetail,
   UrlFilteringRule,
   ZiaUser,
   ZiaLocation,
@@ -107,7 +112,6 @@ import ErrorMessage from "../components/ErrorMessage";
 import Accordion from "../components/Accordion";
 import CopyButton from "../components/CopyButton";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { useAuth } from "../context/AuthContext";
 import { useActiveTenant } from "../context/ActiveTenantContext";
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -141,7 +145,6 @@ function ValidationBadge({ tenant }: { tenant: Tenant }) {
 
 function ActivationSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const qc = useQueryClient();
-  const { isAdmin } = useAuth();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-activation", tenantName],
@@ -169,21 +172,147 @@ function ActivationSection({ tenantName, isOpen }: { tenantName: string; isOpen:
       >
         {data.status}
       </span>
-      {isAdmin && (
-        <button
-          onClick={() => activateMut.mutate()}
-          disabled={activateMut.isPending}
-          className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
-        >
-          {activateMut.isPending ? "Activating..." : "Activate Now"}
-        </button>
-      )}
+      <button
+        onClick={() => activateMut.mutate()}
+        disabled={activateMut.isPending}
+        className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+      >
+        {activateMut.isPending ? "Activating..." : "Activate Now"}
+      </button>
       {activateMut.isError && (
         <span className="text-xs text-red-600">
           {activateMut.error instanceof Error ? activateMut.error.message : "Activation failed"}
         </span>
       )}
     </div>
+  );
+}
+
+function UrlCategoryRow({
+  tenantName,
+  category,
+}: {
+  tenantName: string;
+  category: UrlCategory;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [addInput, setAddInput] = useState("");
+  const qc = useQueryClient();
+  const isCustom = category.type === "URL_CATEGORY" && !!category.configuredName;
+
+  const detailQuery = useQuery({
+    queryKey: ["zia-url-category-detail", tenantName, category.id],
+    queryFn: () => fetchUrlCategoryDetail(tenantName, category.id),
+    enabled: expanded && isCustom,
+    staleTime: 60 * 1000,
+  });
+
+  const addMut = useMutation({
+    mutationFn: (urls: string[]) => addUrlsToCategory(tenantName, category.id, urls),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-url-category-detail", tenantName, category.id] });
+      setAddInput("");
+    },
+  });
+
+  const removeMut = useMutation({
+    mutationFn: (urls: string[]) => removeUrlsFromCategory(tenantName, category.id, urls),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-url-category-detail", tenantName, category.id] });
+    },
+  });
+
+  function handleAdd() {
+    const urls = addInput.split("\n").map((u) => u.trim()).filter(Boolean);
+    if (urls.length) addMut.mutate(urls);
+  }
+
+  const detail: UrlCategoryDetail | undefined = detailQuery.data;
+  const currentUrls: string[] = detail?.urls ?? [];
+
+  return (
+    <>
+      <tr
+        className={`${isCustom ? "cursor-pointer hover:bg-gray-50" : ""}`}
+        onClick={() => isCustom && setExpanded((x) => !x)}
+      >
+        <td className="px-3 py-2 font-mono text-xs text-gray-500">{category.id}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          {isCustom && (
+            <svg
+              className={`w-3 h-3 text-gray-400 flex-shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          )}
+          {category.name || category.configuredName || category.id}
+        </td>
+        <td className="px-3 py-2 text-gray-500">{isCustom ? "Custom" : category.type}</td>
+      </tr>
+      {expanded && isCustom && (
+        <tr>
+          <td colSpan={3} className="bg-gray-50 px-4 py-3">
+            {detailQuery.isLoading && <LoadingSpinner />}
+            {detailQuery.error && (
+              <ErrorMessage message={detailQuery.error instanceof Error ? detailQuery.error.message : "Failed to load"} />
+            )}
+            {detail && (
+              <div className="space-y-3">
+                <div className="text-xs text-gray-500 font-medium uppercase tracking-wide">
+                  URLs ({currentUrls.length})
+                </div>
+                {currentUrls.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {currentUrls.map((url) => (
+                      <span
+                        key={url}
+                        className="inline-flex items-center gap-1 bg-white border border-gray-200 rounded px-2 py-0.5 text-xs font-mono text-gray-700"
+                      >
+                        {url}
+                        <button
+                          onClick={() => removeMut.mutate([url])}
+                          disabled={removeMut.isPending}
+                          className="text-gray-400 hover:text-red-500 disabled:opacity-40 ml-0.5"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-400">No URLs in this category.</p>
+                )}
+                <div className="flex gap-2 pt-1">
+                  <textarea
+                    rows={2}
+                    placeholder="Add URLs, one per line..."
+                    value={addInput}
+                    onChange={(e) => setAddInput(e.target.value)}
+                    className="flex-1 border border-gray-300 rounded-md px-2 py-1 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                  />
+                  <button
+                    onClick={handleAdd}
+                    disabled={addMut.isPending || !addInput.trim()}
+                    className="self-end px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+                  >
+                    {addMut.isPending ? "Adding…" : "Add"}
+                  </button>
+                </div>
+                {(addMut.isError || removeMut.isError) && (
+                  <ErrorMessage
+                    message={
+                      (addMut.error instanceof Error ? addMut.error.message : null) ??
+                      (removeMut.error instanceof Error ? removeMut.error.message : "Operation failed")
+                    }
+                  />
+                )}
+              </div>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -201,9 +330,11 @@ function UrlCategoriesSection({ tenantName, isOpen }: { tenantName: string; isOp
   if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
   if (!data) return null;
 
-  const filtered = data.filter((c: UrlCategory) =>
-    c.name.toLowerCase().includes(filter.toLowerCase())
-  );
+  const q = filter.toLowerCase();
+  const filtered = data.filter((c: UrlCategory) => {
+    const displayName = (c.name || c.configuredName || c.id).toLowerCase();
+    return displayName.includes(q);
+  });
 
   return (
     <div className="space-y-3">
@@ -225,11 +356,7 @@ function UrlCategoriesSection({ tenantName, isOpen }: { tenantName: string; isOp
           </thead>
           <tbody className="divide-y divide-gray-100 bg-white">
             {filtered.map((c: UrlCategory) => (
-              <tr key={c.id}>
-                <td className="px-3 py-2 font-mono text-xs text-gray-500">{c.id}</td>
-                <td className="px-3 py-2 text-gray-900">{c.name}</td>
-                <td className="px-3 py-2 text-gray-500">{c.type}</td>
-              </tr>
+              <UrlCategoryRow key={c.id} tenantName={tenantName} category={c} />
             ))}
             {filtered.length === 0 && (
               <tr><td colSpan={3} className="px-3 py-4 text-center text-gray-400">No results</td></tr>
@@ -327,8 +454,98 @@ function StateToggle({
   );
 }
 
+function UrlFilteringRuleRow({
+  tenantName,
+  rule,
+  onToggle,
+  togglePending,
+}: {
+  tenantName: string;
+  rule: UrlFilteringRule;
+  onToggle: (id: number | string, next: string) => void;
+  togglePending: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const detailQuery = useQuery({
+    queryKey: ["zia-url-filtering-rule-detail", tenantName, rule.id],
+    queryFn: () => fetchUrlFilteringRule(tenantName, rule.id),
+    enabled: expanded,
+    staleTime: 60 * 1000,
+  });
+
+  const SKIP_KEYS = new Set(["id", "name", "order", "action", "state"]);
+  const extraFields = detailQuery.data
+    ? Object.entries(detailQuery.data).filter(([k, v]) => {
+        if (SKIP_KEYS.has(k)) return false;
+        if (v === null || v === undefined) return false;
+        if (Array.isArray(v) && v.length === 0) return false;
+        return true;
+      })
+    : [];
+
+  return (
+    <>
+      <tr
+        className="cursor-pointer hover:bg-gray-50"
+        onClick={() => setExpanded((x) => !x)}
+      >
+        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          <svg
+            className={`w-3 h-3 text-gray-400 flex-shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+          {rule.name}
+        </td>
+        <td className="px-3 py-2 text-gray-600">{rule.action}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle
+            ruleId={rule.id}
+            state={rule.state}
+            onToggle={onToggle}
+            pending={togglePending}
+          />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={4} className="bg-gray-50 px-4 py-3">
+            {detailQuery.isLoading && <LoadingSpinner />}
+            {detailQuery.error && (
+              <ErrorMessage message={detailQuery.error instanceof Error ? detailQuery.error.message : "Failed to load"} />
+            )}
+            {detailQuery.data && (
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
+                <div className="font-medium text-gray-500 uppercase tracking-wide col-span-2 mb-1">Rule Details</div>
+                {extraFields.map(([key, value]) => (
+                  <div key={key} className="contents">
+                    <div className="text-gray-500 capitalize">{key.replace(/_/g, " ")}</div>
+                    <div className="text-gray-800 break-all">
+                      {Array.isArray(value)
+                        ? (value as unknown[]).map((v, i) => (
+                            <span key={i} className="inline-block bg-gray-100 rounded px-1 py-0.5 mr-1 mb-0.5 font-mono">
+                              {typeof v === "object" ? (String((v as Record<string,unknown>).name ?? "") || JSON.stringify(v)) : String(v)}
+                            </span>
+                          ))
+                        : typeof value === "object"
+                        ? JSON.stringify(value)
+                        : String(value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 function UrlFilteringRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
-  const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-url-filtering-rules", tenantName],
@@ -354,26 +571,18 @@ function UrlFilteringRulesSection({ tenantName, isOpen }: { tenantName: string; 
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-            {isAdmin && <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>}
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
           {data.map((r: UrlFilteringRule) => (
-            <tr key={r.id}>
-              <td className="px-3 py-2 text-gray-500">{r.order}</td>
-              <td className="px-3 py-2 text-gray-900">{r.name}</td>
-              <td className="px-3 py-2 text-gray-600">{r.action}</td>
-              {isAdmin && (
-                <td className="px-3 py-2">
-                  <StateToggle
-                    ruleId={r.id}
-                    state={r.state}
-                    onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
-                    pending={toggleMut.isPending}
-                  />
-                </td>
-              )}
-            </tr>
+            <UrlFilteringRuleRow
+              key={r.id}
+              tenantName={tenantName}
+              rule={r}
+              onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
+              togglePending={toggleMut.isPending}
+            />
           ))}
           {data.length === 0 && (
             <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No rules</td></tr>
@@ -564,7 +773,6 @@ function EditableUrlList({
   onSave: (urls: string[]) => void;
   saving: boolean;
 }) {
-  const { isAdmin } = useAuth();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
 
@@ -582,7 +790,7 @@ function EditableUrlList({
     <div className="flex-1">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-sm font-semibold text-gray-700">{title} ({urls.length})</h4>
-        {isAdmin && !editing && (
+        {!editing && (
           <button onClick={startEdit} className="text-xs text-zs-500 hover:underline">Edit</button>
         )}
       </div>
@@ -680,7 +888,6 @@ function AllowDenySection({ tenantName, isOpen }: { tenantName: string; isOpen: 
 // ── Firewall / SSL / Forwarding / DLP / Cloud App / Snapshots ────────────────
 
 function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
-  const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-firewall-rules", tenantName],
@@ -706,7 +913,7 @@ function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOp
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-            {isAdmin && <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>}
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
@@ -715,16 +922,14 @@ function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOp
               <td className="px-3 py-2 text-gray-500">{r.order}</td>
               <td className="px-3 py-2 text-gray-900">{r.name}</td>
               <td className="px-3 py-2 text-gray-600">{r.action}</td>
-              {isAdmin && (
-                <td className="px-3 py-2">
-                  <StateToggle
-                    ruleId={r.id}
-                    state={r.state}
-                    onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
-                    pending={toggleMut.isPending}
-                  />
-                </td>
-              )}
+              <td className="px-3 py-2">
+                <StateToggle
+                  ruleId={r.id}
+                  state={r.state}
+                  onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
+                  pending={toggleMut.isPending}
+                />
+              </td>
             </tr>
           ))}
           {data.length === 0 && (
@@ -737,7 +942,6 @@ function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOp
 }
 
 function SslInspectionSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
-  const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-ssl-rules", tenantName],
@@ -763,7 +967,7 @@ function SslInspectionSection({ tenantName, isOpen }: { tenantName: string; isOp
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-            {isAdmin && <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>}
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
@@ -772,16 +976,14 @@ function SslInspectionSection({ tenantName, isOpen }: { tenantName: string; isOp
               <td className="px-3 py-2 text-gray-500">{r.order}</td>
               <td className="px-3 py-2 text-gray-900">{r.name}</td>
               <td className="px-3 py-2 text-gray-600">{r.action}</td>
-              {isAdmin && (
-                <td className="px-3 py-2">
-                  <StateToggle
-                    ruleId={r.id}
-                    state={r.state}
-                    onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
-                    pending={toggleMut.isPending}
-                  />
-                </td>
-              )}
+              <td className="px-3 py-2">
+                <StateToggle
+                  ruleId={r.id}
+                  state={r.state}
+                  onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
+                  pending={toggleMut.isPending}
+                />
+              </td>
             </tr>
           ))}
           {data.length === 0 && (

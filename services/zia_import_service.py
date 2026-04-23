@@ -36,7 +36,7 @@ class ResourceDef:
 
 # All resource types we import.  Order doesn't matter.
 RESOURCE_DEFINITIONS: List[ResourceDef] = [
-    ResourceDef("url_category",          "list_url_categories"),
+    ResourceDef("url_category",          "list_url_categories",  name_field="configured_name"),
     ResourceDef("url_filtering_rule",    "list_url_filtering_rules"),
     ResourceDef("firewall_rule",         "list_firewall_rules"),
     ResourceDef("firewall_dns_rule",     "list_firewall_dns_rules"),

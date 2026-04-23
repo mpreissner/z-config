@@ -7,8 +7,21 @@ export interface ActivationStatus {
 export interface UrlCategory {
   id: string;
   name: string;
+  configuredName?: string;
   type: string;
   urlCount?: number;
+}
+
+export interface UrlCategoryDetail {
+  id: string;
+  configuredName?: string;
+  name?: string;
+  type: string;
+  urls?: string[];
+  dbCategorizedUrls?: string[];
+  customCategory?: boolean;
+  superCategory?: string;
+  description?: string;
 }
 
 export interface UrlLookupResult {
@@ -142,6 +155,24 @@ export const patchUrlFilteringRuleState = (
   apiFetch<UrlFilteringRule>(`${base(tenant)}/url-filtering-rules/${ruleId}/state`, {
     method: "PATCH",
     body: JSON.stringify({ state }),
+  });
+
+export const fetchUrlFilteringRule = (tenant: string, ruleId: number): Promise<Record<string, unknown>> =>
+  apiFetch<Record<string, unknown>>(`${base(tenant)}/url-filtering-rules/${ruleId}`);
+
+export const fetchUrlCategoryDetail = (tenant: string, categoryId: string): Promise<UrlCategoryDetail> =>
+  apiFetch<UrlCategoryDetail>(`${base(tenant)}/url-categories/${categoryId}`);
+
+export const addUrlsToCategory = (tenant: string, categoryId: string, urls: string[]): Promise<UrlCategoryDetail> =>
+  apiFetch<UrlCategoryDetail>(`${base(tenant)}/url-categories/${categoryId}/urls`, {
+    method: "POST",
+    body: JSON.stringify({ urls }),
+  });
+
+export const removeUrlsFromCategory = (tenant: string, categoryId: string, urls: string[]): Promise<UrlCategoryDetail> =>
+  apiFetch<UrlCategoryDetail>(`${base(tenant)}/url-categories/${categoryId}/urls`, {
+    method: "DELETE",
+    body: JSON.stringify({ urls }),
   });
 
 export const createZiaUser = (tenant: string, body: unknown): Promise<ZiaUser> =>
