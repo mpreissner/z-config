@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchSettings, patchSettings, SystemSettings } from "../api/system";
-import { importDatabase } from "../api/admin";
+import { importDatabase, ImportDbResult } from "../api/admin";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
 
@@ -361,7 +361,7 @@ export default function AdminSettingsPage() {
 function ImportDatabaseCard() {
   const [dbFile, setDbFile] = useState<File | null>(null);
   const [keyFile, setKeyFile] = useState<File | null>(null);
-  const [result, setResult] = useState<string | null>(null);
+  const [result, setResult] = useState<ImportDbResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const dbRef = useRef<HTMLInputElement>(null);
@@ -374,7 +374,7 @@ function ImportDatabaseCard() {
     setErr(null);
     try {
       const res = await importDatabase(dbFile, keyFile ?? undefined);
-      setResult(res.message);
+      setResult(res);
       setDbFile(null);
       setKeyFile(null);
       if (dbRef.current) dbRef.current.value = "";
@@ -420,7 +420,33 @@ function ImportDatabaseCard() {
         {keyFile && <p className="text-xs text-gray-400 mt-1">{keyFile.name}</p>}
       </FieldRow>
       {err && <p className="text-xs text-red-600">{err}</p>}
-      {result && <p className="text-xs text-green-700 font-medium">{result}</p>}
+      {result && (
+        <div className="space-y-3">
+          <p className="text-xs text-green-700 font-medium">{result.message}</p>
+          {result.seeded_admin && result.temp_password && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 space-y-2">
+              <p className="text-sm font-semibold text-amber-800">Admin account created</p>
+              <p className="text-xs text-amber-700">
+                No admin users were found in the imported database. A temporary admin account
+                has been created. Sign in and change the password immediately.
+              </p>
+              <div className="flex items-center gap-3 mt-1">
+                <div>
+                  <p className="text-xs text-amber-600 font-medium">Username</p>
+                  <code className="text-sm font-mono font-bold text-amber-900">admin</code>
+                </div>
+                <div>
+                  <p className="text-xs text-amber-600 font-medium">Temporary password</p>
+                  <code className="text-sm font-mono font-bold text-amber-900">{result.temp_password}</code>
+                </div>
+              </div>
+              <p className="text-xs text-amber-600">
+                This password is shown once and will not be displayed again. Sign out and log in with these credentials now.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
       <div>
         <button
           onClick={handleImport}

@@ -75,7 +75,14 @@ export function deleteEntitlement(id: number): Promise<void> {
   return apiFetch(`/api/v1/admin/entitlements/${id}`, { method: "DELETE" });
 }
 
-export function importDatabase(dbFile: File, keyFile?: File): Promise<{ ok: boolean; message: string }> {
+export interface ImportDbResult {
+  ok: boolean;
+  message: string;
+  seeded_admin: boolean;
+  temp_password: string | null;
+}
+
+export function importDatabase(dbFile: File, keyFile?: File): Promise<ImportDbResult> {
   const form = new FormData();
   form.append("db_file", dbFile);
   if (keyFile) form.append("key_file", keyFile);

@@ -268,5 +268,14 @@ async def import_database(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Database reinitialisation failed: {exc}")
 
-    return {"ok": True, "message": "Database imported successfully. Reload the page to continue."}
+    # Seed a default admin if the imported DB has no admin accounts (e.g. TUI export)
+    from api.main import seed_admin_if_needed
+    temp_password = seed_admin_if_needed()
+
+    return {
+        "ok": True,
+        "message": "Database imported successfully. Reload the page to continue.",
+        "seeded_admin": temp_password is not None,
+        "temp_password": temp_password,
+    }
 

@@ -39,32 +39,42 @@ from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
 
 
+def seed_admin_if_needed() -> str | None:
+    """Create a default admin account if none exists. Returns the temp password or None."""
+    from db.database import get_session
+    from db.models import User
+    from api.auth_utils import hash_password
+
+    with get_session() as session:
+        admin_exists = session.query(User).filter_by(role="admin", is_active=True).first()
+
+    if admin_exists:
+        return None
+
+    temp_password = os.environ.get("ADMIN_INITIAL_PASSWORD") or secrets.token_urlsafe(15)
+    with get_session() as session:
+        session.add(User(
+            username="admin",
+            role="admin",
+            password_hash=hash_password(temp_password),
+            force_password_change=True,
+            is_active=True,
+        ))
+    return temp_password
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     jwt_secret = os.environ.get("JWT_SECRET", "")
     if len(jwt_secret) < 32:
         sys.exit("FATAL: JWT_SECRET must be set and at least 32 characters.")
 
-    from db.database import init_db, get_session
-    from db.models import User
-    from api.auth_utils import hash_password
+    from db.database import init_db
     init_db()
 
-    with get_session() as session:
-        admin_exists = session.query(User).filter_by(role="admin", is_active=True).first()
-
-    if not admin_exists:
-        initial_password = os.environ.get("ADMIN_INITIAL_PASSWORD") or secrets.token_urlsafe(15)
-        print(f"[zs-config] Admin account created. Initial password: {initial_password}", flush=True)
-        with get_session() as session:
-            admin = User(
-                username="admin",
-                role="admin",
-                password_hash=hash_password(initial_password),
-                force_password_change=True,
-                is_active=True,
-            )
-            session.add(admin)
+    temp_password = seed_admin_if_needed()
+    if temp_password:
+        print(f"[zs-config] Admin account created. Initial password: {temp_password}", flush=True)
 
     yield
 
