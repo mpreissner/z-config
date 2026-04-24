@@ -356,6 +356,22 @@ class ZIAService:
         self._reimport(["url_category"])
         return result
 
+    def delete_url_category(self, category_id: str, category_name: str = "", auto_activate: bool = True) -> None:
+        self.client.delete_url_category(category_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_url_category",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="url_category",
+            resource_id=category_id,
+            resource_name=category_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["url_category"])
+
     def url_lookup(self, urls: List[str]) -> List[Dict]:
         """Look up the category classifications for a list of URLs."""
         result = self.client.url_lookup(urls)
@@ -591,6 +607,9 @@ class ZIAService:
     # ------------------------------------------------------------------
 
     def get_allowlist(self) -> Dict:
+        rows = self._list_from_db("allowlist")
+        if rows:
+            return rows[0]
         result = self.client.get_allowlist()
         audit_service.log(
             product="ZIA", operation="get_allowlist", action="READ", status="SUCCESS",
@@ -599,6 +618,9 @@ class ZIAService:
         return result
 
     def get_denylist(self) -> Dict:
+        rows = self._list_from_db("denylist")
+        if rows:
+            return rows[0]
         result = self.client.get_denylist()
         audit_service.log(
             product="ZIA", operation="get_denylist", action="READ", status="SUCCESS",
@@ -654,6 +676,75 @@ class ZIAService:
         )
         return result
 
+    def get_firewall_rule(self, rule_id: str) -> Dict:
+        db_row = self._get_from_db("firewall_rule", rule_id)
+        if db_row:
+            audit_service.log(
+                product="ZIA", operation="get_firewall_rule", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="firewall_rule",
+                resource_id=rule_id, resource_name=db_row.get("name"),
+            )
+            return db_row
+        result = self.client.get_firewall_rule(rule_id)
+        audit_service.log(
+            product="ZIA", operation="get_firewall_rule", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="firewall_rule",
+            resource_id=rule_id, resource_name=result.get("name"),
+        )
+        return result
+
+    def create_firewall_rule(self, config: Dict, auto_activate: bool = True) -> Dict:
+        result = self.client.create_firewall_rule(config)
+        audit_service.log(
+            product="ZIA",
+            operation="create_firewall_rule",
+            action="CREATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="firewall_rule",
+            resource_id=str(result.get("id", "")),
+            resource_name=result.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("firewall_rule", str(result.get("id", "")), result)
+        return result
+
+    def update_firewall_rule(self, rule_id: str, config: Dict, auto_activate: bool = True) -> Dict:
+        cleaned = _prepare_rule_for_update(config)
+        self.client.update_firewall_rule(rule_id, cleaned)
+        audit_service.log(
+            product="ZIA",
+            operation="update_firewall_rule",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="firewall_rule",
+            resource_id=rule_id,
+            resource_name=config.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        updated = self.client.get_firewall_rule(rule_id)
+        self._upsert_one("firewall_rule", rule_id, updated)
+        return updated
+
+    def delete_firewall_rule(self, rule_id: str, rule_name: str, auto_activate: bool = True) -> None:
+        self.client.delete_firewall_rule(rule_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_firewall_rule",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="firewall_rule",
+            resource_id=rule_id,
+            resource_name=rule_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["firewall_rule"])
+
     def toggle_firewall_rule(self, rule_id: str, state: str) -> Dict:
         rule = self.client.get_firewall_rule(rule_id)
         rule["state"] = state
@@ -691,6 +782,79 @@ class ZIAService:
         )
         return result
 
+    def get_ssl_inspection_rule(self, rule_id: str) -> Dict:
+        db_row = self._get_from_db("ssl_inspection_rule", rule_id)
+        if db_row:
+            _normalize_ssl_rules([db_row])
+            audit_service.log(
+                product="ZIA", operation="get_ssl_inspection_rule", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="ssl_inspection_rule",
+                resource_id=rule_id, resource_name=db_row.get("name"),
+            )
+            return db_row
+        result = self.client.get_ssl_inspection_rule(rule_id)
+        _normalize_ssl_rules([result])
+        audit_service.log(
+            product="ZIA", operation="get_ssl_inspection_rule", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="ssl_inspection_rule",
+            resource_id=rule_id, resource_name=result.get("name"),
+        )
+        return result
+
+    def create_ssl_inspection_rule(self, config: Dict, auto_activate: bool = True) -> Dict:
+        result = self.client.create_ssl_inspection_rule(config)
+        _normalize_ssl_rules([result])
+        audit_service.log(
+            product="ZIA",
+            operation="create_ssl_inspection_rule",
+            action="CREATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="ssl_inspection_rule",
+            resource_id=str(result.get("id", "")),
+            resource_name=result.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("ssl_inspection_rule", str(result.get("id", "")), result)
+        return result
+
+    def update_ssl_inspection_rule(self, rule_id: str, config: Dict, auto_activate: bool = True) -> Dict:
+        cleaned = _prepare_rule_for_update(config)
+        self.client.update_ssl_inspection_rule(rule_id, cleaned)
+        audit_service.log(
+            product="ZIA",
+            operation="update_ssl_inspection_rule",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="ssl_inspection_rule",
+            resource_id=rule_id,
+            resource_name=config.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        updated = self.client.get_ssl_inspection_rule(rule_id)
+        _normalize_ssl_rules([updated])
+        self._upsert_one("ssl_inspection_rule", rule_id, updated)
+        return updated
+
+    def delete_ssl_inspection_rule(self, rule_id: str, rule_name: str, auto_activate: bool = True) -> None:
+        self.client.delete_ssl_inspection_rule(rule_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_ssl_inspection_rule",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="ssl_inspection_rule",
+            resource_id=rule_id,
+            resource_name=rule_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["ssl_inspection_rule"])
+
     def toggle_ssl_inspection_rule(self, rule_id: str, state: str) -> Dict:
         rule = self.client.get_ssl_inspection_rule(rule_id)
         rule["state"] = state
@@ -726,6 +890,74 @@ class ZIAService:
         )
         return result
 
+    def get_forwarding_rule(self, rule_id: str) -> Dict:
+        db_row = self._get_from_db("forwarding_rule", rule_id)
+        if db_row:
+            audit_service.log(
+                product="ZIA", operation="get_forwarding_rule", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="forwarding_rule",
+                resource_id=rule_id, resource_name=db_row.get("name"),
+            )
+            return db_row
+        result = self.client.get_forwarding_rule(rule_id)
+        audit_service.log(
+            product="ZIA", operation="get_forwarding_rule", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="forwarding_rule",
+            resource_id=rule_id, resource_name=result.get("name"),
+        )
+        return result
+
+    def create_forwarding_rule(self, config: Dict, auto_activate: bool = True) -> Dict:
+        result = self.client.create_forwarding_rule(config)
+        audit_service.log(
+            product="ZIA",
+            operation="create_forwarding_rule",
+            action="CREATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="forwarding_rule",
+            resource_id=str(result.get("id", "")),
+            resource_name=result.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("forwarding_rule", str(result.get("id", "")), result)
+        return result
+
+    def update_forwarding_rule(self, rule_id: str, config: Dict, auto_activate: bool = True) -> Dict:
+        cleaned = _prepare_forwarding_rule_for_update(config)
+        result = self.client.update_forwarding_rule(rule_id, cleaned)
+        audit_service.log(
+            product="ZIA",
+            operation="update_forwarding_rule",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="forwarding_rule",
+            resource_id=rule_id,
+            resource_name=config.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("forwarding_rule", rule_id, result)
+        return result
+
+    def delete_forwarding_rule(self, rule_id: str, rule_name: str, auto_activate: bool = True) -> None:
+        self.client.delete_forwarding_rule(rule_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_forwarding_rule",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="forwarding_rule",
+            resource_id=rule_id,
+            resource_name=rule_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["forwarding_rule"])
+
     def toggle_forwarding_rule(self, rule_id: str, state: str) -> Dict:
         rule = self.client.get_forwarding_rule(rule_id)
         rule["state"] = state
@@ -741,6 +973,73 @@ class ZIAService:
     # ------------------------------------------------------------------
     # DLP
     # ------------------------------------------------------------------
+
+    def get_dlp_engine(self, engine_id: str) -> Dict:
+        db_row = self._get_from_db("dlp_engine", engine_id)
+        if db_row:
+            audit_service.log(
+                product="ZIA", operation="get_dlp_engine", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="dlp_engine",
+                resource_id=engine_id, resource_name=db_row.get("name"),
+            )
+            return db_row
+        result = self.client.get_dlp_engine(engine_id)
+        audit_service.log(
+            product="ZIA", operation="get_dlp_engine", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="dlp_engine",
+            resource_id=engine_id, resource_name=result.get("name"),
+        )
+        return result
+
+    def create_dlp_engine(self, config: Dict, auto_activate: bool = True) -> Dict:
+        result = self.client.create_dlp_engine(config)
+        audit_service.log(
+            product="ZIA",
+            operation="create_dlp_engine",
+            action="CREATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="dlp_engine",
+            resource_id=str(result.get("id", "")),
+            resource_name=result.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("dlp_engine", str(result.get("id", "")), result)
+        return result
+
+    def update_dlp_engine(self, engine_id: str, config: Dict, auto_activate: bool = True) -> Dict:
+        result = self.client.update_dlp_engine(engine_id, config)
+        audit_service.log(
+            product="ZIA",
+            operation="update_dlp_engine",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="dlp_engine",
+            resource_id=engine_id,
+            resource_name=config.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("dlp_engine", engine_id, result)
+        return result
+
+    def delete_dlp_engine(self, engine_id: str, engine_name: str, auto_activate: bool = True) -> None:
+        self.client.delete_dlp_engine(engine_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_dlp_engine",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="dlp_engine",
+            resource_id=engine_id,
+            resource_name=engine_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["dlp_engine"])
 
     def list_dlp_engines(self) -> List[Dict]:
         rows = self._list_from_db("dlp_engine")
@@ -789,6 +1088,74 @@ class ZIAService:
         )
         self._upsert_one("dlp_dictionary", dict_id, result)
         return result
+
+    def get_dlp_web_rule(self, rule_id: str) -> Dict:
+        db_row = self._get_from_db("dlp_web_rule", rule_id)
+        if db_row:
+            audit_service.log(
+                product="ZIA", operation="get_dlp_web_rule", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="dlp_web_rule",
+                resource_id=rule_id, resource_name=db_row.get("name"),
+            )
+            return db_row
+        result = self.client.get_dlp_web_rule(rule_id)
+        audit_service.log(
+            product="ZIA", operation="get_dlp_web_rule", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="dlp_web_rule",
+            resource_id=rule_id, resource_name=result.get("name"),
+        )
+        return result
+
+    def create_dlp_web_rule(self, config: Dict, auto_activate: bool = True) -> Dict:
+        result = self.client.create_dlp_web_rule(config)
+        audit_service.log(
+            product="ZIA",
+            operation="create_dlp_web_rule",
+            action="CREATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="dlp_web_rule",
+            resource_id=str(result.get("id", "")),
+            resource_name=result.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("dlp_web_rule", str(result.get("id", "")), result)
+        return result
+
+    def update_dlp_web_rule(self, rule_id: str, config: Dict, auto_activate: bool = True) -> Dict:
+        cleaned = _prepare_rule_for_update(config)
+        result = self.client.update_dlp_web_rule(rule_id, cleaned)
+        audit_service.log(
+            product="ZIA",
+            operation="update_dlp_web_rule",
+            action="UPDATE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="dlp_web_rule",
+            resource_id=rule_id,
+            resource_name=config.get("name"),
+        )
+        if auto_activate:
+            self.activate()
+        self._upsert_one("dlp_web_rule", rule_id, result)
+        return result
+
+    def delete_dlp_web_rule(self, rule_id: str, rule_name: str, auto_activate: bool = True) -> None:
+        self.client.delete_dlp_web_rule(rule_id)
+        audit_service.log(
+            product="ZIA",
+            operation="delete_dlp_web_rule",
+            action="DELETE",
+            status="SUCCESS",
+            tenant_id=self.tenant_id,
+            resource_type="dlp_web_rule",
+            resource_id=rule_id,
+            resource_name=rule_name,
+        )
+        if auto_activate:
+            self.activate()
+        self._reimport(["dlp_web_rule"])
 
     def toggle_dlp_web_rule(self, rule_id: str, state: str) -> Dict:
         rule = self.client.get_dlp_web_rule(rule_id)

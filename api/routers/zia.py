@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 
 from api.schemas.zia import UrlLookupRequest
@@ -214,6 +214,16 @@ def remove_urls_from_category(tenant: str, category_id: str, body: CategoryUrlsR
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/{tenant}/url-categories/{category_id}")
+def delete_url_category(tenant: str, category_id: str, user: AuthUser = Depends(require_auth)):
+    """Delete a custom URL category."""
+    try:
+        _get_service(tenant, user).delete_url_category(category_id)
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ------------------------------------------------------------------
 # URL Filtering Rules — CRUD + state toggle
 # ------------------------------------------------------------------
@@ -314,6 +324,125 @@ def list_firewall_rules(tenant: str, user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).list_firewall_rules()
 
 
+@router.get("/{tenant}/firewall-rules/export-csv")
+def export_firewall_rules_csv(tenant: str, user: AuthUser = Depends(require_auth)):
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    from services.config_service import get_tenant
+    from services.zia_firewall_service import export_rules_to_csv, CSV_FIELDNAMES
+    from api.dependencies import check_tenant_access
+
+    t = get_tenant(tenant)
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant}' not found")
+    check_tenant_access(t.id, user)
+
+    try:
+        rows = export_rules_to_csv(t.id)
+        filtered = [r for r in rows if str(r.get("order", "")).isdigit() and int(r["order"]) > 0]
+
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(filtered)
+        content = output.getvalue()
+
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=\"firewall_rules.csv\""},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{tenant}/firewall-rules/sync-csv")
+def sync_firewall_rules_csv(
+    tenant: str,
+    file: UploadFile = File(...),
+    user: AuthUser = Depends(require_auth),
+):
+    import tempfile
+    import os
+    from services.config_service import get_tenant, decrypt_secret
+    from services.zia_firewall_service import parse_csv, classify_sync, sync_rules
+    from lib.auth import ZscalerAuth
+    from lib.zia_client import ZIAClient
+    from api.dependencies import check_tenant_access
+
+    t = get_tenant(tenant)
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Tenant '{tenant}' not found")
+    check_tenant_access(t.id, user)
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+            tmp.write(file.file.read())
+            tmp_path = tmp.name
+
+        try:
+            rows = parse_csv(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
+        auth = ZscalerAuth(
+            t.zidentity_base_url,
+            t.client_id,
+            decrypt_secret(t.client_secret_enc),
+            govcloud=bool(t.govcloud),
+        )
+        client = ZIAClient(auth, t.oneapi_base_url)
+
+        classification = classify_sync(t.id, rows)
+        result = sync_rules(client, t.id, classification)
+
+        return {
+            "created": result.created,
+            "updated": result.updated,
+            "deleted": result.deleted,
+            "skipped": result.skipped,
+            "errors": result.errors,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{tenant}/firewall-rules/{rule_id}")
+def get_firewall_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).get_firewall_rule(rule_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{tenant}/firewall-rules")
+def create_firewall_rule(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).create_firewall_rule(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{tenant}/firewall-rules/{rule_id}")
+def update_firewall_rule(tenant: str, rule_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).update_firewall_rule(rule_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{tenant}/firewall-rules/{rule_id}")
+def delete_firewall_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        _get_service(tenant, user).delete_firewall_rule(rule_id, rule_name="")
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.patch("/{tenant}/firewall-rules/{rule_id}/state")
 def patch_firewall_rule_state(
     tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
@@ -331,6 +460,39 @@ def patch_firewall_rule_state(
 @router.get("/{tenant}/ssl-inspection-rules")
 def list_ssl_inspection_rules(tenant: str, user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).list_ssl_inspection_rules()
+
+
+@router.get("/{tenant}/ssl-inspection-rules/{rule_id}")
+def get_ssl_inspection_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).get_ssl_inspection_rule(rule_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{tenant}/ssl-inspection-rules")
+def create_ssl_inspection_rule(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).create_ssl_inspection_rule(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{tenant}/ssl-inspection-rules/{rule_id}")
+def update_ssl_inspection_rule(tenant: str, rule_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).update_ssl_inspection_rule(rule_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{tenant}/ssl-inspection-rules/{rule_id}")
+def delete_ssl_inspection_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        _get_service(tenant, user).delete_ssl_inspection_rule(rule_id, rule_name="")
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.patch("/{tenant}/ssl-inspection-rules/{rule_id}/state")
@@ -352,6 +514,39 @@ def list_forwarding_rules(tenant: str, user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).list_forwarding_rules()
 
 
+@router.get("/{tenant}/forwarding-rules/{rule_id}")
+def get_forwarding_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).get_forwarding_rule(rule_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{tenant}/forwarding-rules")
+def create_forwarding_rule(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).create_forwarding_rule(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{tenant}/forwarding-rules/{rule_id}")
+def update_forwarding_rule(tenant: str, rule_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).update_forwarding_rule(rule_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{tenant}/forwarding-rules/{rule_id}")
+def delete_forwarding_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        _get_service(tenant, user).delete_forwarding_rule(rule_id, rule_name="")
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.patch("/{tenant}/forwarding-rules/{rule_id}/state")
 def patch_forwarding_rule_state(
     tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
@@ -366,6 +561,39 @@ def patch_forwarding_rule_state(
 # DLP
 # ------------------------------------------------------------------
 
+@router.get("/{tenant}/dlp-web-rules/{rule_id}")
+def get_dlp_web_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).get_dlp_web_rule(rule_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{tenant}/dlp-web-rules")
+def create_dlp_web_rule(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).create_dlp_web_rule(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{tenant}/dlp-web-rules/{rule_id}")
+def update_dlp_web_rule(tenant: str, rule_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).update_dlp_web_rule(rule_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{tenant}/dlp-web-rules/{rule_id}")
+def delete_dlp_web_rule(tenant: str, rule_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        _get_service(tenant, user).delete_dlp_web_rule(rule_id, rule_name="")
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.patch("/{tenant}/dlp-web-rules/{rule_id}/state")
 def patch_dlp_web_rule_state(
     tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
@@ -379,6 +607,39 @@ def patch_dlp_web_rule_state(
 @router.get("/{tenant}/dlp-engines")
 def list_dlp_engines(tenant: str, user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).list_dlp_engines()
+
+
+@router.get("/{tenant}/dlp-engines/{engine_id}")
+def get_dlp_engine(tenant: str, engine_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).get_dlp_engine(engine_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{tenant}/dlp-engines")
+def create_dlp_engine(tenant: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).create_dlp_engine(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{tenant}/dlp-engines/{engine_id}")
+def update_dlp_engine(tenant: str, engine_id: str, body: Dict[str, Any], user: AuthUser = Depends(require_auth)):
+    try:
+        return _get_service(tenant, user).update_dlp_engine(engine_id, body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{tenant}/dlp-engines/{engine_id}")
+def delete_dlp_engine(tenant: str, engine_id: str, user: AuthUser = Depends(require_auth)):
+    try:
+        _get_service(tenant, user).delete_dlp_engine(engine_id, engine_name="")
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class DlpDictionaryConfidenceRequest(BaseModel):

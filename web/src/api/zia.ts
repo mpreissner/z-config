@@ -220,6 +220,11 @@ export interface FirewallRule {
   action: string;
   state: string;
   description?: string;
+  predefined?: boolean;
+  nwServices?: Array<{id: number; name: string}>;
+  srcIpGroups?: Array<{id: number; name: string}>;
+  destIpGroups?: Array<{id: number; name: string}>;
+  locations?: Array<{id: number; name: string}>;
 }
 
 export const fetchFirewallRules = (tenant: string): Promise<FirewallRule[]> =>
@@ -240,6 +245,10 @@ export interface SslInspectionRule {
   action: string;
   state: string;
   description?: string;
+  predefined?: boolean;
+  urlCategories?: string[];
+  departments?: Array<{id: number; name: string}>;
+  groups?: Array<{id: number; name: string}>;
 }
 
 export const fetchSslInspectionRules = (tenant: string): Promise<SslInspectionRule[]> =>
@@ -260,6 +269,7 @@ export interface ForwardingRule {
   type: string;
   state: string;
   description?: string;
+  predefined?: boolean;
 }
 
 export const fetchForwardingRules = (tenant: string): Promise<ForwardingRule[]> =>
@@ -300,6 +310,10 @@ export interface DlpWebRule {
   order: number;
   action: string;
   state: string;
+  description?: string;
+  protocols?: string[];
+  dlpEngines?: Array<{id: number; name: string}>;
+  predefined?: boolean;
 }
 
 export const fetchDlpEngines = (tenant: string): Promise<DlpEngine[]> =>
@@ -325,6 +339,163 @@ export const patchDlpWebRuleState = (tenant: string, ruleId: number, state: stri
   apiFetch<DlpWebRule>(`${base(tenant)}/dlp-web-rules/${ruleId}/state`, {
     method: "PATCH",
     body: JSON.stringify({ state }),
+  });
+
+// ── URL Category CRUD ─────────────────────────────────────────────────────────
+
+export const deleteUrlCategory = (
+  tenant: string,
+  categoryId: string
+): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/url-categories/${encodeURIComponent(categoryId)}`, {
+    method: "DELETE",
+  });
+
+// ── URL Filtering Rule CRUD (delete already exists; here for completeness) ───
+
+// ── Firewall Rule CRUD ────────────────────────────────────────────────────────
+
+export const getFirewallRule = (tenant: string, ruleId: number): Promise<FirewallRule> =>
+  apiFetch<FirewallRule>(`${base(tenant)}/firewall-rules/${ruleId}`);
+
+export const createFirewallRule = (tenant: string, body: unknown): Promise<FirewallRule> =>
+  apiFetch<FirewallRule>(`${base(tenant)}/firewall-rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateFirewallRule = (
+  tenant: string,
+  ruleId: number,
+  body: unknown
+): Promise<FirewallRule> =>
+  apiFetch<FirewallRule>(`${base(tenant)}/firewall-rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteFirewallRule = (
+  tenant: string,
+  ruleId: number
+): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/firewall-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+
+// ── SSL Inspection Rule CRUD ──────────────────────────────────────────────────
+
+export const getSslInspectionRule = (tenant: string, ruleId: number): Promise<SslInspectionRule> =>
+  apiFetch<SslInspectionRule>(`${base(tenant)}/ssl-inspection-rules/${ruleId}`);
+
+export const createSslInspectionRule = (tenant: string, body: unknown): Promise<SslInspectionRule> =>
+  apiFetch<SslInspectionRule>(`${base(tenant)}/ssl-inspection-rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateSslInspectionRule = (
+  tenant: string,
+  ruleId: number,
+  body: unknown
+): Promise<SslInspectionRule> =>
+  apiFetch<SslInspectionRule>(`${base(tenant)}/ssl-inspection-rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteSslInspectionRule = (
+  tenant: string,
+  ruleId: number
+): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/ssl-inspection-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+
+// ── Forwarding Rule CRUD ──────────────────────────────────────────────────────
+
+export const getForwardingRule = (tenant: string, ruleId: number): Promise<ForwardingRule> =>
+  apiFetch<ForwardingRule>(`${base(tenant)}/forwarding-rules/${ruleId}`);
+
+export const createForwardingRule = (tenant: string, body: unknown): Promise<ForwardingRule> =>
+  apiFetch<ForwardingRule>(`${base(tenant)}/forwarding-rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateForwardingRule = (
+  tenant: string,
+  ruleId: number,
+  body: unknown
+): Promise<ForwardingRule> =>
+  apiFetch<ForwardingRule>(`${base(tenant)}/forwarding-rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteForwardingRule = (
+  tenant: string,
+  ruleId: number
+): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/forwarding-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+
+// ── DLP Web Rule CRUD ─────────────────────────────────────────────────────────
+
+export const getDlpWebRule = (tenant: string, ruleId: number): Promise<DlpWebRule> =>
+  apiFetch<DlpWebRule>(`${base(tenant)}/dlp-web-rules/${ruleId}`);
+
+export const createDlpWebRule = (tenant: string, body: unknown): Promise<DlpWebRule> =>
+  apiFetch<DlpWebRule>(`${base(tenant)}/dlp-web-rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateDlpWebRule = (
+  tenant: string,
+  ruleId: number,
+  body: unknown
+): Promise<DlpWebRule> =>
+  apiFetch<DlpWebRule>(`${base(tenant)}/dlp-web-rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteDlpWebRule = (
+  tenant: string,
+  ruleId: number
+): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/dlp-web-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+
+// ── DLP Engine CRUD ───────────────────────────────────────────────────────────
+
+export const getDlpEngine = (tenant: string, engineId: number): Promise<DlpEngine> =>
+  apiFetch<DlpEngine>(`${base(tenant)}/dlp-engines/${engineId}`);
+
+export const createDlpEngine = (tenant: string, body: unknown): Promise<DlpEngine> =>
+  apiFetch<DlpEngine>(`${base(tenant)}/dlp-engines`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateDlpEngine = (
+  tenant: string,
+  engineId: number,
+  body: unknown
+): Promise<DlpEngine> =>
+  apiFetch<DlpEngine>(`${base(tenant)}/dlp-engines/${engineId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const deleteDlpEngine = (
+  tenant: string,
+  engineId: number
+): Promise<{ deleted: boolean }> =>
+  apiFetch<{ deleted: boolean }>(`${base(tenant)}/dlp-engines/${engineId}`, {
+    method: "DELETE",
   });
 
 // ── Cloud App Controls ────────────────────────────────────────────────────────
@@ -361,3 +532,31 @@ export const createSnapshot = (tenant: string, label?: string, product = "ZIA"):
 
 export const deleteSnapshot = (tenant: string, snapshotId: number): Promise<void> =>
   apiFetch<void>(`${base(tenant)}/snapshots/${snapshotId}`, { method: "DELETE" });
+
+// ── Firewall CSV Export / Sync ────────────────────────────────────────────────
+
+export async function exportFirewallRulesToCsv(tenant: string, tenantName: string): Promise<void> {
+  const res = await fetch(`/api/v1/zia/${encodeURIComponent(tenant)}/firewall-rules/export-csv`);
+  if (!res.ok) throw new Error("Export failed");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `firewall_rules_${tenantName}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function syncFirewallRulesFromCsv(
+  tenant: string,
+  file: File
+): Promise<{ created: number; updated: number; deleted: number; skipped: number; errors: string[] }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`/api/v1/zia/${encodeURIComponent(tenant)}/firewall-rules/sync-csv`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!res.ok) throw new Error("Sync failed");
+  return res.json();
+}

@@ -24,7 +24,6 @@ import {
   removeUrlsFromCategory,
   lookupUrls,
   fetchUrlFilteringRules,
-  fetchUrlFilteringRule,
   patchUrlFilteringRuleState,
   fetchUsers,
   fetchLocations,
@@ -36,11 +35,15 @@ import {
   updateDenylist,
   fetchFirewallRules,
   patchFirewallRuleState,
+  exportFirewallRulesToCsv,
+  syncFirewallRulesFromCsv,
   fetchSslInspectionRules,
   patchSslRuleState,
   fetchForwardingRules,
-  patchForwardingRuleState,
   fetchDlpEngines,
+  createDlpEngine,
+  updateDlpEngine,
+  deleteDlpEngine,
   fetchDlpDictionaries,
   patchDlpDictionaryConfidence,
   fetchDlpWebRules,
@@ -360,7 +363,11 @@ function UrlCategoriesSection({ tenantName, isOpen }: { tenantName: string; isOp
           </thead>
           <tbody className="divide-y divide-gray-100 bg-white">
             {filtered.map((c: UrlCategory) => (
-              <UrlCategoryRow key={c.id} tenantName={tenantName} category={c} />
+              <UrlCategoryRow
+                key={c.id}
+                tenantName={tenantName}
+                category={c}
+              />
             ))}
             {filtered.length === 0 && (
               <tr><td colSpan={3} className="px-3 py-4 text-center text-gray-400">No results</td></tr>
@@ -459,98 +466,34 @@ function StateToggle({
 }
 
 function UrlFilteringRuleRow({
-  tenantName,
   rule,
   onToggle,
   togglePending,
 }: {
-  tenantName: string;
   rule: UrlFilteringRule;
   onToggle: (id: number | string, next: string) => void;
   togglePending: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-
-  const detailQuery = useQuery({
-    queryKey: ["zia-url-filtering-rule-detail", tenantName, rule.id],
-    queryFn: () => fetchUrlFilteringRule(tenantName, rule.id),
-    enabled: expanded,
-    staleTime: 60 * 1000,
-  });
-
-  const SKIP_KEYS = new Set(["id", "name", "order", "action", "state"]);
-  const extraFields = detailQuery.data
-    ? Object.entries(detailQuery.data).filter(([k, v]) => {
-        if (SKIP_KEYS.has(k)) return false;
-        if (v === null || v === undefined) return false;
-        if (Array.isArray(v) && v.length === 0) return false;
-        return true;
-      })
-    : [];
-
   return (
-    <>
-      <tr
-        className="cursor-pointer hover:bg-gray-50"
-        onClick={() => setExpanded((x) => !x)}
-      >
-        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
-        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
-          <svg
-            className={`w-3 h-3 text-gray-400 flex-shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
-            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-          </svg>
-          {rule.name}
-        </td>
-        <td className="px-3 py-2 text-gray-600">{rule.action}</td>
-        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-          <StateToggle
-            ruleId={rule.id}
-            state={rule.state}
-            onToggle={onToggle}
-            pending={togglePending}
-          />
-        </td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={4} className="bg-gray-50 px-4 py-3">
-            {detailQuery.isLoading && <LoadingSpinner />}
-            {detailQuery.error && (
-              <ErrorMessage message={detailQuery.error instanceof Error ? detailQuery.error.message : "Failed to load"} />
-            )}
-            {detailQuery.data && (
-              <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
-                <div className="font-medium text-gray-500 uppercase tracking-wide col-span-2 mb-1">Rule Details</div>
-                {extraFields.map(([key, value]) => (
-                  <div key={key} className="contents">
-                    <div className="text-gray-500 capitalize">{key.replace(/_/g, " ")}</div>
-                    <div className="text-gray-800 break-all">
-                      {Array.isArray(value)
-                        ? (value as unknown[]).map((v, i) => (
-                            <span key={i} className="inline-block bg-gray-100 rounded px-1 py-0.5 mr-1 mb-0.5 font-mono">
-                              {typeof v === "object" ? (String((v as Record<string,unknown>).name ?? "") || JSON.stringify(v)) : String(v)}
-                            </span>
-                          ))
-                        : typeof value === "object"
-                        ? JSON.stringify(value)
-                        : String(value)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </td>
-        </tr>
-      )}
-    </>
+    <tr className="hover:bg-gray-50">
+      <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+      <td className="px-3 py-2 text-gray-900">{rule.name}</td>
+      <td className="px-3 py-2 text-gray-600">{rule.action}</td>
+      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+        <StateToggle
+          ruleId={rule.id}
+          state={rule.state}
+          onToggle={onToggle}
+          pending={togglePending}
+        />
+      </td>
+    </tr>
   );
 }
 
 function UrlFilteringRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const qc = useQueryClient();
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-url-filtering-rules", tenantName],
     queryFn: () => fetchUrlFilteringRules(tenantName),
@@ -585,7 +528,6 @@ function UrlFilteringRulesSection({ tenantName, isOpen }: { tenantName: string; 
           {data.map((r: UrlFilteringRule) => (
             <UrlFilteringRuleRow
               key={r.id}
-              tenantName={tenantName}
               rule={r}
               onToggle={(id, next) => toggleMut.mutate({ id: id as number, state: next })}
               togglePending={toggleMut.isPending}
@@ -934,7 +876,6 @@ function RuleDetailGrid({ rule, skipKeys }: { rule: Record<string, unknown>; ski
 
 const DLP_ENGINE_SKIP = new Set(["id", "name", "predefinedEngine"]);
 const DLP_WEB_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
-const FIREWALL_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const SSL_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const FORWARDING_SKIP = new Set(["id", "name", "order", "type", "state"]);
 
@@ -945,28 +886,125 @@ function resolveEngineExpression(expr: string, dictMap: Map<number, string>): st
   });
 }
 
-function DlpEngineRow({ engine, dictMap }: { engine: DlpEngine; dictMap: Map<number, string> }) {
+function DlpEngineRow({
+  tenantName,
+  engine,
+  dictMap,
+  onDeleted,
+}: {
+  tenantName: string;
+  engine: DlpEngine;
+  dictMap: Map<number, string>;
+  onDeleted?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(engine.name);
+  const [editExpr, setEditExpr] = useState(engine.engine_expression ?? "");
+  const [editDesc, setEditDesc] = useState(engine.description ?? "");
+  const [editCustom, setEditCustom] = useState(engine.custom_dlp_engine ?? false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const qc = useQueryClient();
+  const isPredefined = engine.predefinedEngine === true;
 
   const resolvedEngine = { ...engine } as Record<string, unknown>;
   if (engine.engine_expression && dictMap.size > 0) {
     resolvedEngine.engine_expression = resolveEngineExpression(engine.engine_expression, dictMap);
   }
 
+  const updateMut = useMutation({
+    mutationFn: () => updateDlpEngine(tenantName, engine.id, {
+      id: engine.id,
+      name: editName,
+      engine_expression: editExpr || undefined,
+      description: editDesc || undefined,
+      custom_dlp_engine: editCustom,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-dlp-engines", tenantName] });
+      setEditing(false);
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: () => deleteDlpEngine(tenantName, engine.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-dlp-engines", tenantName] });
+      onDeleted?.();
+    },
+  });
+
   return (
     <>
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete DLP Engine"
+          message={`Delete DLP engine "${engine.name}"? This cannot be undone.`}
+          onConfirm={() => { setConfirmDelete(false); deleteMut.mutate(); }}
+          onCancel={() => setConfirmDelete(false)}
+          destructive
+        />
+      )}
       <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
         <td className="px-3 py-2 font-mono text-xs text-gray-500">{engine.id}</td>
         <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
           <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
           {engine.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
         </td>
         <td className="px-3 py-2 text-gray-500">{engine.predefinedEngine ?? engine.custom_dlp_engine !== undefined ? (engine.custom_dlp_engine ? "Custom" : "Built-in") : "-"}</td>
       </tr>
       {expanded && (
         <tr>
           <td colSpan={3} className="bg-gray-50 px-4 py-3">
-            <RuleDetailGrid rule={resolvedEngine} skipKeys={DLP_ENGINE_SKIP} />
+            {!editing ? (
+              <div className="space-y-3">
+                <RuleDetailGrid rule={resolvedEngine} skipKeys={DLP_ENGINE_SKIP} />
+                {!isPredefined && (
+                  <div className="flex gap-3 pt-1">
+                    <button onClick={() => { setEditName(engine.name); setEditExpr(engine.engine_expression ?? ""); setEditDesc(engine.description ?? ""); setEditCustom(engine.custom_dlp_engine ?? false); setEditing(true); }}
+                      className="text-xs text-zs-500 hover:underline">Edit</button>
+                    <button onClick={() => setConfirmDelete(true)} className="text-xs text-red-500 hover:underline">Delete</button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3 border border-gray-200 rounded-md p-3 bg-white">
+                <h4 className="text-sm font-semibold text-gray-700">Edit DLP Engine</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Name</label>
+                    <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                    <input type="text" value={editDesc} onChange={(e) => setEditDesc(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Engine Expression</label>
+                    <input type="text" value={editExpr} onChange={(e) => setEditExpr(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                      placeholder="e.g. (D1 AND D2)" />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" id="editCustom" checked={editCustom} onChange={(e) => setEditCustom(e.target.checked)}
+                      className="rounded border-gray-300" />
+                    <label htmlFor="editCustom" className="text-xs text-gray-600">Custom Engine</label>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => updateMut.mutate()} disabled={updateMut.isPending || !editName.trim()}
+                    className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60">
+                    {updateMut.isPending ? "Saving..." : "Save"}
+                  </button>
+                  <button onClick={() => setEditing(false)}
+                    className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-600">Cancel</button>
+                </div>
+                {updateMut.isError && <ErrorMessage message={updateMut.error instanceof Error ? updateMut.error.message : "Save failed"} />}
+              </div>
+            )}
           </td>
         </tr>
       )}
@@ -984,6 +1022,8 @@ function DlpWebRuleRow({
   togglePending: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+
   return (
     <>
       <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
@@ -991,6 +1031,7 @@ function DlpWebRuleRow({
         <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
           <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
           {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
         </td>
         <td className="px-3 py-2 text-gray-600">{rule.action}</td>
         <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
@@ -1017,28 +1058,19 @@ function FirewallRuleRow({
   onToggle: (id: number, next: string) => void;
   togglePending: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
   return (
-    <>
-      <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
-        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
-        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
-          <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
-          {rule.name}
-        </td>
-        <td className="px-3 py-2 text-gray-600">{rule.action}</td>
-        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
-        </td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={4} className="bg-gray-50 px-4 py-3">
-            <RuleDetailGrid rule={rule as unknown as Record<string, unknown>} skipKeys={FIREWALL_SKIP} />
-          </td>
-        </tr>
-      )}
-    </>
+    <tr className="hover:bg-gray-50">
+      <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+      <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+        {rule.name}
+        {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
+      </td>
+      <td className="px-3 py-2 text-gray-600">{rule.action}</td>
+      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+        <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+      </td>
+    </tr>
   );
 }
 
@@ -1052,6 +1084,8 @@ function SslRuleRow({
   togglePending: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+
   return (
     <>
       <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
@@ -1059,6 +1093,7 @@ function SslRuleRow({
         <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
           <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
           {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
         </td>
         <td className="px-3 py-2 text-gray-600">{rule.action ?? "-"}</td>
         <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
@@ -1078,14 +1113,12 @@ function SslRuleRow({
 
 function ForwardingRuleRow({
   rule,
-  onToggle,
-  togglePending,
 }: {
   rule: ForwardingRule;
-  onToggle: (id: number, next: string) => void;
-  togglePending: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+
   return (
     <>
       <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
@@ -1093,11 +1126,10 @@ function ForwardingRuleRow({
         <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
           <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
           {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
         </td>
         <td className="px-3 py-2 text-gray-500">{rule.type ?? "-"}</td>
-        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
-        </td>
+        <td className="px-3 py-2 text-gray-500">{rule.state ?? "-"}</td>
       </tr>
       {expanded && (
         <tr>
@@ -1113,6 +1145,10 @@ function ForwardingRuleRow({
 function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const qc = useQueryClient();
   const [toggleErr, setToggleErr] = useState<string | null>(null);
+  const [exportErr, setExportErr] = useState<string | null>(null);
+  const [exportPending, setExportPending] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ created: number; updated: number; deleted: number; skipped: number; errors: string[] } | null>(null);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-firewall-rules", tenantName],
     queryFn: () => fetchFirewallRules(tenantName),
@@ -1129,41 +1165,99 @@ function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOp
     onError: (e: Error) => setToggleErr(e.message),
   });
 
+  const syncMut = useMutation({
+    mutationFn: (file: File) => syncFirewallRulesFromCsv(tenantName, file),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["zia-firewall-rules", tenantName] });
+      setSyncResult(result);
+    },
+  });
+
+  async function handleExport() {
+    setExportErr(null);
+    setExportPending(true);
+    try {
+      await exportFirewallRulesToCsv(tenantName, tenantName);
+    } catch (e) {
+      setExportErr(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExportPending(false);
+    }
+  }
+
   if (isLoading) return <LoadingSpinner />;
   if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
   if (!data) return null;
 
   return (
-    <div className="overflow-x-auto">
+    <div className="space-y-3">
       {toggleErr && (
-        <div className="mb-2 px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
           Toggle failed: {toggleErr}
           <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
         </div>
       )}
-      <table className="min-w-full divide-y divide-gray-200 text-sm">
-        <thead className="bg-gray-50">
-          <tr>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100 bg-white">
-          {data.map((r: FirewallRule) => (
-            <FirewallRuleRow
-              key={r.id}
-              rule={r}
-              onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
-              togglePending={toggleMut.isPending}
-            />
-          ))}
-          {data.length === 0 && (
-            <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No firewall rules</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={handleExport}
+          disabled={exportPending}
+          className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >
+          {exportPending ? "Exporting..." : "Export to CSV"}
+        </button>
+        <label className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 cursor-pointer">
+          Sync from CSV
+          <input
+            type="file"
+            accept=".csv"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              setSyncResult(null);
+              if (f) syncMut.mutate(f);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        {syncMut.isPending && <span className="text-xs text-gray-500">Syncing...</span>}
+        {exportErr && <span className="text-xs text-red-600">{exportErr}</span>}
+        {syncMut.isError && (
+          <span className="text-xs text-red-600">
+            {syncMut.error instanceof Error ? syncMut.error.message : "Sync failed"}
+          </span>
+        )}
+        {syncResult && (
+          <span className="text-xs text-green-700">
+            {syncResult.created} created, {syncResult.updated} updated, {syncResult.deleted} deleted
+            {syncResult.errors.length > 0 && ` — ${syncResult.errors.length} error(s)`}
+          </span>
+        )}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((r: FirewallRule) => (
+              <FirewallRuleRow
+                key={r.id}
+                rule={r}
+                onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+                togglePending={toggleMut.isPending}
+              />
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No firewall rules</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -1171,6 +1265,7 @@ function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOp
 function SslInspectionSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const qc = useQueryClient();
   const [toggleErr, setToggleErr] = useState<string | null>(null);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-ssl-rules", tenantName],
     queryFn: () => fetchSslInspectionRules(tenantName),
@@ -1192,57 +1287,47 @@ function SslInspectionSection({ tenantName, isOpen }: { tenantName: string; isOp
   if (!data) return null;
 
   return (
-    <div className="overflow-x-auto">
+    <div className="space-y-3">
       {toggleErr && (
-        <div className="mb-2 px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
           Toggle failed: {toggleErr}
           <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
         </div>
       )}
-      <table className="min-w-full divide-y divide-gray-200 text-sm">
-        <thead className="bg-gray-50">
-          <tr>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100 bg-white">
-          {data.map((r: SslInspectionRule) => (
-            <SslRuleRow
-              key={r.id}
-              rule={r}
-              onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
-              togglePending={toggleMut.isPending}
-            />
-          ))}
-          {data.length === 0 && (
-            <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No SSL inspection rules</td></tr>
-          )}
-        </tbody>
-      </table>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((r: SslInspectionRule) => (
+              <SslRuleRow
+                key={r.id}
+                rule={r}
+                onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+                togglePending={toggleMut.isPending}
+              />
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No SSL inspection rules</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
-  const qc = useQueryClient();
-  const [toggleErr, setToggleErr] = useState<string | null>(null);
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-forwarding-rules", tenantName],
     queryFn: () => fetchForwardingRules(tenantName),
     enabled: isOpen,
-  });
-
-  const toggleMut = useMutation({
-    mutationFn: ({ id, state }: { id: number; state: string }) =>
-      patchForwardingRuleState(tenantName, id, state),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["zia-forwarding-rules", tenantName] });
-      qc.invalidateQueries({ queryKey: ["zia-activation", tenantName] });
-    },
-    onError: (e: Error) => setToggleErr(e.message),
   });
 
   if (isLoading) return <LoadingSpinner />;
@@ -1251,12 +1336,6 @@ function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; is
 
   return (
     <div className="overflow-x-auto">
-      {toggleErr && (
-        <div className="mb-2 px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
-          Toggle failed: {toggleErr}
-          <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
-        </div>
-      )}
       <table className="min-w-full divide-y divide-gray-200 text-sm">
         <thead className="bg-gray-50">
           <tr>
@@ -1268,12 +1347,7 @@ function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; is
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
           {data.map((r: ForwardingRule) => (
-            <ForwardingRuleRow
-              key={r.id}
-              rule={r}
-              onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
-              togglePending={toggleMut.isPending}
-            />
+            <ForwardingRuleRow key={r.id} rule={r} />
           ))}
           {data.length === 0 && (
             <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No forwarding rules</td></tr>
@@ -1285,6 +1359,13 @@ function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; is
 }
 
 function DlpEnginesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [showNew, setShowNew] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newExpr, setNewExpr] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newCustom, setNewCustom] = useState(true);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-dlp-engines", tenantName],
     queryFn: () => fetchDlpEngines(tenantName),
@@ -1306,12 +1387,70 @@ function DlpEnginesSection({ tenantName, isOpen }: { tenantName: string; isOpen:
     ])
   );
 
+  const createMut = useMutation({
+    mutationFn: () => createDlpEngine(tenantName, {
+      name: newName.trim(),
+      engine_expression: newExpr.trim() || undefined,
+      description: newDesc.trim() || undefined,
+      custom_dlp_engine: newCustom,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-dlp-engines", tenantName] });
+      setShowNew(false);
+      setNewName(""); setNewExpr(""); setNewDesc(""); setNewCustom(true);
+    },
+  });
+
   if (isLoading) return <LoadingSpinner />;
   if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
   if (!data) return null;
 
   return (
-    <div className="overflow-x-auto">
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <button onClick={() => setShowNew((x) => !x)}
+          className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white">
+          {showNew ? "Cancel" : "New Custom Engine"}
+        </button>
+      </div>
+      {showNew && (
+        <div className="border border-gray-200 rounded-md p-4 bg-gray-50 space-y-3">
+          <h4 className="text-sm font-semibold text-gray-700">New DLP Engine</h4>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Name *</label>
+              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
+                className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+              <input type="text" value={newDesc} onChange={(e) => setNewDesc(e.target.value)}
+                className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500" />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Engine Expression</label>
+              <input type="text" value={newExpr} onChange={(e) => setNewExpr(e.target.value)}
+                className="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+                placeholder="e.g. (D1 AND D2)" />
+            </div>
+            <div className="flex items-center gap-2">
+              <input type="checkbox" id="newCustom" checked={newCustom} onChange={(e) => setNewCustom(e.target.checked)}
+                className="rounded border-gray-300" />
+              <label htmlFor="newCustom" className="text-xs text-gray-600">Custom Engine</label>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => createMut.mutate()} disabled={createMut.isPending || !newName.trim()}
+              className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60">
+              {createMut.isPending ? "Creating..." : "Create"}
+            </button>
+            <button onClick={() => setShowNew(false)}
+              className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-600">Cancel</button>
+          </div>
+          {createMut.isError && <ErrorMessage message={createMut.error instanceof Error ? createMut.error.message : "Create failed"} />}
+        </div>
+      )}
+      <div className="overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200 text-sm">
         <thead className="bg-gray-50">
           <tr>
@@ -1322,13 +1461,15 @@ function DlpEnginesSection({ tenantName, isOpen }: { tenantName: string; isOpen:
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
           {data.map((e: DlpEngine) => (
-            <DlpEngineRow key={e.id} engine={e} dictMap={dictMap} />
+            <DlpEngineRow key={e.id} tenantName={tenantName} engine={e} dictMap={dictMap}
+              onDeleted={() => qc.invalidateQueries({ queryKey: ["zia-dlp-engines", tenantName] })} />
           ))}
           {data.length === 0 && (
             <tr><td colSpan={3} className="px-3 py-4 text-center text-gray-400">No DLP engines</td></tr>
           )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -1453,9 +1594,9 @@ function DlpWebRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen
   if (!data) return null;
 
   return (
-    <div>
+    <div className="space-y-3">
       {toggleErr && (
-        <div className="mb-2 rounded bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
           Toggle failed: {toggleErr}
           <button className="ml-2 underline" onClick={() => setToggleErr(null)}>dismiss</button>
         </div>
