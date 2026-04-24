@@ -1245,13 +1245,18 @@ function FirewallRulesSection({ tenantName, isOpen }: { tenantName: string; isOp
             {syncMut.error instanceof Error ? syncMut.error.message : "Sync failed"}
           </span>
         )}
-        {syncResult && (
+        {syncResult && syncResult.errors.length === 0 && (
           <span className="text-xs text-green-700">
-            {syncResult.created} created, {syncResult.updated} updated, {syncResult.deleted} deleted
-            {syncResult.errors.length > 0 && ` — ${syncResult.errors.length} error(s)`}
+            {syncResult.created} created, {syncResult.updated} updated, {syncResult.deleted} deleted, {syncResult.skipped} skipped
           </span>
         )}
       </div>
+      {syncResult && syncResult.errors.length > 0 && (
+        <div className="px-3 py-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded space-y-1">
+          <div className="font-medium">{syncResult.created} created, {syncResult.updated} updated, {syncResult.deleted} deleted, {syncResult.skipped} skipped — {syncResult.errors.length} error(s):</div>
+          {syncResult.errors.map((e, i) => <div key={i} className="font-mono break-all">{e}</div>)}
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200 text-sm">
           <thead className="bg-gray-50">

@@ -28,6 +28,15 @@ from db.database import get_session
 from db.models import ZIAResource
 from services import audit_service
 
+_CAMEL_RO_FIELDS = frozenset({
+    "lastModifiedTime", "lastModifiedBy", "createdBy", "creationTime",
+    "accessControl", "predefined", "defaultRule", "defaultDnsRuleNameUsed",
+})
+_SNAKE_RO_FIELDS = frozenset({
+    "last_modified_time", "last_modified_by", "created_by", "creation_time",
+    "access_control", "predefined", "default_rule",
+})
+
 
 # ---------------------------------------------------------------------------
 # CSV schema
@@ -462,7 +471,7 @@ def sync_rules(
         zia_id = item["zia_id"]
         name = row.get("name", "")
         try:
-            config = _build_payload(row, item["desired_order"])
+            config = _build_payload(row, item["desired_order"], item.get("existing_cfg"))
             client.update_firewall_rule(zia_id, config)
             audit_service.log(
                 product="ZIA", operation="sync_firewall_rules", action="UPDATE",
@@ -575,8 +584,9 @@ def sync_rules(
             zia_id = item["zia_id"]
             name = item["row"].get("name", "")
             try:
-                # Minimal PUT — just set the new order
-                config = _build_payload(item["row"], item["desired_order"])
+                config = _build_payload(
+                    item["row"], item["desired_order"], item.get("existing_cfg")
+                )
                 client.update_firewall_rule(zia_id, config)
             except Exception as exc:
                 reorder_errors.append(f"{name}: {exc}")
@@ -603,36 +613,73 @@ def _split(value: str) -> List[str]:
     return [v.strip() for v in value.split(";") if v.strip()]
 
 
-def _build_payload(row: Dict, order: int) -> Dict:
-    """Build the API payload dict for create or update."""
-    payload: Dict = {
-        "name":   row.get("name", ""),
-        "order":  order,
-        "action": (row.get("action") or "").strip().upper() or "ALLOW",
-        "state":  (row.get("state") or "ENABLED").strip().upper(),
-    }
+def _build_payload(row: Dict, order: int, existing_cfg: Optional[Dict] = None) -> Dict:
+    """Build the API payload dict for create or update.
 
-    if row.get("description"):
-        payload["description"] = row["description"]
+    When existing_cfg is provided (UPDATE or REORDER), starts from the existing
+    rule's full config to preserve fields not covered by the CSV schema (ZPA app
+    segments, gateway, etc.), then applies CSV-specified values on top.  For new
+    rules (CREATE), builds from scratch.
+
+    ZPA segment extension objects are stripped because the ZIA API rejects them.
+    """
+    if existing_cfg:
+        # Strip read-only and empty-collection fields from base
+        payload = {
+            k: v for k, v in existing_cfg.items()
+            if k not in _CAMEL_RO_FIELDS
+            and k not in _SNAKE_RO_FIELDS
+            and v is not None
+            and not (isinstance(v, list) and len(v) == 0)
+        }
+    else:
+        payload = {}
+
+    # Apply CSV-covered scalar fields (always authoritative)
+    payload["name"]   = row.get("name", "")
+    payload["order"]  = order
+    payload["action"] = (row.get("action") or "").strip().upper() or "ALLOW"
+    payload["state"]  = (row.get("state") or "ENABLED").strip().upper()
+    payload["description"] = row.get("description") or ""
 
     logging_str = (row.get("enable_full_logging") or "").strip().lower()
     if logging_str in ("true", "false"):
         payload["enable_full_logging"] = logging_str == "true"
 
-    if row.get("_src_ips"):
-        payload["src_ips"] = row["_src_ips"]
-    if row.get("_dest_addresses"):
-        payload["dest_addresses"] = row["_dest_addresses"]
-    if row.get("_src_ip_group_ids"):
-        payload["src_ip_groups"] = [{"id": int(gid)} for gid in row["_src_ip_group_ids"]]
-    if row.get("_dest_ip_group_ids"):
-        payload["dest_ip_groups"] = [{"id": int(gid)} for gid in row["_dest_ip_group_ids"]]
-    if row.get("_nw_service_ids"):
-        payload["nw_services"] = [{"id": int(sid)} for sid in row["_nw_service_ids"]]
-    if row.get("_nw_svc_group_ids"):
-        payload["nw_service_groups"] = [{"id": int(gid)} for gid in row["_nw_svc_group_ids"]]
-    if row.get("_location_ids"):
-        payload["locations"] = [{"id": int(lid)} for lid in row["_location_ids"]]
+    # Apply CSV-covered ref fields (always overwrite existing; empty = clear)
+    payload["src_ips"]         = row.get("_src_ips") or []
+    payload["dest_addresses"]  = row.get("_dest_addresses") or []
+    payload["src_ip_groups"]   = [{"id": int(gid)} for gid in (row.get("_src_ip_group_ids") or [])]
+    payload["dest_ip_groups"]  = [{"id": int(gid)} for gid in (row.get("_dest_ip_group_ids") or [])]
+    payload["nw_services"]     = [{"id": int(sid)} for sid in (row.get("_nw_service_ids") or [])]
+    payload["nw_service_groups"] = [{"id": int(gid)} for gid in (row.get("_nw_svc_group_ids") or [])]
+    payload["locations"]       = [{"id": int(lid)} for lid in (row.get("_location_ids") or [])]
+
+    # Strip empty lists (ZIA rejects them)
+    payload = {k: v for k, v in payload.items() if not (isinstance(v, list) and len(v) == 0)}
+
+    # Strip empty description
+    if payload.get("description") == "":
+        del payload["description"]
+
+    # Strip ZPA segment extension objects — keep only {id, name, external_id}
+    for field_name in ("zpa_app_segments", "zpa_application_segments", "zpa_application_segment_groups"):
+        if field_name in payload and isinstance(payload[field_name], list):
+            reduced = [
+                {k2: v2 for k2, v2 in seg.items() if k2 in ("id", "name", "external_id")}
+                for seg in payload[field_name]
+                if isinstance(seg, dict) and "id" in seg
+            ]
+            if reduced:
+                payload[field_name] = reduced
+            else:
+                del payload[field_name]
+    if "zpa_gateway" in payload and isinstance(payload["zpa_gateway"], dict):
+        gw = payload["zpa_gateway"]
+        if gw.get("id"):
+            payload["zpa_gateway"] = {k2: v2 for k2, v2 in gw.items() if k2 in ("id", "name")}
+        else:
+            del payload["zpa_gateway"]
 
     return payload
 
