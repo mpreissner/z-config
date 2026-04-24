@@ -42,7 +42,6 @@ import {
   fetchForwardingRules,
   patchForwardingRuleState,
   fetchDlpEngines,
-  createDlpEngine,
   updateDlpEngine,
   deleteDlpEngine,
   fetchDlpDictionaries,
@@ -50,6 +49,9 @@ import {
   fetchDlpWebRules,
   patchDlpWebRuleState,
   fetchCloudAppSettings,
+  fetchCloudAppPolicies,
+  fetchCloudAppControlRules,
+  fetchTenancyRestrictionProfiles,
   fetchSnapshots,
   createSnapshot,
   deleteSnapshot,
@@ -66,7 +68,9 @@ import {
   DlpEngine,
   DlpDictionary,
   DlpWebRule,
-  CloudAppSetting,
+  CloudAppPolicy,
+  CloudAppControlRule,
+  TenancyRestrictionProfile,
   ConfigSnapshot,
 } from "../api/zia";
 import {
@@ -1410,11 +1414,6 @@ function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; is
 
 function DlpEnginesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const qc = useQueryClient();
-  const [showNew, setShowNew] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newExpr, setNewExpr] = useState("");
-  const [newDesc, setNewDesc] = useState("");
-  const [newCustom, setNewCustom] = useState(true);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-dlp-engines", tenantName],
@@ -1437,69 +1436,12 @@ function DlpEnginesSection({ tenantName, isOpen }: { tenantName: string; isOpen:
     ])
   );
 
-  const createMut = useMutation({
-    mutationFn: () => createDlpEngine(tenantName, {
-      name: newName.trim(),
-      engine_expression: newExpr.trim() || undefined,
-      description: newDesc.trim() || undefined,
-      custom_dlp_engine: newCustom,
-    }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["zia-dlp-engines", tenantName] });
-      setShowNew(false);
-      setNewName(""); setNewExpr(""); setNewDesc(""); setNewCustom(true);
-    },
-  });
-
   if (isLoading) return <LoadingSpinner />;
   if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
   if (!data) return null;
 
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
-        <button onClick={() => setShowNew((x) => !x)}
-          className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white">
-          {showNew ? "Cancel" : "New Custom Engine"}
-        </button>
-      </div>
-      {showNew && (
-        <div className="border border-gray-200 rounded-md p-4 bg-gray-50 space-y-3">
-          <h4 className="text-sm font-semibold text-gray-700">New DLP Engine</h4>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Name *</label>
-              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)}
-                className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-              <input type="text" value={newDesc} onChange={(e) => setNewDesc(e.target.value)}
-                className="w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500" />
-            </div>
-            <div className="col-span-2">
-              <label className="block text-xs font-medium text-gray-600 mb-1">Engine Expression</label>
-              <input type="text" value={newExpr} onChange={(e) => setNewExpr(e.target.value)}
-                className="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
-                placeholder="e.g. (D1 AND D2)" />
-            </div>
-            <div className="flex items-center gap-2">
-              <input type="checkbox" id="newCustom" checked={newCustom} onChange={(e) => setNewCustom(e.target.checked)}
-                className="rounded border-gray-300" />
-              <label htmlFor="newCustom" className="text-xs text-gray-600">Custom Engine</label>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={() => createMut.mutate()} disabled={createMut.isPending || !newName.trim()}
-              className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60">
-              {createMut.isPending ? "Creating..." : "Create"}
-            </button>
-            <button onClick={() => setShowNew(false)}
-              className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-600">Cancel</button>
-          </div>
-          {createMut.isError && <ErrorMessage message={createMut.error instanceof Error ? createMut.error.message : "Create failed"} />}
-        </div>
-      )}
       <div className="overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200 text-sm">
         <thead className="bg-gray-50">
@@ -1680,44 +1622,132 @@ function DlpWebRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen
   );
 }
 
-function CloudAppSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+function CloudAppInstancesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ["zia-cloud-app-settings", tenantName],
-    queryFn: () => fetchCloudAppSettings(tenantName),
+    queryKey: ["zia-cloud-app-policies", tenantName],
+    queryFn: () => fetchCloudAppPolicies(tenantName),
     enabled: isOpen,
   });
-
   if (isLoading) return <LoadingSpinner />;
   if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
-  if (!data) return null;
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full divide-y divide-gray-200 text-sm">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">App</th>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Class</th>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Policy</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100 bg-white">
+          {(data ?? []).map((p: CloudAppPolicy, i: number) => (
+            <tr key={p.app ?? i}>
+              <td className="px-3 py-2 text-gray-900">{p.app_name ?? p.app ?? "-"}</td>
+              <td className="px-3 py-2 text-gray-500 text-xs">{p.app_class ?? "-"}</td>
+              <td className="px-3 py-2 text-gray-600">{p.policy ?? "-"}</td>
+            </tr>
+          ))}
+          {(data ?? []).length === 0 && (
+            <tr><td colSpan={3} className="px-3 py-4 text-center text-gray-400">No cloud app instances</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
+function TenancyRestrictionsSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-tenancy-restriction-profiles", tenantName],
+    queryFn: () => fetchTenancyRestrictionProfiles(tenantName),
+    enabled: isOpen,
+  });
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
   return (
     <div className="overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200 text-sm">
         <thead className="bg-gray-50">
           <tr>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100 bg-white">
+          {(data ?? []).map((p: TenancyRestrictionProfile, i: number) => (
+            <tr key={p.id ?? i}>
+              <td className="px-3 py-2 text-gray-900">{p.name ?? "-"}</td>
+              <td className="px-3 py-2 text-gray-500 text-xs">{p.description ?? "-"}</td>
+            </tr>
+          ))}
+          {(data ?? []).length === 0 && (
+            <tr><td colSpan={2} className="px-3 py-4 text-center text-gray-400">No tenancy restriction profiles</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CloudAppRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-cloud-app-control-rules", tenantName],
+    queryFn: () => fetchCloudAppControlRules(tenantName),
+    enabled: isOpen,
+  });
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full divide-y divide-gray-200 text-sm">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
-          {data.map((s: CloudAppSetting, i: number) => (
-            <tr key={s.id ?? i}>
-              <td className="px-3 py-2 text-gray-900">{s.name ?? "-"}</td>
-              <td className="px-3 py-2 text-gray-600">{s.action ?? "-"}</td>
+          {(data ?? []).map((r: CloudAppControlRule, i: number) => (
+            <tr key={r.id ?? i}>
+              <td className="px-3 py-2 text-gray-400 text-xs">{r.order ?? "-"}</td>
+              <td className="px-3 py-2 text-gray-900">{r.name ?? "-"}</td>
+              <td className="px-3 py-2 text-gray-500 text-xs">{r.rule_type ?? "-"}</td>
+              <td className="px-3 py-2 text-gray-600">{r.action ?? "-"}</td>
               <td className="px-3 py-2">
-                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${s.state === "ENABLED" ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-500"}`}>
-                  {s.state ?? "-"}
+                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${r.state === "ENABLED" ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-500"}`}>
+                  {r.state ?? "-"}
                 </span>
               </td>
             </tr>
           ))}
-          {data.length === 0 && (
-            <tr><td colSpan={3} className="px-3 py-4 text-center text-gray-400">No cloud app settings</td></tr>
+          {(data ?? []).length === 0 && (
+            <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-400">No cloud app control rules</td></tr>
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+const CLOUD_APP_ADV_SKIP = new Set(["id", "name", "access_control"]);
+
+function CloudAppAdvancedSettingsSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-cloud-app-settings", tenantName],
+    queryFn: () => fetchCloudAppSettings(tenantName),
+    enabled: isOpen,
+  });
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  const record = data?.[0] as Record<string, unknown> | undefined;
+  if (!record) return <p className="text-xs text-gray-400 px-1">No settings found.</p>;
+  return (
+    <div className="p-3">
+      <RuleDetailGrid rule={record} skipKeys={CLOUD_APP_ADV_SKIP} />
     </div>
   );
 }
@@ -3239,8 +3269,8 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         <ActivationSection tenantName={tenant.name} isOpen={!!groups.activation} />
       </Accordion>
 
-      {/* Web & URL Filtering */}
-      <SectionGroup title="Web & URL Filtering" isOpen={!!groups.webFilter} onToggle={() => toggleGroup("webFilter")}>
+      {/* URL Filtering & Cloud App Controls */}
+      <SectionGroup title="URL Filtering & Cloud App Controls" isOpen={!!groups.webFilter} onToggle={() => toggleGroup("webFilter")}>
         <Accordion title="URL Filtering Rules" isOpen={!!open.urlFilteringRules} onToggle={() => toggle("urlFilteringRules")}>
           <UrlFilteringRulesSection tenantName={tenant.name} isOpen={!!open.urlFilteringRules} />
         </Accordion>
@@ -3250,12 +3280,17 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         <Accordion title="URL Lookup" isOpen={!!open.urlLookup} onToggle={() => toggle("urlLookup")}>
           <UrlLookupSection tenantName={tenant.name} />
         </Accordion>
-      </SectionGroup>
-
-      {/* Cloud App Controls */}
-      <SectionGroup title="Cloud App Controls" isOpen={!!groups.cloudApps} onToggle={() => toggleGroup("cloudApps")}>
-        <Accordion title="Cloud App Settings" isOpen={!!open.cloudApps} onToggle={() => toggle("cloudApps")}>
-          <CloudAppSection tenantName={tenant.name} isOpen={!!open.cloudApps} />
+        <Accordion title="Cloud App Instances" isOpen={!!open.cloudAppInstances} onToggle={() => toggle("cloudAppInstances")}>
+          <CloudAppInstancesSection tenantName={tenant.name} isOpen={!!open.cloudAppInstances} />
+        </Accordion>
+        <Accordion title="Tenancy Restrictions" isOpen={!!open.tenancyRestrictions} onToggle={() => toggle("tenancyRestrictions")}>
+          <TenancyRestrictionsSection tenantName={tenant.name} isOpen={!!open.tenancyRestrictions} />
+        </Accordion>
+        <Accordion title="Cloud App Rules" isOpen={!!open.cloudAppRules} onToggle={() => toggle("cloudAppRules")}>
+          <CloudAppRulesSection tenantName={tenant.name} isOpen={!!open.cloudAppRules} />
+        </Accordion>
+        <Accordion title="URL & Cloud App Control Advanced Settings" isOpen={!!open.cloudAppAdvanced} onToggle={() => toggle("cloudAppAdvanced")}>
+          <CloudAppAdvancedSettingsSection tenantName={tenant.name} isOpen={!!open.cloudAppAdvanced} />
         </Accordion>
       </SectionGroup>
 

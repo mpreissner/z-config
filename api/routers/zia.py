@@ -677,6 +677,18 @@ def list_dlp_web_rules(tenant: str, user: AuthUser = Depends(require_auth)):
 def list_cloud_app_settings(tenant: str, user: AuthUser = Depends(require_auth)):
     return _get_service(tenant, user).list_cloud_app_settings()
 
+@router.get("/{tenant}/cloud-app-policies")
+def list_cloud_app_policies(tenant: str, user: AuthUser = Depends(require_auth)):
+    return _get_service(tenant, user).list_cloud_app_policies()
+
+@router.get("/{tenant}/cloud-app-control-rules")
+def list_cloud_app_control_rules(tenant: str, user: AuthUser = Depends(require_auth)):
+    return _get_service(tenant, user).list_cloud_app_control_rules()
+
+@router.get("/{tenant}/tenancy-restriction-profiles")
+def list_tenancy_restriction_profiles(tenant: str, user: AuthUser = Depends(require_auth)):
+    return _get_service(tenant, user).list_tenancy_restriction_profiles()
+
 
 # ------------------------------------------------------------------
 # Config Snapshots

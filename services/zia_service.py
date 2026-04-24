@@ -1213,10 +1213,56 @@ class ZIAService:
     # ------------------------------------------------------------------
 
     def list_cloud_app_settings(self) -> List[Dict]:
+        rows = self._list_from_db("url_filter_cloud_app_settings")
+        if rows:
+            audit_service.log(
+                product="ZIA", operation="list_cloud_app_settings", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="url_filter_cloud_app_settings",
+                details={"count": len(rows), "source": "db"},
+            )
+            return rows
         result = self.client.list_url_filter_cloud_app_settings()
         audit_service.log(
             product="ZIA", operation="list_cloud_app_settings", action="READ", status="SUCCESS",
-            tenant_id=self.tenant_id, resource_type="cloud_app_setting",
-            details={"count": len(result)},
+            tenant_id=self.tenant_id, resource_type="url_filter_cloud_app_settings",
+            details={"count": len(result), "source": "api"},
+        )
+        return result
+
+    def list_cloud_app_policies(self) -> List[Dict]:
+        rows = self._list_from_db("cloud_app_policy")
+        if rows:
+            rows.sort(key=lambda r: (r.get("app_class") or "", r.get("app_name") or ""))
+            return rows
+        result = self.client.list_cloud_app_policy()
+        audit_service.log(
+            product="ZIA", operation="list_cloud_app_policies", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="cloud_app_policy",
+            details={"count": len(result), "source": "api"},
+        )
+        return result
+
+    def list_cloud_app_control_rules(self) -> List[Dict]:
+        rows = self._list_from_db("cloud_app_control_rule")
+        if rows:
+            rows.sort(key=lambda r: r.get("order") or 0)
+            return rows
+        result = self.client.list_all_cloud_app_rules()
+        audit_service.log(
+            product="ZIA", operation="list_cloud_app_control_rules", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="cloud_app_control_rule",
+            details={"count": len(result), "source": "api"},
+        )
+        return result
+
+    def list_tenancy_restriction_profiles(self) -> List[Dict]:
+        rows = self._list_from_db("tenancy_restriction_profile")
+        if rows:
+            return rows
+        result = self.client.list_tenancy_restriction_profiles()
+        audit_service.log(
+            product="ZIA", operation="list_tenancy_restriction_profiles", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="tenancy_restriction_profile",
+            details={"count": len(result), "source": "api"},
         )
         return result

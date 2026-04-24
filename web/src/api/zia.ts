@@ -511,6 +511,41 @@ export interface CloudAppSetting {
 export const fetchCloudAppSettings = (tenant: string): Promise<CloudAppSetting[]> =>
   apiFetch<CloudAppSetting[]>(`${base(tenant)}/cloud-app-settings`);
 
+export interface CloudAppPolicy {
+  app?: string;
+  app_name?: string;
+  app_class?: string;
+  policy?: string;
+  [key: string]: unknown;
+}
+
+export interface CloudAppControlRule {
+  id?: number;
+  name?: string;
+  rule_type?: string;
+  order?: number;
+  state?: string;
+  action?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface TenancyRestrictionProfile {
+  id?: number;
+  name?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export const fetchCloudAppPolicies = (tenant: string): Promise<CloudAppPolicy[]> =>
+  apiFetch<CloudAppPolicy[]>(`${base(tenant)}/cloud-app-policies`);
+
+export const fetchCloudAppControlRules = (tenant: string): Promise<CloudAppControlRule[]> =>
+  apiFetch<CloudAppControlRule[]>(`${base(tenant)}/cloud-app-control-rules`);
+
+export const fetchTenancyRestrictionProfiles = (tenant: string): Promise<TenancyRestrictionProfile[]> =>
+  apiFetch<TenancyRestrictionProfile[]>(`${base(tenant)}/tenancy-restriction-profiles`);
+
 // ── Snapshots ─────────────────────────────────────────────────────────────────
 
 export interface ConfigSnapshot {
