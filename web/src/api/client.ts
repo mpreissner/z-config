@@ -17,6 +17,11 @@ export function setTokenGetter(fn: () => string | null) {
   _getToken = fn;
 }
 
+export function getAuthHeaders(): Record<string, string> {
+  const token = _getToken?.();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = _getToken?.();
   const isFormData = init?.body instanceof FormData;

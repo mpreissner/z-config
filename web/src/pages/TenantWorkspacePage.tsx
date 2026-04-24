@@ -40,6 +40,7 @@ import {
   fetchSslInspectionRules,
   patchSslRuleState,
   fetchForwardingRules,
+  patchForwardingRuleState,
   fetchDlpEngines,
   createDlpEngine,
   updateDlpEngine,
@@ -878,6 +879,7 @@ const DLP_ENGINE_SKIP = new Set(["id", "name", "predefinedEngine"]);
 const DLP_WEB_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const SSL_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const FORWARDING_SKIP = new Set(["id", "name", "order", "type", "state"]);
+const FIREWALL_SKIP = new Set(["id", "name", "order", "action", "state"]);
 
 function resolveEngineExpression(expr: string, dictMap: Map<number, string>): string {
   return expr.replace(/D(\d+)/g, (_match, id) => {
@@ -1058,19 +1060,30 @@ function FirewallRuleRow({
   onToggle: (id: number, next: string) => void;
   togglePending: boolean;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const isPredefined = rule.predefined === true;
   return (
-    <tr className="hover:bg-gray-50">
-      <td className="px-3 py-2 text-gray-500">{rule.order}</td>
-      <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
-        {rule.name}
-        {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
-      </td>
-      <td className="px-3 py-2 text-gray-600">{rule.action}</td>
-      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-        <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
-      </td>
-    </tr>
+    <>
+      <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
+        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
+          {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
+        </td>
+        <td className="px-3 py-2 text-gray-600">{rule.action}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={4} className="bg-gray-50 px-4 py-3">
+            <RuleDetailGrid rule={rule as unknown as Record<string, unknown>} skipKeys={FIREWALL_SKIP} />
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -1113,8 +1126,12 @@ function SslRuleRow({
 
 function ForwardingRuleRow({
   rule,
+  onToggle,
+  togglePending,
 }: {
   rule: ForwardingRule;
+  onToggle: (id: number, next: string) => void;
+  togglePending: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const isPredefined = rule.predefined === true;
@@ -1129,7 +1146,9 @@ function ForwardingRuleRow({
           {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
         </td>
         <td className="px-3 py-2 text-gray-500">{rule.type ?? "-"}</td>
-        <td className="px-3 py-2 text-gray-500">{rule.state ?? "-"}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+        </td>
       </tr>
       {expanded && (
         <tr>
@@ -1324,10 +1343,23 @@ function SslInspectionSection({ tenantName, isOpen }: { tenantName: string; isOp
 }
 
 function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [toggleErr, setToggleErr] = useState<string | null>(null);
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["zia-forwarding-rules", tenantName],
     queryFn: () => fetchForwardingRules(tenantName),
     enabled: isOpen,
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: ({ id, state }: { id: number; state: string }) =>
+      patchForwardingRuleState(tenantName, id, state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-forwarding-rules", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-activation", tenantName] });
+    },
+    onError: (e: Error) => setToggleErr(e.message),
   });
 
   if (isLoading) return <LoadingSpinner />;
@@ -1335,7 +1367,14 @@ function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; is
   if (!data) return null;
 
   return (
-    <div className="overflow-x-auto">
+    <div className="space-y-3">
+      {toggleErr && (
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+          Toggle failed: {toggleErr}
+          <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
+        </div>
+      )}
+      <div className="overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200 text-sm">
         <thead className="bg-gray-50">
           <tr>
@@ -1347,13 +1386,19 @@ function ForwardingRulesSection({ tenantName, isOpen }: { tenantName: string; is
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
           {data.map((r: ForwardingRule) => (
-            <ForwardingRuleRow key={r.id} rule={r} />
+            <ForwardingRuleRow
+              key={r.id}
+              rule={r}
+              onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+              togglePending={toggleMut.isPending}
+            />
           ))}
           {data.length === 0 && (
             <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No forwarding rules</td></tr>
           )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

@@ -194,11 +194,11 @@ export default function AdminSettingsPage() {
         <ErrorMessage message={mut.error instanceof Error ? mut.error.message : "Save failed"} />
       )}
 
-      {/* ── Authentication ────────────────────────────────────────────────── */}
-      <SectionCard title="Authentication">
+      {/* ── Session ───────────────────────────────────────────────────────── */}
+      <SectionCard title="Session">
         <FieldRow
-          label="Access token lifetime"
-          hint="How long a login session stays valid before a refresh is required."
+          label="Session timeout"
+          hint="How long before a user is required to log in again."
         >
           <div className="flex items-center gap-2">
             <NumberInput
@@ -208,26 +208,6 @@ export default function AdminSettingsPage() {
               max={1440}
             />
             <span className="text-sm text-gray-500">minutes</span>
-            <span className="text-xs text-gray-400">
-              ({draft.access_token_ttl}s)
-            </span>
-          </div>
-        </FieldRow>
-        <FieldRow
-          label="Refresh token lifetime"
-          hint="How long before a user must log in again from scratch."
-        >
-          <div className="flex items-center gap-2">
-            <NumberInput
-              value={Math.round(draft.refresh_token_ttl / 86400)}
-              onChange={(v) => set("refresh_token_ttl", v * 86400)}
-              min={1}
-              max={365}
-            />
-            <span className="text-sm text-gray-500">days</span>
-            <span className="text-xs text-gray-400">
-              ({draft.refresh_token_ttl}s)
-            </span>
           </div>
         </FieldRow>
         <FieldRow

@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, getAuthHeaders } from "./client";
 
 export interface ActivationStatus {
   status: string;
@@ -536,7 +536,10 @@ export const deleteSnapshot = (tenant: string, snapshotId: number): Promise<void
 // ── Firewall CSV Export / Sync ────────────────────────────────────────────────
 
 export async function exportFirewallRulesToCsv(tenant: string, tenantName: string): Promise<void> {
-  const res = await fetch(`/api/v1/zia/${encodeURIComponent(tenant)}/firewall-rules/export-csv`);
+  const res = await fetch(`/api/v1/zia/${encodeURIComponent(tenant)}/firewall-rules/export-csv`, {
+    headers: getAuthHeaders(),
+    credentials: "include",
+  });
   if (!res.ok) throw new Error("Export failed");
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
@@ -555,6 +558,8 @@ export async function syncFirewallRulesFromCsv(
   fd.append("file", file);
   const res = await fetch(`/api/v1/zia/${encodeURIComponent(tenant)}/firewall-rules/sync-csv`, {
     method: "POST",
+    headers: getAuthHeaders(),
+    credentials: "include",
     body: fd,
   });
   if (!res.ok) throw new Error("Sync failed");

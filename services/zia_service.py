@@ -47,15 +47,35 @@ def _prepare_rule_for_update(config: Dict) -> Dict:
     """Strip read-only and empty-collection fields before a PUT to the ZIA API.
 
     Zscaler rejects: (a) server-set read-only fields (both camelCase from direct
-    API and snake_case from the SDK), (b) empty arrays.
+    API and snake_case from the SDK), (b) empty arrays, (c) ZPA segment objects
+    with extra extension fields.
     """
-    return {
+    out = {
         k: v for k, v in config.items()
         if k not in _CAMEL_RO_FIELDS
         and k not in _SNAKE_RO_FIELDS
         and v is not None
         and not (isinstance(v, list) and len(v) == 0)
     }
+    # ZPA app segment refs: keep {id, name, external_id} — extensions cause rejection
+    for field in ("zpa_app_segments", "zpa_application_segments", "zpa_application_segment_groups"):
+        if field in out and isinstance(out[field], list):
+            reduced = [
+                {k2: v2 for k2, v2 in seg.items() if k2 in ("id", "name", "external_id")}
+                for seg in out[field]
+                if isinstance(seg, dict) and "id" in seg
+            ]
+            if reduced:
+                out[field] = reduced
+            else:
+                del out[field]
+    if "zpa_gateway" in out and isinstance(out["zpa_gateway"], dict):
+        gw = out["zpa_gateway"]
+        if gw.get("id"):
+            out["zpa_gateway"] = {k2: v2 for k2, v2 in gw.items() if k2 in ("id", "name")}
+        else:
+            del out["zpa_gateway"]
+    return out
 
 
 # Forwarding rule list-ref fields that take [{id, name}] stubs (no extensions).
