@@ -3,13 +3,11 @@
 [![PyPI](https://img.shields.io/pypi/v/zs-config)](https://pypi.org/project/zs-config/)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
-Interactive TUI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity from the terminal, with a local SQLite cache for fast lookups and bulk operations.
+Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC, ZDX, and ZIdentity from the terminal or a self-hosted web interface, with a local SQLite cache for fast lookups and bulk operations.
 
 ---
 
-## Web UI — v2.0.0 Alpha
-
-> **This is a pre-release.** The web UI is under active development on the `feature/web-frontend` branch. Run it locally or on a home lab server — not in production.
+## Web UI — v2.0.0
 
 zs-config v2.0.0 ships a browser-based management UI alongside the existing TUI. It runs as a self-contained Docker container with a FastAPI backend and a React + Tailwind frontend.
 
@@ -18,14 +16,13 @@ zs-config v2.0.0 ships a browser-based management UI alongside the existing TUI.
 Requires Docker with Compose v2. Download and run the deploy script — it handles cloning, secret generation, volumes, build, and startup automatically.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mpreissner/zs-config/feature/web-frontend/deploy.sh -o deploy.sh
+curl -fsSL https://raw.githubusercontent.com/mpreissner/zs-config/main/deploy.sh -o deploy.sh
 bash deploy.sh
 ```
 
 Or if you already have the repo cloned:
 
 ```bash
-git checkout feature/web-frontend
 ./deploy.sh
 ```
 
@@ -50,7 +47,67 @@ You will be prompted to set a permanent password on first login.
 ./deploy.sh
 ```
 
-### Migrating from TUI v1.1.0
+### Web UI Features
+
+The web UI covers all major Zscaler product areas across multiple tenants simultaneously. All data is read from the local SQLite cache; use **Import** in any product tab to refresh from the live API.
+
+**ZIA — Internet Access**
+- Activation — push pending changes and view current activation status
+- URL Filtering Rules — list, search, enable/disable
+- URL Categories — list, view URL counts, add/remove custom URLs
+- URL Lookup — real-time URL categorization check
+- Cloud App Instances — list and search cloud application inventory
+- Tenancy Restrictions — view Microsoft 365 and Google tenant restriction profiles
+- Cloud App Rules — list, search, enable/disable by rule type
+- URL & Cloud App Control Advanced Settings — view and toggle global policy settings
+- Allow / Deny Lists — view and edit the global security allowlist and denylist
+- Firewall Policy — list, search, enable/disable; CSV export and import/sync
+- SSL Inspection — list, search, enable/disable
+- Forwarding Rules — list and search
+- Users, Locations, Departments, Groups — read from local DB
+- DLP Engines — list, search, view; edit expression and confidence
+- DLP Dictionaries — list, search, view; edit confidence threshold
+- DLP Web Rules — list, search, enable/disable
+- Config Snapshots — save, list, delete point-in-time snapshots
+- Apply Snapshot from Other Tenant — delta or wipe-first push with preview
+
+**ZPA — Private Access**
+- App Connectors — list and search
+- Service Edges — list and search
+- Application Segments — list and search
+- Segment Groups — list and search
+- Browser Access Certificates — list
+- PRA Portals — list and search
+
+**ZDX — Digital Experience**
+- Device Search — look up devices by hostname or email, view health metrics
+- User Lookup — search users, view ZDX score and device count
+
+**ZCC — Client Connector**
+- All Devices — list, search, OTP lookup
+- Trusted Networks — list and search
+- Forwarding Profiles — list and search
+- App Profiles (Web Policies) — list and view
+- Bypass App Services — list and view
+
+**ZIdentity**
+- Users — list and search
+- Groups — list, search, view members
+- API Clients — list, search, view details and secrets
+
+**Admin (admin-only)**
+- User Management — create/edit/delete web UI users; assign roles and tenant access
+- Entitlements — control which tenants each non-admin user can see
+- System Settings — session timeout, max login attempts, audit log retention, IdP (OIDC/SAML), SSL mode
+
+### Session Security
+
+- Sessions use a short-lived JWT (5 min) renewed silently against an httpOnly refresh cookie (60 min absolute expiry, never extended)
+- All tokens are invalidated immediately on container restart — prior-session cookies are cryptographically rejected
+- Idle timeout: 15 minutes of inactivity triggers a 2-minute countdown warning, then automatic logout
+- The session timeout setting controls the maximum session duration from login; users will also be logged out after 15 minutes of inactivity regardless of the remaining session time
+
+### Migrating from TUI v1.x
 
 If you have an existing TUI install, you can import your database and encryption key via **Admin → Settings → Import Database** in the web UI. Use the export script to package both files from your local install:
 
@@ -70,7 +127,7 @@ Then upload `zscaler.db` and `secret.key` from that directory. All schema migrat
 
 ---
 
-## Features
+## TUI Features
 
 - **ZPA** — App Connectors & Connector Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), App Segment Groups, Access Policy (list/search/export/import-sync from CSV with dry-run, bulk reorder, and orphan delete), PRA Portals & Consoles, Service Edges, Certificate Management (upload/rotate/delete), Identity & Directory (SAML Attributes, SCIM User Attributes, SCIM Groups), Policy Scoping Reference export, Apps & Groups Reference export
 - **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4 rules, DNS filter, IPS — list/search/enable-disable/export/import-sync from CSV), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), **Apply Snapshot from Another Tenant** (wipe-first or delta push with ID remapping, cross-tenant rule ordering, scope-aware disable), Policy Activation
@@ -111,8 +168,8 @@ zs-config/
 │   ├── zdx_service.py
 │   └── zidentity_service.py
 │
-├── cli/
-│   ├── z_config.py    # Entry point
+├── cli/               # TUI entry point and menus
+│   ├── z_config.py
 │   ├── banner.py
 │   ├── scroll_view.py
 │   ├── update_checker.py
@@ -120,12 +177,26 @@ zs-config/
 │       ├── main_menu.py
 │       ├── zpa_menu.py / zia_menu.py / zcc_menu.py / zdx_menu.py / zidentity_menu.py
 │
-└── api/               # FastAPI REST API (future GUI backend)
+├── api/               # FastAPI REST backend
+│   ├── main.py
+│   ├── auth_utils.py
+│   ├── dependencies.py
+│   └── routers/
+│       ├── auth.py / tenants.py / zia.py / zpa.py / zcc.py / zdx.py / zid.py
+│       └── system.py / users.py / audit.py
+│
+└── web/               # React + Vite + Tailwind frontend
+    └── src/
+        ├── api/       # Typed fetch wrappers per product
+        ├── components/ # Shared UI components
+        ├── context/   # AuthContext, ActiveTenantContext
+        ├── hooks/     # useIdleLogout, useJobStream, etc.
+        └── pages/     # TenantWorkspacePage, AdminSettingsPage, etc.
 ```
 
 ---
 
-## Installation
+## Installation (TUI)
 
 ```bash
 pipx install zs-config   # recommended (isolated)
@@ -278,6 +349,8 @@ Select a time window (2 / 4 / 8 / 24 hours) on entry. Sections: Device Lookup & 
 | `ZCCResource` | Full JSON snapshot of ZCC resources; SHA-256 change detection |
 | `SyncLog` | Import run outcomes (status, counters, errors) |
 | `RestorePoint` | Point-in-time config snapshots |
+| `WebUser` | Web UI users (username, bcrypt hash, role) |
+| `Setting` | Key/value store for admin-configurable settings |
 
 ---
 
