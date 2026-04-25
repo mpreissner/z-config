@@ -34,6 +34,7 @@ reference/
 
 # Claude notes
 .claude/
+.claire/
 
 # Internal notes / research (not for the repo)
 notes/
