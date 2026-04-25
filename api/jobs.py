@@ -29,16 +29,24 @@ class _JobStore:
     def complete(self, job_id: str, result: dict) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
-            if job:
+            if job and job["status"] == "running":
                 job["status"] = "done"
                 job["result"] = result
 
     def fail(self, job_id: str, error: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
-            if job:
+            if job and job["status"] == "running":
                 job["status"] = "error"
                 job["error"] = error
+
+    def cancel(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job["status"] != "running":
+                return False
+            job["status"] = "cancelled"
+            return True
 
     def snapshot(
         self, job_id: str

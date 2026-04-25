@@ -11,7 +11,7 @@ export interface JobProgressEvent {
   total?: number;
 }
 
-export type JobStreamStatus = "idle" | "running" | "done" | "error";
+export type JobStreamStatus = "idle" | "running" | "done" | "error" | "cancelled";
 
 export function useJobStream<T = unknown>(jobId: string | null) {
   const { token } = useAuth();
@@ -52,6 +52,9 @@ export function useJobStream<T = unknown>(jobId: string | null) {
       } else if (data.type === "error") {
         setStreamError(data.message as string);
         setJobStatus("error");
+        es.close();
+      } else if (data.type === "cancelled") {
+        setJobStatus("cancelled");
         es.close();
       }
     };

@@ -1,11 +1,11 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from api.jobs import store
-from api.dependencies import require_auth_sse
+from api.dependencies import require_auth_sse, require_auth
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["Jobs"])
 
@@ -30,6 +30,9 @@ async def stream_job_events(job_id: str, _=Depends(require_auth_sse)):
             if status == "error":
                 yield f"data: {json.dumps({'type': 'error', 'message': error})}\n\n"
                 return
+            if status == "cancelled":
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                return
             await asyncio.sleep(0.2)
 
     return StreamingResponse(
@@ -37,3 +40,10 @@ async def stream_job_events(job_id: str, _=Depends(require_auth_sse)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/{job_id}/cancel")
+async def cancel_job(job_id: str, _=Depends(require_auth)):
+    if not store.cancel(job_id):
+        raise HTTPException(status_code=404, detail="Job not found or already complete")
+    return {"cancelled": True}
