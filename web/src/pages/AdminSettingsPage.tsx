@@ -198,7 +198,7 @@ export default function AdminSettingsPage() {
       <SectionCard title="Session">
         <FieldRow
           label="Session timeout"
-          hint="Maximum session duration from login. Users are also logged out after 15 minutes of inactivity."
+          hint="Maximum session duration from login, regardless of activity."
         >
           <div className="flex items-center gap-2">
             <NumberInput
@@ -206,6 +206,20 @@ export default function AdminSettingsPage() {
               onChange={(v) => set("refresh_token_ttl", v * 60)}
               min={5}
               max={1440}
+            />
+            <span className="text-sm text-gray-500">minutes</span>
+          </div>
+        </FieldRow>
+        <FieldRow
+          label="Idle timeout"
+          hint="Log out users after this many minutes of inactivity. A warning appears 2 minutes before."
+        >
+          <div className="flex items-center gap-2">
+            <NumberInput
+              value={draft.idle_timeout_minutes}
+              onChange={(v) => set("idle_timeout_minutes", v)}
+              min={3}
+              max={120}
             />
             <span className="text-sm text-gray-500">minutes</span>
           </div>

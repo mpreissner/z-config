@@ -17,11 +17,16 @@ router = APIRouter()
 
 @router.get("/api/v1/system/info", tags=["System"])
 def system_info():
+    try:
+        idle_minutes = int(get_setting("idle_timeout_minutes") or "15")
+    except Exception:
+        idle_minutes = 15
     return {
         "version": VERSION,
         "container_mode": os.environ.get("ZS_CONTAINER_MODE", "0") == "1",
         "db_path": os.environ.get("ZSCALER_DB_PATH", "~/.local/share/zs-config/zscaler.db"),
         "plugin_dir": os.environ.get("ZS_PLUGIN_DIR", None),
+        "idle_timeout_minutes": idle_minutes,
     }
 
 
@@ -30,6 +35,7 @@ def system_info():
 _DEFAULTS = {
     "access_token_ttl":        "300",
     "refresh_token_ttl":       "3600",
+    "idle_timeout_minutes":    "15",
     "max_login_attempts":      "0",
     "audit_log_retention_days": "90",
     "idp_enabled":             "false",
@@ -47,6 +53,7 @@ def _coerce(raw: dict) -> dict:
     return {
         "access_token_ttl":        int(raw["access_token_ttl"]),
         "refresh_token_ttl":       int(raw["refresh_token_ttl"]),
+        "idle_timeout_minutes":    int(raw["idle_timeout_minutes"]),
         "max_login_attempts":      int(raw["max_login_attempts"]),
         "audit_log_retention_days": int(raw["audit_log_retention_days"]),
         "idp_enabled":             raw["idp_enabled"] == "true",
@@ -65,6 +72,7 @@ def _load() -> dict:
 class SettingsPatch(BaseModel):
     access_token_ttl:        Optional[int] = None
     refresh_token_ttl:       Optional[int] = None
+    idle_timeout_minutes:    Optional[int] = None
     max_login_attempts:      Optional[int] = None
     audit_log_retention_days: Optional[int] = None
     idp_enabled:             Optional[bool] = None
