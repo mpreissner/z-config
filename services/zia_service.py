@@ -991,6 +991,76 @@ class ZIAService:
         return rule
 
     # ------------------------------------------------------------------
+    # Firewall DNS Filter Rules
+    # ------------------------------------------------------------------
+
+    def list_firewall_dns_rules(self) -> List[Dict]:
+        rows = self._list_from_db("firewall_dns_rule")
+        if rows:
+            rows.sort(key=lambda r: _rule_order_key(r.get("order") or 0))
+            audit_service.log(
+                product="ZIA", operation="list_firewall_dns_rules", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="firewall_dns_rule",
+                details={"count": len(rows), "source": "db"},
+            )
+            return rows
+        result = self.client.list_firewall_dns_rules()
+        result.sort(key=lambda r: _rule_order_key(r.get("order") or 0))
+        audit_service.log(
+            product="ZIA", operation="list_firewall_dns_rules", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="firewall_dns_rule",
+            details={"count": len(result), "source": "api"},
+        )
+        return result
+
+    def toggle_firewall_dns_rule(self, rule_id: str, state: str) -> Dict:
+        rule = self.client.get_firewall_dns_rule(rule_id)
+        rule["state"] = state
+        self.client.update_firewall_dns_rule(rule_id, _prepare_rule_for_update(rule))
+        audit_service.log(
+            product="ZIA", operation="toggle_firewall_dns_rule", action="UPDATE", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="firewall_dns_rule",
+            resource_id=rule_id, details={"state": state},
+        )
+        self._upsert_one("firewall_dns_rule", rule_id, rule)
+        return rule
+
+    # ------------------------------------------------------------------
+    # Firewall IPS Rules
+    # ------------------------------------------------------------------
+
+    def list_firewall_ips_rules(self) -> List[Dict]:
+        rows = self._list_from_db("firewall_ips_rule")
+        if rows:
+            rows.sort(key=lambda r: _rule_order_key(r.get("order") or 0))
+            audit_service.log(
+                product="ZIA", operation="list_firewall_ips_rules", action="READ", status="SUCCESS",
+                tenant_id=self.tenant_id, resource_type="firewall_ips_rule",
+                details={"count": len(rows), "source": "db"},
+            )
+            return rows
+        result = self.client.list_firewall_ips_rules()
+        result.sort(key=lambda r: _rule_order_key(r.get("order") or 0))
+        audit_service.log(
+            product="ZIA", operation="list_firewall_ips_rules", action="READ", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="firewall_ips_rule",
+            details={"count": len(result), "source": "api"},
+        )
+        return result
+
+    def toggle_firewall_ips_rule(self, rule_id: str, state: str) -> Dict:
+        rule = self.client.get_firewall_ips_rule(rule_id)
+        rule["state"] = state
+        self.client.update_firewall_ips_rule(rule_id, _prepare_rule_for_update(rule))
+        audit_service.log(
+            product="ZIA", operation="toggle_firewall_ips_rule", action="UPDATE", status="SUCCESS",
+            tenant_id=self.tenant_id, resource_type="firewall_ips_rule",
+            resource_id=rule_id, details={"state": state},
+        )
+        self._upsert_one("firewall_ips_rule", rule_id, rule)
+        return rule
+
+    # ------------------------------------------------------------------
     # DLP
     # ------------------------------------------------------------------
 

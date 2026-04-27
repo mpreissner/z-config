@@ -111,6 +111,9 @@ export interface ApplySnapshotResult {
   failed: number;
   failed_items: ApplySnapshotFailedItem[];
   warnings: ApplySnapshotWarning[];
+  cancelled?: boolean;
+  rolled_back?: number;
+  rollback_failed?: number;
 }
 
 export const previewApplySnapshot = (

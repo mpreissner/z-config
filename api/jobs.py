@@ -29,14 +29,14 @@ class _JobStore:
     def complete(self, job_id: str, result: dict) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
-            if job and job["status"] == "running":
+            if job and job["status"] in ("running", "cancel_requested"):
                 job["status"] = "done"
                 job["result"] = result
 
     def fail(self, job_id: str, error: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
-            if job and job["status"] == "running":
+            if job and job["status"] in ("running", "cancel_requested"):
                 job["status"] = "error"
                 job["error"] = error
 
@@ -47,6 +47,24 @@ class _JobStore:
                 return False
             job["status"] = "cancelled"
             return True
+
+    def request_cancel(self, job_id: str) -> bool:
+        """Signal cancel without immediately changing the job status.
+
+        The background thread polls is_cancel_requested() between pushes, runs
+        rollback, then calls complete() with cancelled=True in the result.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job["status"] != "running":
+                return False
+            job["status"] = "cancel_requested"
+            return True
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job["status"] == "cancel_requested")
 
     def snapshot(
         self, job_id: str

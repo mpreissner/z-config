@@ -269,6 +269,7 @@ _GET_METHODS: Dict[str, str] = {
     "url_filtering_rule":   "get_url_filtering_rule",
     "firewall_rule":        "get_firewall_rule",
     "firewall_dns_rule":    "get_firewall_dns_rule",
+    "firewall_ips_rule":    "get_firewall_ips_rule",
     "ssl_inspection_rule":  "get_ssl_inspection_rule",
     "dlp_engine":           "get_dlp_engine",
     "dlp_dictionary":       "get_dlp_dictionary",
@@ -285,6 +286,7 @@ class PushRecord:
     name: str
     status: str   # "created" | "updated" | "deleted" | "skipped" | "failed:<reason>"
     warnings: List[str] = None  # type: ignore[assignment]
+    zia_id: Optional[str] = None  # set on created/updated records; used by rollback
 
     def __post_init__(self):
         if self.warnings is None:
@@ -320,6 +322,12 @@ class PushRecord:
             reason = self.status[len("failed:"):]
             return reason[len("permanent:"):] if reason.startswith("permanent:") else reason
         return ""
+
+
+class _PushCancelled(Exception):
+    """Raised by push_classified when a stop_fn signals cancellation."""
+    def __init__(self, pushed_records: "List[PushRecord]"):
+        self.pushed_records = pushed_records
 
 
 @dataclass
@@ -876,6 +884,7 @@ class ZIAPushService:
         self,
         dry_run: DryRunResult,
         progress_callback: Optional[Callable] = None,
+        stop_fn: Optional[Callable[[], bool]] = None,
     ) -> List[PushRecord]:
         """Push the delta from a prior classify_baseline() call.
 
@@ -890,6 +899,8 @@ class ZIAPushService:
             dry_run: Result from classify_baseline().
             progress_callback: Called after each push attempt.
                 Signature: callback(pass_num: int, resource_type: str, record: PushRecord)
+            stop_fn: Optional callable; if it returns True between record pushes,
+                raises _PushCancelled(pushed_records_so_far).
         """
         self._id_remap = dict(dry_run.id_remap)
 
@@ -920,94 +931,97 @@ class ZIAPushService:
 
         all_records: List[PushRecord] = []
 
-        # Pass 1a — settings singletons (provisions one-click rules on the target)
-        if settings_pending:
-            _, pass1a_records = self._single_pass(settings_pending, 1, progress_callback)
-            all_records.extend(pass1a_records)
+        try:
+            # Pass 1a — settings singletons (provisions one-click rules on the target)
+            if settings_pending:
+                _, pass1a_records = self._single_pass(settings_pending, 1, progress_callback, stop_fn)
+                all_records.extend(pass1a_records)
 
-        # Re-import one-click rule types so newly provisioned rules are visible,
-        # then resolve __one_click_pending entries to real target IDs.
-        if one_click_pending:
-            from services.zia_import_service import ZIAImportService
-            _reimport_svc = ZIAImportService(self._client, self._tenant_id)
-            _reimport_svc.run(resource_types=list(one_click_pending.keys()))
-            refreshed = self._load_existing_from_db()
+            # Re-import one-click rule types so newly provisioned rules are visible,
+            # then resolve __one_click_pending entries to real target IDs.
+            if one_click_pending:
+                from services.zia_import_service import ZIAImportService
+                _reimport_svc = ZIAImportService(self._client, self._tenant_id)
+                _reimport_svc.run(resource_types=list(one_click_pending.keys()))
+                refreshed = self._load_existing_from_db()
 
-            # Track orders of unprovisioned one-click rules per type so we can
-            # collapse the gap they leave in the source order sequence.
-            unprovisioned_orders_by_type: Dict[str, List[int]] = {}
+                # Track orders of unprovisioned one-click rules per type so we can
+                # collapse the gap they leave in the source order sequence.
+                unprovisioned_orders_by_type: Dict[str, List[int]] = {}
 
-            for rtype, entries in one_click_pending.items():
-                refreshed_for_type = refreshed.get(rtype, {})
-                for entry in entries:
-                    name = entry.get("name") or entry.get("__display_name", "")
-                    source_id = str(entry.get("id", ""))
-                    found = self._find_existing(refreshed_for_type, source_id, name)
-                    if found:
-                        target_id = found["id"]
-                        if source_id:
-                            self._register_remap(source_id, target_id)
-                        entry["__target_id"] = target_id
-                        entry.pop("__one_click_pending", None)
-                        other_managed_pending.setdefault(rtype, []).append(entry)
-                    else:
-                        dname = entry.get("__display_name") or name or "?"
-                        all_records.append(PushRecord(
-                            resource_type=rtype,
-                            name=dname,
-                            status="skipped:one_click_not_provisioned",
-                        ))
-                        order = (entry.get("raw_config") or {}).get("order") or 0
-                        if order > 0:
-                            unprovisioned_orders_by_type.setdefault(rtype, []).append(order)
-
-            # Renumber ordered-rule entries whose source order sits above a gap
-            # left by an unprovisioned one-click rule.  Each pending entry whose
-            # order exceeds a skipped rule's position is decremented by the count
-            # of skipped rules positioned strictly before it, so the target ends
-            # up with a contiguous sequence starting at 1.
-            for rtype, skipped_orders in unprovisioned_orders_by_type.items():
-                skipped_sorted = sorted(skipped_orders)
-                for pool in (other_managed_pending, user_pending):
-                    for entry in pool.get(rtype, []):
-                        if not entry.get("__set_order"):
-                            continue
-                        raw = entry.get("raw_config") or {}
-                        current = raw.get("order") or 0
-                        if current <= 0:
-                            continue
-                        gap = sum(1 for so in skipped_sorted if so < current)
-                        if gap:
-                            entry["raw_config"] = dict(raw, order=current - gap)
-
-        # Pass 1b — remaining managed resources (including resolved one-click items)
-        if other_managed_pending:
-            _, pass1b_records = self._single_pass(other_managed_pending, 1, progress_callback)
-            all_records.extend(pass1b_records)
-            # Managed failures are logged but not retried
-
-        # Pass 2+ — user-defined resources with multi-pass retry
-        pending = user_pending
-        pass_num = 1
-        while pending:
-            pass_num += 1
-            prev_count = sum(len(v) for v in pending.values())
-
-            new_pending, pass_records = self._single_pass(pending, pass_num, progress_callback)
-            all_records.extend(pass_records)
-            pending = new_pending
-
-            if sum(len(v) for v in pending.values()) >= prev_count:
-                for rtype, entries in pending.items():
+                for rtype, entries in one_click_pending.items():
+                    refreshed_for_type = refreshed.get(rtype, {})
                     for entry in entries:
-                        last_err = entry.get("__last_error", "unknown error")
-                        dname = entry.get("__display_name") or entry.get("name") or "?"
-                        all_records.append(PushRecord(
-                            resource_type=rtype,
-                            name=dname,
-                            status=f"failed:{last_err} (stable, no progress)",
-                        ))
-                break
+                        name = entry.get("name") or entry.get("__display_name", "")
+                        source_id = str(entry.get("id", ""))
+                        found = self._find_existing(refreshed_for_type, source_id, name)
+                        if found:
+                            target_id = found["id"]
+                            if source_id:
+                                self._register_remap(source_id, target_id)
+                            entry["__target_id"] = target_id
+                            entry.pop("__one_click_pending", None)
+                            other_managed_pending.setdefault(rtype, []).append(entry)
+                        else:
+                            dname = entry.get("__display_name") or name or "?"
+                            all_records.append(PushRecord(
+                                resource_type=rtype,
+                                name=dname,
+                                status="skipped:one_click_not_provisioned",
+                            ))
+                            order = (entry.get("raw_config") or {}).get("order") or 0
+                            if order > 0:
+                                unprovisioned_orders_by_type.setdefault(rtype, []).append(order)
+
+                # Renumber ordered-rule entries whose source order sits above a gap
+                # left by an unprovisioned one-click rule.  Each pending entry whose
+                # order exceeds a skipped rule's position is decremented by the count
+                # of skipped rules positioned strictly before it, so the target ends
+                # up with a contiguous sequence starting at 1.
+                for rtype, skipped_orders in unprovisioned_orders_by_type.items():
+                    skipped_sorted = sorted(skipped_orders)
+                    for pool in (other_managed_pending, user_pending):
+                        for entry in pool.get(rtype, []):
+                            if not entry.get("__set_order"):
+                                continue
+                            raw = entry.get("raw_config") or {}
+                            current = raw.get("order") or 0
+                            if current <= 0:
+                                continue
+                            gap = sum(1 for so in skipped_sorted if so < current)
+                            if gap:
+                                entry["raw_config"] = dict(raw, order=current - gap)
+
+            # Pass 1b — remaining managed resources (including resolved one-click items)
+            if other_managed_pending:
+                _, pass1b_records = self._single_pass(other_managed_pending, 1, progress_callback, stop_fn)
+                all_records.extend(pass1b_records)
+
+            # Pass 2+ — user-defined resources with multi-pass retry
+            pending = user_pending
+            pass_num = 1
+            while pending:
+                pass_num += 1
+                prev_count = sum(len(v) for v in pending.values())
+
+                new_pending, pass_records = self._single_pass(pending, pass_num, progress_callback, stop_fn)
+                all_records.extend(pass_records)
+                pending = new_pending
+
+                if sum(len(v) for v in pending.values()) >= prev_count:
+                    for rtype, entries in pending.items():
+                        for entry in entries:
+                            last_err = entry.get("__last_error", "unknown error")
+                            dname = entry.get("__display_name") or entry.get("name") or "?"
+                            all_records.append(PushRecord(
+                                resource_type=rtype,
+                                name=dname,
+                                status=f"failed:{last_err} (stable, no progress)",
+                            ))
+                    break
+
+        except _PushCancelled as exc:
+            raise _PushCancelled(all_records + exc.pushed_records)
 
         return all_records
 
@@ -1034,6 +1048,82 @@ class ZIAPushService:
                 progress_callback(0, rec.resource_type, delete_rec)
             records.append(delete_rec)
         return records
+
+    def rollback_pushed(
+        self,
+        pushed_records: List[PushRecord],
+        progress_callback: Optional[Callable] = None,
+    ) -> List[PushRecord]:
+        """Roll back ZIA changes from a cancelled push.
+
+        Created resources are deleted; updated resources are restored from the DB
+        pre-push state (the DB is not modified during push_classified).
+        Records are processed in reverse order to handle ordering dependencies.
+        """
+        rollback_records: List[PushRecord] = []
+        pre_push = self._load_existing_from_db()
+
+        for rec in reversed(pushed_records):
+            if not rec.zia_id:
+                continue
+            rtype = rec.resource_type
+            if rec.is_created:
+                rb = self._rollback_delete(rtype, rec.name, rec.zia_id)
+            elif rec.is_updated:
+                state = (pre_push.get(rtype) or {}).get(rec.zia_id)
+                if state:
+                    rb = self._rollback_update(rtype, rec.name, rec.zia_id, state["raw_config"])
+                else:
+                    rb = PushRecord(rtype, rec.name, "rollback_skipped:pre_push_state_missing",
+                                    zia_id=rec.zia_id)
+            else:
+                continue
+            rollback_records.append(rb)
+            if progress_callback:
+                progress_callback(rtype, rb)
+
+        return rollback_records
+
+    def _rollback_delete(self, resource_type: str, name: str, zia_id: str) -> PushRecord:
+        """Delete a resource that was created during a cancelled push."""
+        method_name = _DELETE_METHODS.get(resource_type)
+        try:
+            if resource_type == "cloud_app_control_rule":
+                from db.database import get_session
+                from db.models import ZIAResource
+                with get_session() as session:
+                    row = session.query(ZIAResource).filter_by(
+                        tenant_id=self._tenant_id,
+                        resource_type=resource_type,
+                        zia_id=zia_id,
+                    ).first()
+                    rule_type = (row.raw_config or {}).get("type") if row else None
+                if not rule_type:
+                    return PushRecord(resource_type, name,
+                                      "rollback_failed:cloud_app_rule missing type in DB")
+                self._client.delete_cloud_app_rule(rule_type, zia_id)
+            elif method_name:
+                getattr(self._client, method_name)(zia_id)
+            else:
+                return PushRecord(resource_type, name, "rollback_skipped:no_delete_method")
+            return PushRecord(resource_type, name, "rollback_deleted", zia_id=zia_id)
+        except Exception as exc:
+            return PushRecord(resource_type, name, f"rollback_failed:{str(exc)[:150]}")
+
+    def _rollback_update(
+        self, resource_type: str, name: str, zia_id: str, raw_config: dict
+    ) -> PushRecord:
+        """Restore a resource to its pre-push state using DB-captured config."""
+        if resource_type not in _WRITE_METHODS:
+            return PushRecord(resource_type, name, "rollback_skipped:no_write_method")
+        _, update_method_name = _WRITE_METHODS[resource_type]
+        update_method = getattr(self._client, update_method_name)
+        try:
+            payload = self._build_payload(resource_type, raw_config)
+            self._do_update(resource_type, zia_id, update_method, payload)
+            return PushRecord(resource_type, name, "rollback_restored", zia_id=zia_id)
+        except Exception as exc:
+            return PushRecord(resource_type, name, f"rollback_failed:{str(exc)[:150]}")
 
     def classify_snapshot_deletes(
         self,
@@ -1157,6 +1247,7 @@ class ZIAPushService:
         wipe_progress_callback: Optional[Callable] = None,
         import_progress_callback: Optional[Callable] = None,
         push_progress_callback: Optional[Callable] = None,
+        stop_fn: Optional[Callable[[], bool]] = None,
     ) -> Tuple[List[WipeRecord], List[PushRecord]]:
         """Full wipe-first pipeline: classify wipe, execute wipe, classify baseline, push.
 
@@ -1167,6 +1258,8 @@ class ZIAPushService:
                 Signature: callback(resource_type: str, record: WipeRecord)
             import_progress_callback: Called during import phase.
             push_progress_callback: Called during push phase.
+            stop_fn: Optional callable; if it returns True between record pushes,
+                raises _PushCancelled(pushed_records_so_far).
 
         Returns:
             (wipe_records, push_records)
@@ -1182,7 +1275,7 @@ class ZIAPushService:
             pass
 
         dry_run = self.classify_baseline(baseline, import_progress_callback)
-        push_records = self.push_classified(dry_run, push_progress_callback)
+        push_records = self.push_classified(dry_run, push_progress_callback, stop_fn=stop_fn)
         return wipe_records, dry_run.skipped + push_records
 
     # ------------------------------------------------------------------
@@ -1324,12 +1417,14 @@ class ZIAPushService:
         pending: Dict[str, List[dict]],
         pass_num: int,
         progress_callback=None,
+        stop_fn=None,
     ) -> Tuple[Dict[str, List[dict]], List[PushRecord]]:
         """One iteration over pending resources.
 
         Returns (new_pending, records_this_pass).
         Permanent failures (4xx) are not retried.
         Transient failures are kept in new_pending with __last_error set.
+        Raises _PushCancelled if stop_fn() returns True between entries.
         """
         new_pending: Dict[str, List[dict]] = {}
         records: List[PushRecord] = []
@@ -1339,6 +1434,8 @@ class ZIAPushService:
             remaining = []
 
             if rtype in ("allowlist", "denylist"):
+                if stop_fn and stop_fn():
+                    raise _PushCancelled(records)
                 list_records = self._push_list_resource(rtype, entries)
                 records.extend(list_records)
                 if progress_callback:
@@ -1347,6 +1444,8 @@ class ZIAPushService:
                 continue
 
             for entry in entries:
+                if stop_fn and stop_fn():
+                    raise _PushCancelled(records)
                 rec = self._push_one(rtype, entry)
                 if progress_callback:
                     progress_callback(pass_num, rtype, rec)
@@ -1587,7 +1686,7 @@ class ZIAPushService:
             try:
                 self._do_update(resource_type, target_id, update_method, update_payload)
                 return PushRecord(resource_type=resource_type, name=name, status="updated",
-                                  warnings=record_warnings)
+                                  warnings=record_warnings, zia_id=str(target_id))
             except Exception as exc:
                 return self._classify_error(resource_type, name, exc)
 
@@ -1598,7 +1697,7 @@ class ZIAPushService:
             if source_id and new_target_id:
                 self._register_remap(source_id, new_target_id)
             return PushRecord(resource_type=resource_type, name=name, status="created",
-                              warnings=record_warnings)
+                              warnings=record_warnings, zia_id=new_target_id or None)
         except Exception as exc:
             exc_str = str(exc)
             if ("409" in exc_str or "DUPLICATE_ITEM" in exc_str
@@ -1609,7 +1708,8 @@ class ZIAPushService:
                         self._register_remap(source_id, found_id)
                     try:
                         self._do_update(resource_type, found_id, update_method, payload)
-                        return PushRecord(resource_type=resource_type, name=name, status="updated")
+                        return PushRecord(resource_type=resource_type, name=name, status="updated",
+                                          zia_id=found_id)
                     except Exception as upd_exc:
                         return self._classify_error(resource_type, name, upd_exc)
                 return PushRecord(

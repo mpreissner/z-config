@@ -41,6 +41,10 @@ import {
   patchSslRuleState,
   fetchForwardingRules,
   patchForwardingRuleState,
+  fetchFirewallDnsRules,
+  patchFirewallDnsRuleState,
+  fetchFirewallIpsRules,
+  patchFirewallIpsRuleState,
   fetchDlpEngines,
   updateDlpEngine,
   deleteDlpEngine,
@@ -66,6 +70,8 @@ import {
   FirewallRule,
   SslInspectionRule,
   ForwardingRule,
+  FirewallDnsRule,
+  FirewallIpsRule,
   DlpEngine,
   DlpDictionary,
   DlpWebRule,
@@ -886,6 +892,8 @@ const DLP_WEB_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const SSL_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const FORWARDING_SKIP = new Set(["id", "name", "order", "type", "state"]);
 const FIREWALL_SKIP = new Set(["id", "name", "order", "action", "state"]);
+const DNS_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
+const IPS_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
 
 function resolveEngineExpression(expr: string, dictMap: Map<number, string>): string {
   return expr.replace(/D(\d+)/g, (_match, id) => {
@@ -1164,6 +1172,208 @@ function ForwardingRuleRow({
         </tr>
       )}
     </>
+  );
+}
+
+function FirewallDnsRuleRow({
+  rule,
+  onToggle,
+  togglePending,
+}: {
+  rule: FirewallDnsRule;
+  onToggle: (id: number, next: string) => void;
+  togglePending: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+  const actionLabel = typeof rule.action === "object" && rule.action !== null
+    ? (rule.action as { type: string }).type
+    : (rule.action ?? "-");
+
+  return (
+    <>
+      <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
+        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
+          {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
+        </td>
+        <td className="px-3 py-2 text-gray-600">{actionLabel}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={4} className="bg-gray-50 px-4 py-3">
+            <RuleDetailGrid rule={rule as unknown as Record<string, unknown>} skipKeys={DNS_RULE_SKIP} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function FirewallIpsRuleRow({
+  rule,
+  onToggle,
+  togglePending,
+}: {
+  rule: FirewallIpsRule;
+  onToggle: (id: number, next: string) => void;
+  togglePending: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+  const actionLabel = typeof rule.action === "object" && rule.action !== null
+    ? (rule.action as { type: string }).type
+    : (rule.action ?? "-");
+
+  return (
+    <>
+      <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
+        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
+          {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
+        </td>
+        <td className="px-3 py-2 text-gray-600">{actionLabel}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={4} className="bg-gray-50 px-4 py-3">
+            <RuleDetailGrid rule={rule as unknown as Record<string, unknown>} skipKeys={IPS_RULE_SKIP} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function FirewallDnsRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [toggleErr, setToggleErr] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-firewall-dns-rules", tenantName],
+    queryFn: () => fetchFirewallDnsRules(tenantName),
+    enabled: isOpen,
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: ({ id, state }: { id: number; state: string }) =>
+      patchFirewallDnsRuleState(tenantName, id, state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-firewall-dns-rules", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-activation", tenantName] });
+    },
+    onError: (e: Error) => setToggleErr(e.message),
+  });
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  if (!data) return null;
+
+  return (
+    <div className="space-y-3">
+      {toggleErr && (
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+          Toggle failed: {toggleErr}
+          <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((r: FirewallDnsRule) => (
+              <FirewallDnsRuleRow
+                key={r.id}
+                rule={r}
+                onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+                togglePending={toggleMut.isPending}
+              />
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No DNS filter rules</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function FirewallIpsRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [toggleErr, setToggleErr] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-firewall-ips-rules", tenantName],
+    queryFn: () => fetchFirewallIpsRules(tenantName),
+    enabled: isOpen,
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: ({ id, state }: { id: number; state: string }) =>
+      patchFirewallIpsRuleState(tenantName, id, state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-firewall-ips-rules", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-activation", tenantName] });
+    },
+    onError: (e: Error) => setToggleErr(e.message),
+  });
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  if (!data) return null;
+
+  return (
+    <div className="space-y-3">
+      {toggleErr && (
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+          Toggle failed: {toggleErr}
+          <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((r: FirewallIpsRule) => (
+              <FirewallIpsRuleRow
+                key={r.id}
+                rule={r}
+                onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+                togglePending={toggleMut.isPending}
+              />
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No IPS rules</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -2053,12 +2263,14 @@ function RestoreSnapshotModal({
   const isPreviewRunning = previewMut.isPending || previewJobStatus === "running";
   const isApplyRunning = applyMut.isPending || applyJobStatus === "running";
   const applyDone = applyJobStatus === "done";
-  const applyCancelled = applyJobStatus === "cancelled";
+  const applyCancelled = applyJobStatus === "cancelled" || (applyJobStatus === "done" && !!applyResult?.cancelled);
 
   function applyPhaseLabel() {
+    const rollbackEv = applyProgress["rollback"];
     const pushEv = applyProgress["push"];
     const wipeEv = applyProgress["wipe"];
     const importEv = applyProgress["import"];
+    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
     if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
     if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
     if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
@@ -2097,7 +2309,14 @@ function RestoreSnapshotModal({
               {applyCancelled ? (
                 <div className="p-3 rounded-md text-sm bg-amber-50 text-amber-800">
                   <p className="font-medium">Restore cancelled.</p>
-                  <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect and are not automatically rolled back.</p>
+                  {applyResult?.rolled_back !== undefined ? (
+                    <p className="text-xs mt-1">
+                      Rolled back {applyResult.rolled_back} change{applyResult.rolled_back !== 1 ? "s" : ""}.
+                      {!!applyResult.rollback_failed && ` ${applyResult.rollback_failed} rollback${applyResult.rollback_failed !== 1 ? "s" : ""} failed — check ZIA manually.`}
+                    </p>
+                  ) : (
+                    <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect and are not automatically rolled back.</p>
+                  )}
                 </div>
               ) : applyResult ? (
                 <div className={`p-3 rounded-md text-sm ${applyResult.status === "SUCCESS" || applyResult.status === "PARTIAL" ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"}`}>
@@ -3306,7 +3525,7 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
   const isPreviewRunning = previewMut.isPending || previewJobStatus === "running";
   const isApplyRunning = applyMut.isPending || applyJobStatus === "running";
   const applyDone = applyJobStatus === "done";
-  const applyCancelled = applyJobStatus === "cancelled";
+  const applyCancelled = applyJobStatus === "cancelled" || (applyJobStatus === "done" && !!applyResult?.cancelled);
 
   function reset() {
     setPreviewJobId(null);
@@ -3327,7 +3546,14 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
       <div className="space-y-3 p-1">
         <div className="p-3 rounded-md text-sm bg-amber-50 text-amber-800">
           <p className="font-medium">Push cancelled.</p>
-          <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect.</p>
+          {applyResult?.rolled_back !== undefined ? (
+            <p className="text-xs mt-1">
+              Rolled back {applyResult.rolled_back} change{applyResult.rolled_back !== 1 ? "s" : ""}.
+              {!!applyResult.rollback_failed && ` ${applyResult.rollback_failed} rollback${applyResult.rollback_failed !== 1 ? "s" : ""} failed — check ZIA manually.`}
+            </p>
+          ) : (
+            <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect.</p>
+          )}
         </div>
         <button onClick={reset} className="text-xs text-zs-600 hover:underline">Apply another snapshot</button>
       </div>
@@ -3420,9 +3646,11 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
 
   // Phase label for apply progress
   function applyPhaseLabel() {
-    const wipeEv = applyProgress["wipe"];
+    const rollbackEv = applyProgress["rollback"];
     const pushEv = applyProgress["push"];
+    const wipeEv = applyProgress["wipe"];
     const importEv = applyProgress["import"];
+    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
     if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
     if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
     if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
@@ -3731,6 +3959,12 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         </Accordion>
         <Accordion title="Traffic Forwarding" isOpen={!!open.forwarding} onToggle={() => toggle("forwarding")}>
           <ForwardingRulesSection tenantName={tenant.name} isOpen={!!open.forwarding} />
+        </Accordion>
+        <Accordion title="DNS Filter Rules" isOpen={!!open.dnsFilter} onToggle={() => toggle("dnsFilter")}>
+          <FirewallDnsRulesSection tenantName={tenant.name} isOpen={!!open.dnsFilter} />
+        </Accordion>
+        <Accordion title="IPS Rules" isOpen={!!open.ipsRules} onToggle={() => toggle("ipsRules")}>
+          <FirewallIpsRulesSection tenantName={tenant.name} isOpen={!!open.ipsRules} />
         </Accordion>
       </SectionGroup>
 

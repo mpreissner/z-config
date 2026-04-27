@@ -33,6 +33,7 @@ async def stream_job_events(job_id: str, _=Depends(require_auth_sse)):
             if status == "cancelled":
                 yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
                 return
+            # cancel_requested: keep streaming while the thread runs rollback
             await asyncio.sleep(0.2)
 
     return StreamingResponse(
@@ -44,6 +45,6 @@ async def stream_job_events(job_id: str, _=Depends(require_auth_sse)):
 
 @router.post("/{job_id}/cancel")
 async def cancel_job(job_id: str, _=Depends(require_auth)):
-    if not store.cancel(job_id):
+    if not store.request_cancel(job_id):
         raise HTTPException(status_code=404, detail="Job not found or already complete")
     return {"cancelled": True}
