@@ -187,6 +187,11 @@ export default function Layout({ children }: LayoutProps) {
           {/* Divider */}
           <div className="border-t border-zs-600 my-1" />
 
+          {/* Scheduled Tasks */}
+          <NavLink to="/scheduled-tasks" className={navLinkClass}>
+            Scheduled Tasks
+          </NavLink>
+
           {/* Audit Log */}
           <NavLink to="/audit" className={navLinkClass}>
             Audit Log

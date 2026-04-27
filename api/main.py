@@ -34,6 +34,7 @@ from api.routers import system, zia, zpa
 from api.routers import auth as auth_router, tenants as tenants_router, admin as admin_router
 from api.routers import zcc as zcc_router, zdx as zdx_router, zid as zid_router
 from api.routers import jobs as jobs_router
+from api.routers import scheduled_tasks as scheduled_tasks_router
 from api.auth_utils import decode_token
 from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
@@ -76,7 +77,12 @@ async def lifespan(app: FastAPI):
     if temp_password:
         print(f"[zs-config] Admin account created. Initial password: {temp_password}", flush=True)
 
+    from services.scheduled_task_service import start_scheduler, stop_scheduler
+    start_scheduler()
+
     yield
+
+    stop_scheduler()
 
 
 class MfaEnrollMiddleware(BaseHTTPMiddleware):
@@ -157,6 +163,7 @@ app.include_router(auth_router.router)
 app.include_router(tenants_router.router)
 app.include_router(admin_router.router)
 app.include_router(jobs_router.router)
+app.include_router(scheduled_tasks_router.router)
 
 
 @app.get("/health", tags=["System"])

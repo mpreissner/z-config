@@ -108,6 +108,28 @@ def _migrate(engine) -> None:
             created_at DATETIME NOT NULL,
             last_used_at DATETIME
         )""",
+        """CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL UNIQUE,
+            source_tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id),
+            target_tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id),
+            resource_groups JSON NOT NULL,
+            cron_expression VARCHAR(128) NOT NULL,
+            sync_deletes BOOLEAN NOT NULL DEFAULT 0,
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            owner_email VARCHAR(512),
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS task_run_history (
+            id INTEGER PRIMARY KEY,
+            task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+            started_at DATETIME NOT NULL,
+            finished_at DATETIME,
+            status VARCHAR(16) NOT NULL,
+            resources_synced INTEGER NOT NULL DEFAULT 0,
+            errors_json JSON
+        )""",
     ]
     for stmt in migrations:
         with engine.connect() as conn:
