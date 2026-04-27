@@ -12,8 +12,6 @@ import {
   fetchTaskRuns,
   fetchTaskRunDetail,
   ScheduledTask,
-  TaskRunHistory,
-  TaskRunHistoryDetail,
   CreateScheduledTaskRequest,
 } from "../api/scheduledTasks";
 import LoadingSpinner from "../components/LoadingSpinner";
