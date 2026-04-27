@@ -281,6 +281,48 @@ export const patchForwardingRuleState = (tenant: string, ruleId: number, state: 
     body: JSON.stringify({ state }),
   });
 
+// ── Firewall DNS Filter Rules ─────────────────────────────────────────────────
+
+export interface FirewallDnsRule {
+  id: number;
+  name: string;
+  order: number;
+  action?: string | { type: string };
+  state: string;
+  description?: string;
+  predefined?: boolean;
+}
+
+export const fetchFirewallDnsRules = (tenant: string): Promise<FirewallDnsRule[]> =>
+  apiFetch<FirewallDnsRule[]>(`${base(tenant)}/firewall-dns-rules`);
+
+export const patchFirewallDnsRuleState = (tenant: string, ruleId: number, state: string): Promise<FirewallDnsRule> =>
+  apiFetch<FirewallDnsRule>(`${base(tenant)}/firewall-dns-rules/${ruleId}/state`, {
+    method: "PATCH",
+    body: JSON.stringify({ state }),
+  });
+
+// ── Firewall IPS Rules ────────────────────────────────────────────────────────
+
+export interface FirewallIpsRule {
+  id: number;
+  name: string;
+  order: number;
+  action?: string | { type: string };
+  state: string;
+  description?: string;
+  predefined?: boolean;
+}
+
+export const fetchFirewallIpsRules = (tenant: string): Promise<FirewallIpsRule[]> =>
+  apiFetch<FirewallIpsRule[]>(`${base(tenant)}/firewall-ips-rules`);
+
+export const patchFirewallIpsRuleState = (tenant: string, ruleId: number, state: string): Promise<FirewallIpsRule> =>
+  apiFetch<FirewallIpsRule>(`${base(tenant)}/firewall-ips-rules/${ruleId}/state`, {
+    method: "PATCH",
+    body: JSON.stringify({ state }),
+  });
+
 // ── DLP ───────────────────────────────────────────────────────────────────────
 
 export interface DlpEngine {

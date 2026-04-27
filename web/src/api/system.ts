@@ -5,6 +5,7 @@ export interface SystemInfo {
   container_mode: boolean;
   db_path: string;
   plugin_dir: string | null;
+  idle_timeout_minutes: number;
 }
 
 export interface HealthStatus {
@@ -15,6 +16,7 @@ export interface HealthStatus {
 export interface SystemSettings {
   access_token_ttl: number;
   refresh_token_ttl: number;
+  idle_timeout_minutes: number;
   max_login_attempts: number;
   audit_log_retention_days: number;
   idp_enabled: boolean;

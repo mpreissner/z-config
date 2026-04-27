@@ -41,6 +41,10 @@ import {
   patchSslRuleState,
   fetchForwardingRules,
   patchForwardingRuleState,
+  fetchFirewallDnsRules,
+  patchFirewallDnsRuleState,
+  fetchFirewallIpsRules,
+  patchFirewallIpsRuleState,
   fetchDlpEngines,
   updateDlpEngine,
   deleteDlpEngine,
@@ -66,6 +70,8 @@ import {
   FirewallRule,
   SslInspectionRule,
   ForwardingRule,
+  FirewallDnsRule,
+  FirewallIpsRule,
   DlpEngine,
   DlpDictionary,
   DlpWebRule,
@@ -119,6 +125,7 @@ import {
   ZidApiClient,
   ZidApiClientSecret,
 } from "../api/zid";
+import { cancelJob } from "../api/jobs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
 import Accordion from "../components/Accordion";
@@ -885,6 +892,8 @@ const DLP_WEB_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const SSL_SKIP = new Set(["id", "name", "order", "action", "state"]);
 const FORWARDING_SKIP = new Set(["id", "name", "order", "type", "state"]);
 const FIREWALL_SKIP = new Set(["id", "name", "order", "action", "state"]);
+const DNS_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
+const IPS_RULE_SKIP = new Set(["id", "name", "order", "action", "state"]);
 
 function resolveEngineExpression(expr: string, dictMap: Map<number, string>): string {
   return expr.replace(/D(\d+)/g, (_match, id) => {
@@ -1163,6 +1172,208 @@ function ForwardingRuleRow({
         </tr>
       )}
     </>
+  );
+}
+
+function FirewallDnsRuleRow({
+  rule,
+  onToggle,
+  togglePending,
+}: {
+  rule: FirewallDnsRule;
+  onToggle: (id: number, next: string) => void;
+  togglePending: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+  const actionLabel = typeof rule.action === "object" && rule.action !== null
+    ? (rule.action as { type: string }).type
+    : (rule.action ?? "-");
+
+  return (
+    <>
+      <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
+        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
+          {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
+        </td>
+        <td className="px-3 py-2 text-gray-600">{actionLabel}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={4} className="bg-gray-50 px-4 py-3">
+            <RuleDetailGrid rule={rule as unknown as Record<string, unknown>} skipKeys={DNS_RULE_SKIP} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function FirewallIpsRuleRow({
+  rule,
+  onToggle,
+  togglePending,
+}: {
+  rule: FirewallIpsRule;
+  onToggle: (id: number, next: string) => void;
+  togglePending: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isPredefined = rule.predefined === true;
+  const actionLabel = typeof rule.action === "object" && rule.action !== null
+    ? (rule.action as { type: string }).type
+    : (rule.action ?? "-");
+
+  return (
+    <>
+      <tr className="cursor-pointer hover:bg-gray-50" onClick={() => setExpanded((x) => !x)}>
+        <td className="px-3 py-2 text-gray-500">{rule.order}</td>
+        <td className="px-3 py-2 text-gray-900 flex items-center gap-1.5">
+          <span className={`transition-transform ${expanded ? "rotate-90" : ""}`}>{CHEVRON}</span>
+          {rule.name}
+          {isPredefined && <span className="ml-1 text-xs text-gray-400 italic">predefined</span>}
+        </td>
+        <td className="px-3 py-2 text-gray-600">{actionLabel}</td>
+        <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+          <StateToggle ruleId={rule.id} state={rule.state} onToggle={(id, next) => onToggle(id as number, next)} pending={togglePending} />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={4} className="bg-gray-50 px-4 py-3">
+            <RuleDetailGrid rule={rule as unknown as Record<string, unknown>} skipKeys={IPS_RULE_SKIP} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function FirewallDnsRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [toggleErr, setToggleErr] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-firewall-dns-rules", tenantName],
+    queryFn: () => fetchFirewallDnsRules(tenantName),
+    enabled: isOpen,
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: ({ id, state }: { id: number; state: string }) =>
+      patchFirewallDnsRuleState(tenantName, id, state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-firewall-dns-rules", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-activation", tenantName] });
+    },
+    onError: (e: Error) => setToggleErr(e.message),
+  });
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  if (!data) return null;
+
+  return (
+    <div className="space-y-3">
+      {toggleErr && (
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+          Toggle failed: {toggleErr}
+          <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((r: FirewallDnsRule) => (
+              <FirewallDnsRuleRow
+                key={r.id}
+                rule={r}
+                onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+                togglePending={toggleMut.isPending}
+              />
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No DNS filter rules</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function FirewallIpsRulesSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+  const qc = useQueryClient();
+  const [toggleErr, setToggleErr] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["zia-firewall-ips-rules", tenantName],
+    queryFn: () => fetchFirewallIpsRules(tenantName),
+    enabled: isOpen,
+  });
+
+  const toggleMut = useMutation({
+    mutationFn: ({ id, state }: { id: number; state: string }) =>
+      patchFirewallIpsRuleState(tenantName, id, state),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["zia-firewall-ips-rules", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-activation", tenantName] });
+    },
+    onError: (e: Error) => setToggleErr(e.message),
+  });
+
+  if (isLoading) return <LoadingSpinner />;
+  if (error) return <ErrorMessage message={error instanceof Error ? error.message : "Failed to load"} />;
+  if (!data) return null;
+
+  return (
+    <div className="space-y-3">
+      {toggleErr && (
+        <div className="px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded">
+          Toggle failed: {toggleErr}
+          <button className="ml-2 underline" onClick={() => setToggleErr(null)}>Dismiss</button>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 bg-white">
+            {data.map((r: FirewallIpsRule) => (
+              <FirewallIpsRuleRow
+                key={r.id}
+                rule={r}
+                onToggle={(id, next) => { setToggleErr(null); toggleMut.mutate({ id, state: next }); }}
+                togglePending={toggleMut.isPending}
+              />
+            ))}
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="px-3 py-4 text-center text-gray-400">No IPS rules</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -1895,29 +2106,30 @@ function CloudAppAdvancedSettingsSection({ tenantName, isOpen }: { tenantName: s
   );
 }
 
-function SnapshotsSection({ tenantName, isOpen }: { tenantName: string; isOpen: boolean }) {
+function SnapshotsSection({ tenant, isOpen }: { tenant: Tenant; isOpen: boolean }) {
   const qc = useQueryClient();
   const [labelInput, setLabelInput] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<ConfigSnapshot | null>(null);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["zia-snapshots", tenantName],
-    queryFn: () => fetchSnapshots(tenantName, "ZIA"),
+    queryKey: ["zia-snapshots", tenant.name],
+    queryFn: () => fetchSnapshots(tenant.name, "ZIA"),
     enabled: isOpen,
   });
 
   const createMut = useMutation({
-    mutationFn: () => createSnapshot(tenantName, labelInput.trim() || undefined, "ZIA"),
+    mutationFn: () => createSnapshot(tenant.name, labelInput.trim() || undefined, "ZIA"),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["zia-snapshots", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-snapshots", tenant.name] });
       setLabelInput("");
     },
   });
 
   const deleteMut = useMutation({
-    mutationFn: (id: number) => deleteSnapshot(tenantName, id),
+    mutationFn: (id: number) => deleteSnapshot(tenant.name, id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["zia-snapshots", tenantName] });
+      qc.invalidateQueries({ queryKey: ["zia-snapshots", tenant.name] });
       setDeleteTarget(null);
     },
   });
@@ -1936,6 +2148,14 @@ function SnapshotsSection({ tenantName, isOpen }: { tenantName: string; isOpen: 
           onConfirm={() => deleteMut.mutate(deleteTarget)}
           onCancel={() => setDeleteTarget(null)}
           destructive
+        />
+      )}
+
+      {restoreTarget && (
+        <RestoreSnapshotModal
+          tenant={tenant}
+          snapshot={restoreTarget}
+          onClose={() => setRestoreTarget(null)}
         />
       )}
 
@@ -1976,16 +2196,276 @@ function SnapshotsSection({ tenantName, isOpen }: { tenantName: string; isOpen: 
                   {formatDateTime(s.created_at)} · {s.resource_count} resources
                 </p>
               </div>
-              <button
-                onClick={() => setDeleteTarget(s.id)}
-                className="text-xs text-red-500 hover:text-red-700"
-              >
-                Delete
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setRestoreTarget(s)}
+                  className="text-xs text-zs-600 hover:text-zs-800"
+                >
+                  Restore
+                </button>
+                <button
+                  onClick={() => setDeleteTarget(s.id)}
+                  className="text-xs text-red-500 hover:text-red-700"
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── RestoreSnapshotModal ───────────────────────────────────────────────────────
+
+function RestoreSnapshotModal({
+  tenant,
+  snapshot,
+  onClose,
+}: {
+  tenant: Tenant;
+  snapshot: ConfigSnapshot;
+  onClose: () => void;
+}) {
+  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
+  const [applyJobId, setApplyJobId] = useState<string | null>(null);
+  const [mutErr, setMutErr] = useState<string | null>(null);
+
+  const previewMut = useMutation({
+    mutationFn: () => previewApplySnapshot(tenant.id, tenant.id, snapshot.id),
+    onSuccess: (data) => { setPreviewJobId(data.job_id); setMutErr(null); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+
+  const applyMut = useMutation({
+    mutationFn: (wipeMode: boolean) => applySnapshot(tenant.id, tenant.id, snapshot.id, wipeMode),
+    onSuccess: (data) => { setApplyJobId(data.job_id); setMutErr(null); },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+
+  const {
+    latestByPhase: previewProgress,
+    jobStatus: previewJobStatus,
+    result: previewResult,
+    streamError: previewStreamError,
+  } = useJobStream<SnapshotPreview>(previewJobId);
+
+  const {
+    latestByPhase: applyProgress,
+    jobStatus: applyJobStatus,
+    result: applyResult,
+    streamError: applyStreamError,
+  } = useJobStream<ApplySnapshotResult>(applyJobId);
+
+  const preview = previewJobStatus === "done" ? previewResult : null;
+  const isPreviewRunning = previewMut.isPending || previewJobStatus === "running";
+  const isApplyRunning = applyMut.isPending || applyJobStatus === "running";
+  const applyDone = applyJobStatus === "done";
+  const applyCancelled = applyJobStatus === "cancelled" || (applyJobStatus === "done" && !!applyResult?.cancelled);
+
+  function applyPhaseLabel() {
+    const rollbackEv = applyProgress["rollback"];
+    const pushEv = applyProgress["push"];
+    const wipeEv = applyProgress["wipe"];
+    const importEv = applyProgress["import"];
+    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
+    if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
+    if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
+    if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
+    return "Applying changes…";
+  }
+
+  const err = mutErr ?? previewStreamError ?? applyStreamError ?? null;
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Restore Snapshot</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {snapshot.label || formatDateTime(snapshot.created_at)} · {snapshot.resource_count} resources
+            </p>
+          </div>
+          {!isApplyRunning && (
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 ml-4">
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {err && <p className="text-xs text-red-600">{err}</p>}
+
+          {/* Result */}
+          {(applyDone || applyCancelled) && (
+            <div>
+              {applyCancelled ? (
+                <div className="p-3 rounded-md text-sm bg-amber-50 text-amber-800">
+                  <p className="font-medium">Restore cancelled.</p>
+                  {applyResult?.rolled_back !== undefined ? (
+                    <p className="text-xs mt-1">
+                      Rolled back {applyResult.rolled_back} change{applyResult.rolled_back !== 1 ? "s" : ""}.
+                      {!!applyResult.rollback_failed && ` ${applyResult.rollback_failed} rollback${applyResult.rollback_failed !== 1 ? "s" : ""} failed — check ZIA manually.`}
+                    </p>
+                  ) : (
+                    <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect and are not automatically rolled back.</p>
+                  )}
+                </div>
+              ) : applyResult ? (
+                <div className={`p-3 rounded-md text-sm ${applyResult.status === "SUCCESS" || applyResult.status === "PARTIAL" ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"}`}>
+                  <p className="font-medium">
+                    {applyResult.status} — Snapshot restored
+                    <span className="ml-2 font-normal text-xs opacity-70">({applyResult.mode === "wipe" ? "Wipe & Push" : "Delta Push"})</span>
+                  </p>
+                  <p className="text-xs mt-1">
+                    {applyResult.mode === "wipe" && applyResult.wiped > 0 && `${applyResult.wiped} wiped · `}
+                    {applyResult.created} created · {applyResult.updated} updated
+                    {applyResult.failed > 0 && ` · ${applyResult.failed} failed`}
+                  </p>
+                </div>
+              ) : null}
+              {applyResult?.failed_items && applyResult.failed_items.length > 0 && (
+                <div className="mt-3">
+                  <p className="text-xs font-medium text-red-700 mb-1">Failed ({applyResult.failed_items.length}):</p>
+                  <div className="max-h-32 overflow-y-auto border border-red-200 rounded-md divide-y divide-red-100 text-xs">
+                    {applyResult.failed_items.map((item, i) => (
+                      <div key={i} className="px-3 py-1.5 bg-white">
+                        <span className="font-mono text-gray-500">{item.resource_type}</span> · {item.name}
+                        <p className="text-red-700 font-mono break-all mt-0.5">{item.reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <button onClick={onClose} className="mt-3 text-xs text-zs-600 hover:underline">
+                Close
+              </button>
+            </div>
+          )}
+
+          {/* Preview running */}
+          {isPreviewRunning && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-gray-500">
+                {previewProgress["import"]
+                  ? `Importing ${previewProgress["import"].resource_type}… ${previewProgress["import"].done}${previewProgress["import"].total ? `/${previewProgress["import"].total}` : ""}`
+                  : "Importing current state and classifying changes…"}
+              </p>
+              <ImportProgressBar active />
+            </div>
+          )}
+
+          {/* Preview button */}
+          {!preview && !isPreviewRunning && !applyDone && !applyCancelled && (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-600">
+                Preview what will change when this snapshot is restored to <span className="font-medium">{tenant.name}</span>.
+              </p>
+              <button
+                onClick={() => previewMut.mutate()}
+                disabled={isPreviewRunning}
+                className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50"
+              >
+                Preview Changes
+              </button>
+            </div>
+          )}
+
+          {/* Preview result */}
+          {preview && !applyDone && !applyCancelled && (
+            <div className="space-y-3">
+              <div className="flex gap-4 text-sm flex-wrap items-baseline">
+                <span className="text-green-700 font-medium">{preview.creates} create{preview.creates !== 1 ? "s" : ""}</span>
+                <span className="text-blue-700 font-medium">{preview.updates} update{preview.updates !== 1 ? "s" : ""}</span>
+                <span className="text-red-700 font-medium">{preview.deletes} delete{preview.deletes !== 1 ? "s" : ""}</span>
+                <span className="text-gray-500">{preview.skips} skipped</span>
+                {preview.deletes > 0 && (
+                  <span className="text-xs text-amber-600 italic">deletes only applied by Wipe &amp; Push</span>
+                )}
+              </div>
+
+              {preview.items.length > 0 && (
+                <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-md">
+                  <table className="min-w-full text-xs divide-y divide-gray-100">
+                    <thead className="bg-gray-50 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase w-20">Action</th>
+                        <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Type</th>
+                        <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Name</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 bg-white">
+                      {preview.items.map((item, i) => (
+                        <tr key={i}>
+                          <td className={`px-3 py-1 font-medium ${item.action === "create" ? "text-green-700" : item.action === "update" ? "text-blue-700" : "text-red-700"}`}>
+                            {item.action}
+                          </td>
+                          <td className="px-3 py-1 font-mono text-gray-500">{item.resource_type}</td>
+                          <td className="px-3 py-1 text-gray-800 truncate max-w-xs">{item.name}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {preview.creates === 0 && preview.updates === 0 && preview.deletes === 0 && (
+                <p className="text-sm text-green-700 font-medium">Tenant already matches this snapshot — nothing to restore.</p>
+              )}
+
+              {/* Apply progress */}
+              {isApplyRunning && (
+                <div className="space-y-1.5">
+                  <p className="text-xs text-gray-500">{applyPhaseLabel()}</p>
+                  <ImportProgressBar active message="Applying changes — this may take several minutes." />
+                  <button
+                    onClick={() => applyJobId && cancelJob(applyJobId)}
+                    className="px-3 py-1 text-xs rounded-md border border-gray-300 hover:bg-gray-50 text-gray-600"
+                  >
+                    Stop
+                  </button>
+                </div>
+              )}
+
+              {/* Apply buttons */}
+              {!isApplyRunning && (preview.creates > 0 || preview.updates > 0 || preview.deletes > 0) && (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-500">Choose how to restore:</p>
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={() => applyMut.mutate(false)}
+                      className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+                      title="Applies creates and updates only. Resources not in the snapshot are left untouched."
+                    >
+                      Delta Push
+                    </button>
+                    <button
+                      onClick={() => applyMut.mutate(true)}
+                      className="px-4 py-1.5 text-sm rounded-md bg-red-600 hover:bg-red-700 text-white"
+                      title="Delete all existing resources first, then push the full snapshot."
+                    >
+                      Wipe &amp; Push
+                    </button>
+                    <button
+                      onClick={onClose}
+                      className="px-4 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -3045,6 +3525,7 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
   const isPreviewRunning = previewMut.isPending || previewJobStatus === "running";
   const isApplyRunning = applyMut.isPending || applyJobStatus === "running";
   const applyDone = applyJobStatus === "done";
+  const applyCancelled = applyJobStatus === "cancelled" || (applyJobStatus === "done" && !!applyResult?.cancelled);
 
   function reset() {
     setPreviewJobId(null);
@@ -3058,6 +3539,26 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
     : [];
 
   const err = mutErr ?? previewStreamError ?? applyStreamError ?? null;
+
+  // ── Cancelled view ──────────────────────────────────────────────────────────
+  if (applyCancelled) {
+    return (
+      <div className="space-y-3 p-1">
+        <div className="p-3 rounded-md text-sm bg-amber-50 text-amber-800">
+          <p className="font-medium">Push cancelled.</p>
+          {applyResult?.rolled_back !== undefined ? (
+            <p className="text-xs mt-1">
+              Rolled back {applyResult.rolled_back} change{applyResult.rolled_back !== 1 ? "s" : ""}.
+              {!!applyResult.rollback_failed && ` ${applyResult.rollback_failed} rollback${applyResult.rollback_failed !== 1 ? "s" : ""} failed — check ZIA manually.`}
+            </p>
+          ) : (
+            <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect.</p>
+          )}
+        </div>
+        <button onClick={reset} className="text-xs text-zs-600 hover:underline">Apply another snapshot</button>
+      </div>
+    );
+  }
 
   // ── Apply result view ──────────────────────────────────────────────────────
   if (applyDone && applyResult) {
@@ -3145,9 +3646,11 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
 
   // Phase label for apply progress
   function applyPhaseLabel() {
-    const wipeEv = applyProgress["wipe"];
+    const rollbackEv = applyProgress["rollback"];
     const pushEv = applyProgress["push"];
+    const wipeEv = applyProgress["wipe"];
     const importEv = applyProgress["import"];
+    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
     if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
     if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
     if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
@@ -3316,6 +3819,12 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
             <div className="space-y-1.5">
               <p className="text-xs text-gray-500">{applyPhaseLabel()}</p>
               <ImportProgressBar active message="Applying changes — this may take several minutes depending on the number of resources in the tenant." />
+              <button
+                onClick={() => applyJobId && cancelJob(applyJobId)}
+                className="px-3 py-1 text-xs rounded-md border border-gray-300 hover:bg-gray-50 text-gray-600"
+              >
+                Stop
+              </button>
             </div>
           )}
 
@@ -3451,6 +3960,12 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         <Accordion title="Traffic Forwarding" isOpen={!!open.forwarding} onToggle={() => toggle("forwarding")}>
           <ForwardingRulesSection tenantName={tenant.name} isOpen={!!open.forwarding} />
         </Accordion>
+        <Accordion title="DNS Filter Rules" isOpen={!!open.dnsFilter} onToggle={() => toggle("dnsFilter")}>
+          <FirewallDnsRulesSection tenantName={tenant.name} isOpen={!!open.dnsFilter} />
+        </Accordion>
+        <Accordion title="IPS Rules" isOpen={!!open.ipsRules} onToggle={() => toggle("ipsRules")}>
+          <FirewallIpsRulesSection tenantName={tenant.name} isOpen={!!open.ipsRules} />
+        </Accordion>
       </SectionGroup>
 
       {/* Identity & Access */}
@@ -3485,7 +4000,7 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
       {/* Config Snapshots */}
       <SectionGroup title="Config Snapshots" isOpen={!!groups.snapshots} onToggle={() => toggleGroup("snapshots")}>
         <Accordion title="Snapshots" isOpen={!!open.snapshots} onToggle={() => toggle("snapshots")}>
-          <SnapshotsSection tenantName={tenant.name} isOpen={!!open.snapshots} />
+          <SnapshotsSection tenant={tenant} isOpen={!!open.snapshots} />
         </Accordion>
       </SectionGroup>
 

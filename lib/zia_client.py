@@ -403,6 +403,12 @@ class ZIAClient:
         _unwrap(result, resp, err)
         return True
 
+    def get_firewall_ips_rule(self, rule_id: str) -> Dict:
+        if self._govcloud:
+            return self.zia_get(f"/zia/api/v1/firewallIpsRules/{rule_id}")
+        result, resp, err = self._sdk.zia.cloud_firewall_ips.get_rule(int(rule_id))
+        return _to_dict(_unwrap(result, resp, err))
+
     # ------------------------------------------------------------------
     # Firewall Supporting Objects
     # ------------------------------------------------------------------

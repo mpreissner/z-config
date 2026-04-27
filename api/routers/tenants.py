@@ -476,7 +476,7 @@ def apply_snapshot(
     from api.jobs import store
     from db.database import get_session
     from db.models import RestorePoint
-    from services.zia_push_service import ZIAPushService
+    from services.zia_push_service import ZIAPushService, _PushCancelled
 
     check_tenant_access(tenant_id, user)
     check_tenant_access(req.source_tenant_id, user)
@@ -497,7 +497,6 @@ def apply_snapshot(
         service = ZIAPushService(client, tenant_id=tenant_id)
         baseline = {"product": "ZIA", "resources": snap_resources}
 
-        # Track running totals for progress events
         wipe_done = [0]
 
         def on_import_progress(resource_type: str, done: int, total: int):
@@ -529,25 +528,60 @@ def apply_snapshot(
                 "done": push_totals[resource_type]["done"],
             })
 
+        rollback_done = [0]
+
+        def on_rollback_progress(resource_type: str, record):
+            rollback_done[0] += 1
+            store.append(job_id, {
+                "type": "progress", "phase": "rollback",
+                "resource_type": resource_type,
+                "name": record.name,
+                "status": record.status,
+                "done": rollback_done[0],
+            })
+
+        stop_fn = lambda: store.is_cancel_requested(job_id)
+
         try:
-            if req.wipe_mode:
-                wipe_records, push_records = service.apply_baseline(
-                    baseline,
-                    wipe_progress_callback=on_wipe_progress,
-                    import_progress_callback=on_import_progress,
-                    push_progress_callback=on_push_progress,
+            try:
+                if req.wipe_mode:
+                    wipe_records, push_records = service.apply_baseline(
+                        baseline,
+                        wipe_progress_callback=on_wipe_progress,
+                        import_progress_callback=on_import_progress,
+                        push_progress_callback=on_push_progress,
+                        stop_fn=stop_fn,
+                    )
+                    wiped = sum(1 for r in wipe_records if r.is_deleted)
+                    wipe_failed_items = [
+                        {"resource_type": r.resource_type, "name": r.name, "reason": r.status[len("failed:"):]}
+                        for r in wipe_records if r.is_failed
+                    ]
+                else:
+                    wipe_records = []
+                    wipe_failed_items = []
+                    wiped = 0
+                    dry_run = service.classify_baseline(baseline, import_progress_callback=on_import_progress)
+                    push_records = service.push_classified(
+                        dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
+                    )
+            except _PushCancelled as exc:
+                rollback_records = service.rollback_pushed(
+                    exc.pushed_records, on_rollback_progress
                 )
-                wiped = sum(1 for r in wipe_records if r.is_deleted)
-                wipe_failed_items = [
-                    {"resource_type": r.resource_type, "name": r.name, "reason": r.status[len("failed:"):]}
-                    for r in wipe_records if r.is_failed
-                ]
-            else:
-                wipe_records = []
-                wipe_failed_items = []
-                wiped = 0
-                dry_run = service.classify_baseline(baseline, import_progress_callback=on_import_progress)
-                push_records = service.push_classified(dry_run, progress_callback=on_push_progress)
+                rolled_back = sum(
+                    1 for r in rollback_records
+                    if r.status in ("rollback_deleted", "rollback_restored")
+                )
+                rollback_failed = sum(
+                    1 for r in rollback_records if r.status.startswith("rollback_failed")
+                )
+                store.complete(job_id, {
+                    "cancelled": True,
+                    "rolled_back": rolled_back,
+                    "rollback_failed": rollback_failed,
+                })
+                return
 
             created = sum(1 for r in push_records if r.is_created)
             updated = sum(1 for r in push_records if r.is_updated)

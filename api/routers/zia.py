@@ -561,6 +561,44 @@ def patch_forwarding_rule_state(
 
 
 # ------------------------------------------------------------------
+# Firewall DNS Filter Rules
+# ------------------------------------------------------------------
+
+@router.get("/{tenant}/firewall-dns-rules")
+def list_firewall_dns_rules(tenant: str, user: AuthUser = Depends(require_auth)):
+    return _get_service(tenant, user).list_firewall_dns_rules()
+
+
+@router.patch("/{tenant}/firewall-dns-rules/{rule_id}/state")
+def patch_firewall_dns_rule_state(
+    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
+):
+    try:
+        return _get_service(tenant, user).toggle_firewall_dns_rule(rule_id, body.state)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------
+# Firewall IPS Rules
+# ------------------------------------------------------------------
+
+@router.get("/{tenant}/firewall-ips-rules")
+def list_firewall_ips_rules(tenant: str, user: AuthUser = Depends(require_auth)):
+    return _get_service(tenant, user).list_firewall_ips_rules()
+
+
+@router.patch("/{tenant}/firewall-ips-rules/{rule_id}/state")
+def patch_firewall_ips_rule_state(
+    tenant: str, rule_id: str, body: RuleStateRequest, user: AuthUser = Depends(require_auth)
+):
+    try:
+        return _get_service(tenant, user).toggle_firewall_ips_rule(rule_id, body.state)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ------------------------------------------------------------------
 # DLP
 # ------------------------------------------------------------------
 
