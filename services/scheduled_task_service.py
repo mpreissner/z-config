@@ -215,7 +215,6 @@ def create_task(
         session.add(task)
         session.flush()
         session.refresh(task)
-        task_id = task.id
         # Detach from session before returning
         task_copy = _copy_task(task)
 

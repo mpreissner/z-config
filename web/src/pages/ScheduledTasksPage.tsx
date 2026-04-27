@@ -23,12 +23,12 @@ import ErrorMessage from "../components/ErrorMessage";
 // Constants
 // ---------------------------------------------------------------------------
 
-const RESOURCE_GROUPS: Array<{ key: string; label: string }> = [
+const RESOURCE_GROUPS: Array<{ key: string; label: string; note?: string }> = [
   { key: "firewall", label: "Firewall Rules" },
   { key: "ips", label: "IPS Rules" },
   { key: "dns_filter", label: "DNS Filter Rules" },
   { key: "ssl_inspection", label: "SSL Inspection Rules" },
-  { key: "url_categories", label: "URL Categories" },
+  { key: "url_categories", label: "URL Categories", note: "Custom categories only — global cloud app settings are excluded" },
   { key: "url_filtering", label: "URL Filtering Rules" },
   { key: "cloud_app_control", label: "Cloud App Control" },
   { key: "dlp", label: "DLP (Engines, Dictionaries, Rules)" },
@@ -287,6 +287,9 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
                     className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
                   />
                   <span className="text-gray-700">{g.label}</span>
+                  {g.note && (
+                    <span className="text-gray-400 text-xs" title={g.note}>ⓘ</span>
+                  )}
                 </label>
               ))}
             </div>
