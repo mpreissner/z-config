@@ -15,18 +15,31 @@ zs-config v2.0.0 ships a browser-based management UI alongside the existing TUI.
 
 Requires Docker with Compose v2. Download and run the deploy script — it handles cloning, secret generation, volumes, build, and startup automatically.
 
+**Linux / macOS:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mpreissner/zs-config/main/deploy.sh -o deploy.sh
 bash deploy.sh
 ```
 
+**Windows (PowerShell, run as Administrator):**
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/mpreissner/zs-config/main/deploy.ps1 -OutFile deploy.ps1
+.\deploy.ps1
+```
+
 Or if you already have the repo cloned:
 
 ```bash
+# Linux / macOS
 ./deploy.sh
+
+# Windows
+.\deploy.ps1
 ```
 
-The script will:
+Both scripts will:
 - Clone the repo if not already present (into `./zs-config`)
 - Generate a `JWT_SECRET` and save it to `.env` if one does not already exist
 - Create the persistent Docker volumes for the database and plugins
@@ -44,7 +57,11 @@ You will be prompted to set a permanent password on first login.
 **Subsequent deploys** (pull latest and rebuild):
 
 ```bash
+# Linux / macOS
 ./deploy.sh
+
+# Windows
+.\deploy.ps1
 ```
 
 ### Web UI Features
@@ -62,14 +79,16 @@ The web UI covers all major Zscaler product areas across multiple tenants simult
 - URL & Cloud App Control Advanced Settings — view and toggle global policy settings
 - Allow / Deny Lists — view and edit the global security allowlist and denylist
 - Firewall Policy — list, search, enable/disable; CSV export and import/sync
+- DNS Filter Rules — list, search, enable/disable
+- IPS Rules — list, search, enable/disable (shown only on tenants with Advanced Firewall subscription)
 - SSL Inspection — list, search, enable/disable
 - Forwarding Rules — list and search
 - Users, Locations, Departments, Groups — read from local DB
 - DLP Engines — list, search, view; edit expression and confidence
 - DLP Dictionaries — list, search, view; edit confidence threshold
 - DLP Web Rules — list, search, enable/disable
-- Config Snapshots — save, list, delete point-in-time snapshots
-- Apply Snapshot from Other Tenant — delta or wipe-first push with preview
+- Config Snapshots — save, list, delete point-in-time snapshots; restore same-tenant snapshots
+- Apply Snapshot from Other Tenant — delta or wipe-first push with preview; stop mid-push with automatic rollback of already-applied changes
 
 **ZPA — Private Access**
 - App Connectors — list and search
@@ -104,8 +123,8 @@ The web UI covers all major Zscaler product areas across multiple tenants simult
 
 - Sessions use a short-lived JWT (5 min) renewed silently against an httpOnly refresh cookie (60 min absolute expiry, never extended)
 - All tokens are invalidated immediately on container restart — prior-session cookies are cryptographically rejected
-- Idle timeout: 15 minutes of inactivity triggers a 2-minute countdown warning, then automatic logout
-- The session timeout setting controls the maximum session duration from login; users will also be logged out after 15 minutes of inactivity regardless of the remaining session time
+- Idle timeout: configurable inactivity threshold (default 15 minutes) triggers a 2-minute countdown warning, then automatic logout; idle timer resets on mouse movement, clicks, keyboard input, and scroll
+- The session timeout setting controls the maximum session duration from login; users will also be logged out after the configured idle period regardless of the remaining session time
 
 ### Migrating from TUI v1.x
 

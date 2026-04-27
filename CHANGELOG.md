@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [2.0.0] - 2026-04-25
+## [2.0.0] - 2026-04-27
 
 ### Added
 
@@ -17,7 +17,7 @@ A self-contained Docker container ships a React + Vite + Tailwind frontend backe
 - Role-based access: `admin` and `user` roles; non-admin users are scoped to specific tenants via entitlements
 - Force password change on first login and on admin-initiated reset
 - MFA enrollment via TOTP — users with no key enrolled are shown a full-screen enrollment modal; QR code + manual entry supported
-- Idle timeout: 15 minutes of inactivity triggers a 2-minute countdown warning, then automatic logout
+- Idle timeout: configurable inactivity threshold (default 15 minutes) triggers a 2-minute countdown warning, then automatic logout; idle timer resets on mouse movement, clicks, keyboard input, and scroll events
 - Proactive JWT refresh: access token (5 min) is silently renewed against an httpOnly refresh cookie (60 min absolute from login); if the cookie has expired, the user is logged out cleanly
 - Container restart invalidation: a startup nonce is appended to the JWT signing secret on every container start; all tokens signed in prior runs are immediately rejected
 - OIDC/SAML IdP integration (configurable via Admin → Settings)
@@ -33,14 +33,16 @@ A self-contained Docker container ships a React + Vite + Tailwind frontend backe
 - URL & Cloud App Control Advanced Settings — view and toggle global policy toggles
 - Allow / Deny Lists — view and edit the security allowlist and denylist
 - Firewall Policy — list, search, enable/disable; CSV export and full import/sync (same Option C algorithm as TUI)
+- DNS Filter Rules — list, search, enable/disable individual rules
+- IPS Rules — list, search, enable/disable individual rules
 - SSL Inspection — list, search, enable/disable
 - Forwarding Rules — list and search
 - Users, Locations, Departments, Groups — read-only from local DB
 - DLP Engines — list, search, view; edit expression and confidence inline
 - DLP Dictionaries — list, search, view; edit confidence threshold; expandable phrase/pattern detail
 - DLP Web Rules — list, search, enable/disable
-- Config Snapshots — save point-in-time snapshots, list, delete
-- Apply Snapshot from Other Tenant — delta-only or wipe-first push with full dry-run preview; streamed progress log
+- Config Snapshots — save point-in-time snapshots, list, delete; restore to same tenant
+- Apply Snapshot from Other Tenant — delta-only or wipe-first push with full dry-run preview; streamed progress log; stop mid-push with automatic rollback of all already-applied changes
 
 **Tenant Workspace (ZPA)**
 - App Connectors — list and search from local DB
@@ -90,6 +92,13 @@ A self-contained Docker container ships a React + Vite + Tailwind frontend backe
 **Profile**
 - Change password
 - View current session role and username
+
+#### TUI
+- **IPS rules toggle** — `_toggle_ips_rules` in `zia_menu.py` fully implemented (was previously a stub); queries DB for IPS rules, multi-select enable/disable, calls ZIA API and updates local DB immediately
+
+#### Deployment
+- **Linux/macOS deploy script** (`deploy.sh`) — two-mode operation: standalone fresh-machine clone, or in-repo pull and redeploy; auto-generates `JWT_SECRET`, creates Docker volumes, builds image, starts container, and health checks
+- **Windows deploy script** (`deploy.ps1`) — PowerShell equivalent of `deploy.sh`; same two-mode operation, JWT_SECRET generation via `RandomNumberGenerator`, volume creation, build, and health check; run as Administrator
 
 ---
 

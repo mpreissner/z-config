@@ -10,12 +10,12 @@
 #   ./deploy.sh [branch]
 #
 # Single-command deploy on a fresh machine:
-#   curl -fsSL https://raw.githubusercontent.com/mpreissner/zs-config/feature/web-frontend/deploy.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mpreissner/zs-config/main/deploy.sh | bash
 
 set -euo pipefail
 
 REPO_URL="https://github.com/mpreissner/zs-config.git"
-BRANCH="${1:-feature/web-frontend}"
+BRANCH="${1:-main}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
