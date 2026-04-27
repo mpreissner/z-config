@@ -484,7 +484,7 @@ function RunDetailPanel({ taskId, runId, onClose }: RunDetailPanelProps) {
                             <td className="py-2 px-3 font-mono text-gray-700">{e.resource_type}</td>
                             <td className="py-2 px-3 text-gray-700">{e.resource_name}</td>
                             <td className="py-2 px-3 text-gray-600">{e.operation}</td>
-                            <td className="py-2 px-3 text-red-600 break-all">{e.error}</td>
+                            <td className="py-2 px-3 text-red-600 break-words">{e.error}</td>
                           </tr>
                         ))}
                       </tbody>

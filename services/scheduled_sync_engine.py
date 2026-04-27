@@ -354,18 +354,9 @@ def _apply_one(target_client, target_tenant_id: int, rec: _DiffRecord) -> None:
 
     if rec.operation == "create":
         create_method = getattr(target_client, create_method_name)
-        create_method(**_payload_to_kwargs(payload))
+        create_method(payload)
     else:
         # update — inject the target's ID
         payload["id"] = rec.target_id
         update_method = getattr(target_client, update_method_name)
-        update_method(rec.target_id, **_payload_to_kwargs(payload))
-
-
-def _payload_to_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Pass payload fields as keyword arguments to SDK create/update methods.
-
-    The ZIA SDK methods accept keyword arguments matching the JSON field names.
-    We pass the full payload dict as **kwargs so all fields are sent.
-    """
-    return payload
+        update_method(rec.target_id, payload)
