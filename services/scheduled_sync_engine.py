@@ -82,6 +82,16 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         t_label_name = task.label_name
         t_label_resource_types = list(task.label_resource_types) if task.label_resource_types else None
 
+    # 1b. Load source tenant's ZIA tenant ID for create descriptions
+    from db.models import TenantConfig
+    with get_session() as session:
+        src_tenant = session.get(TenantConfig, t_source)
+        t_source_zia_id = (
+            str(src_tenant.zia_tenant_id)
+            if src_tenant and src_tenant.zia_tenant_id
+            else None
+        )
+
     # 2. Create a "running" run record
     run_started = datetime.utcnow()
     run_id: int
@@ -134,7 +144,7 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         # 8. Push diff to target (best-effort)
         for rec in diff:
             try:
-                _apply_one(target_client, t_target, rec)
+                _apply_one(target_client, t_target, t_source, rec, source_zia_id=t_source_zia_id)
                 synced += 1
                 pending_audit.append(dict(
                     tenant_id=t_target,
@@ -185,6 +195,22 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
                     "error": str(exc),
                 })
 
+        # 10. Re-import target for the affected resource types so the DB reflects
+        # the actual post-push state (real API-assigned order values, etc.).
+        # This makes the next run's diff and _next_order accurate without any
+        # in-memory offset tricks.
+        try:
+            ZIAImportService(target_client, tenant_id=t_target).run(
+                resource_types=resource_types
+            )
+        except Exception as exc:
+            errors.append({
+                "resource_type": "_post_push_import",
+                "resource_name": "_post_push_import",
+                "operation": "import",
+                "error": str(exc),
+            })
+
     except Exception as exc:
         errors.append({
             "resource_type": "_engine",
@@ -193,12 +219,12 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
             "error": str(exc),
         })
 
-    # 10. Write audit entries — all sessions from import/push are already closed
+    # 11. Write audit entries — all sessions from import/push are already closed
     from services import audit_service
     for entry in pending_audit:
         audit_service.log(**entry)
 
-    # 11. Update run record
+    # 12. Update run record
     finished_at = datetime.utcnow()
     if not errors:
         status = "success"
@@ -302,20 +328,25 @@ def _compute_diff(
                 if r.name and not _is_zscaler_managed(rtype, r.raw_config or {}):
                     tgt_by_name[r.name] = r
 
-            # Filter to labelled resources only when label_name is specified.
-            # _has_label() operates on already-loaded raw_config dicts — no new
-            # session is opened here.
+            # Filter source to labelled resources only when label_name is set.
+            # tgt_by_name stays UNFILTERED so CREATE/UPDATE name matching covers
+            # all existing target rules — prevents duplicate creates on reruns
+            # when the synced rule doesn't carry the label on the target.
+            # A separate tgt_labelled view (label-filtered) is used for DELETE
+            # so we only remove target rules that actually carry the label.
             if label_name is not None:
                 src_by_name = {
                     name: r for name, r in src_by_name.items()
                     if _has_label(r.raw_config or {}, label_name)
                 }
-                tgt_by_name = {
+                tgt_labelled = {
                     name: r for name, r in tgt_by_name.items()
                     if _has_label(r.raw_config or {}, label_name)
                 }
+            else:
+                tgt_labelled = tgt_by_name
 
-            # CREATE — in source, not in target
+            # CREATE — in source, not in target (full name match)
             for name, src in src_by_name.items():
                 if name not in tgt_by_name:
                     diff.append(_DiffRecord(
@@ -338,9 +369,9 @@ def _compute_diff(
                             target_id=tgt.zia_id,
                         ))
 
-            # DELETE — in target, not in source (only if sync_deletes=True)
+            # DELETE — labelled target rules not present in source
             if sync_deletes:
-                for name, tgt in tgt_by_name.items():
+                for name, tgt in tgt_labelled.items():
                     if name not in src_by_name:
                         diff.append(_DiffRecord(
                             resource_type=rtype,
@@ -353,10 +384,189 @@ def _compute_diff(
 
 
 # ---------------------------------------------------------------------------
+# Payload normalisation for sync engine
+# ---------------------------------------------------------------------------
+
+# Arrays of embedded objects that the API accepts only as [{id}].
+_REF_FIELDS: frozenset = frozenset({
+    "locations", "location_groups",
+    "groups", "departments", "users",
+    "devices", "device_groups",
+    "source_ip_groups", "dest_ip_groups",
+    "src_ip_groups", "src_ipv6_groups", "dest_ipv6_groups",
+    "workload_groups", "proxy_gateways",
+    "time_windows", "labels",
+    "nw_services", "nw_service_groups",
+    "nw_applications", "nw_application_groups",
+    "ec_groups", "zpa_app_segments",
+    "zpa_application_segments", "zpa_application_segment_groups",
+    "threat_categories",
+    "applications", "application_groups",
+})
+
+
+def _drop_nulls(obj):
+    """Recursively remove None values from dicts; preserve empty lists."""
+    if isinstance(obj, dict):
+        return {k: _drop_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_drop_nulls(item) for item in obj]
+    return obj
+
+
+# String-enum arrays that must be omitted rather than sent empty.
+_EMPTY_STRIP_FIELDS: frozenset = frozenset({
+    "platforms", "device_trust_levels", "user_agent_types",
+    "cloud_applications", "url_categories", "time_windows",
+    "proxy_gateways",
+})
+
+
+def _slim_payload(rtype: str, payload: Dict) -> Dict:
+    """Reduce ref-array fields to [{id}] and apply per-type fixups.
+
+    Lightweight equivalent of ZIAPushService._norm_*() — no ID remapping,
+    just strips extra embedded fields so the API accepts the payload.
+    """
+    # Strip null values from the entire payload (null enum sub-fields cause 400s)
+    payload = _drop_nulls(payload)
+
+    for f in _REF_FIELDS:
+        val = payload.get(f)
+        if isinstance(val, list):
+            if val:
+                slimmed = [
+                    {"id": item["id"]}
+                    for item in val
+                    if isinstance(item, dict) and item.get("id") is not None
+                ]
+                if slimmed:
+                    payload[f] = slimmed
+                else:
+                    payload.pop(f, None)
+            else:
+                payload.pop(f, None)  # drop empty ref arrays
+
+    # Strip empty string-enum arrays that the API rejects when empty
+    for f in _EMPTY_STRIP_FIELDS:
+        if not payload.get(f):
+            payload.pop(f, None)
+
+    if rtype == "ssl_inspection_rule":
+        action = payload.get("action")
+        if isinstance(action, dict):
+            sub = action.get("decrypt_sub_actions")
+            if isinstance(sub, dict):
+                for old, new in (
+                    ("min_client_tls_version", "minClientTLSVersion"),
+                    ("min_server_tls_version", "minServerTLSVersion"),
+                ):
+                    if old in sub:
+                        sub[new] = sub.pop(old)
+
+    if rtype == "firewall_dns_rule":
+        for f in ("default_dns_rule_name_used", "is_web_eun_enabled"):
+            payload.pop(f, None)
+
+    if rtype == "forwarding_rule":
+        gw = payload.get("zpa_gateway")
+        if isinstance(gw, dict):
+            gw_id = gw.get("id")
+            if gw_id:
+                payload["zpa_gateway"] = {"id": gw_id}
+            else:
+                payload.pop("zpa_gateway", None)
+
+    return payload
+
+
+def _next_order(target_tenant_id: int, rtype: str) -> int:
+    """Return max(order) + 1 across user-created rules of this type in the target tenant.
+
+    Predefined/system rules (predefined=True, default_rule=True) are excluded —
+    they sit at the end of the list with high order values and would skew the
+    insertion point for user rules.
+
+    Reads the DB snapshot populated by the most recent target import.  The caller
+    (run_sync_task) re-imports the target after the push so subsequent runs read
+    accurate state.
+    """
+    with get_session() as session:
+        rows = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=target_tenant_id, resource_type=rtype, is_deleted=False)
+            .all()
+        )
+    max_order = 0
+    for r in rows:
+        cfg = r.raw_config or {}
+        if cfg.get("predefined") or cfg.get("default_rule"):
+            continue
+        order = cfg.get("order", 0)
+        if isinstance(order, int) and order > max_order:
+            max_order = order
+    return max_order + 1
+
+
+def _remap_label_ids(payload: Dict, source_tenant_id: int, target_tenant_id: int) -> Dict:
+    """Replace source-tenant label IDs with corresponding target-tenant IDs (matched by name).
+
+    Labels are tenant-specific resources — the same label name has a different
+    numeric ID on each tenant.  Sending the source ID causes a referential
+    integrity 500.  Labels absent in the target are dropped from the payload.
+    """
+    labels = payload.get("labels")
+    if not labels:
+        return payload
+
+    with get_session() as session:
+        src_rows = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=source_tenant_id, resource_type="rule_label", is_deleted=False)
+            .all()
+        )
+        tgt_rows = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=target_tenant_id, resource_type="rule_label", is_deleted=False)
+            .all()
+        )
+
+    src_id_to_name: Dict[str, str] = {r.zia_id: r.name for r in src_rows}
+    tgt_name_to_id: Dict[str, str] = {r.name: r.zia_id for r in tgt_rows}
+
+    remapped = []
+    for lbl in labels:
+        if not isinstance(lbl, dict):
+            continue
+        src_id = str(lbl.get("id", ""))
+        name = src_id_to_name.get(src_id)
+        if name:
+            tgt_id = tgt_name_to_id.get(name)
+            if tgt_id:
+                try:
+                    remapped.append({"id": int(tgt_id)})
+                except (ValueError, TypeError):
+                    remapped.append({"id": tgt_id})
+
+    if remapped:
+        payload["labels"] = remapped
+    else:
+        payload.pop("labels", None)
+
+    return payload
+
+
+# ---------------------------------------------------------------------------
 # Apply a single diff record to the target
 # ---------------------------------------------------------------------------
 
-def _apply_one(target_client, target_tenant_id: int, rec: _DiffRecord) -> None:
+def _apply_one(
+    target_client,
+    target_tenant_id: int,
+    source_tenant_id: int,
+    rec: _DiffRecord,
+    source_zia_id: Optional[str] = None,
+) -> None:
     """Apply a single diff record to the target tenant.
 
     For creates: strips read-only fields and calls the SDK create method.
@@ -397,6 +607,16 @@ def _apply_one(target_client, target_tenant_id: int, rec: _DiffRecord) -> None:
     # Strip 'id' field from creates (target assigns its own)
     if rec.operation == "create":
         payload.pop("id", None)
+        # Set order to target rule count + 1 — source order often exceeds target count
+        payload["order"] = _next_order(target_tenant_id, rtype)
+        if source_zia_id:
+            payload["description"] = f"Sync'd from {source_zia_id}"
+
+    # Reduce embedded ref objects to [{id}] and apply per-type fixups
+    payload = _slim_payload(rtype, payload)
+
+    # Remap label IDs: source tenant IDs differ from target tenant IDs
+    payload = _remap_label_ids(payload, source_tenant_id, target_tenant_id)
 
     if rec.operation == "create":
         create_method = getattr(target_client, create_method_name)

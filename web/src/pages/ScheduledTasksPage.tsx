@@ -667,6 +667,7 @@ function TaskListTab({ onOpenMonitoring }: TaskListTabProps) {
   const { data: tasks, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["scheduled-tasks"],
     queryFn: fetchScheduledTasks,
+    refetchInterval: 30_000,
   });
 
   const enableMut = useMutation({
@@ -921,6 +922,7 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
     queryKey: ["scheduled-task-runs", selectedTaskId],
     queryFn: () => (selectedTaskId ? fetchTaskRuns(selectedTaskId) : Promise.resolve([])),
     enabled: selectedTaskId !== null,
+    refetchInterval: selectedTaskId !== null ? 30_000 : false,
   });
 
   return (
