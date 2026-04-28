@@ -130,6 +130,9 @@ def _migrate(engine) -> None:
             resources_synced INTEGER NOT NULL DEFAULT 0,
             errors_json JSON
         )""",
+        "ALTER TABLE scheduled_tasks ADD COLUMN sync_mode VARCHAR(16) NOT NULL DEFAULT 'resource_type'",
+        "ALTER TABLE scheduled_tasks ADD COLUMN label_name VARCHAR(255)",
+        "ALTER TABLE scheduled_tasks ADD COLUMN label_resource_types JSON",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

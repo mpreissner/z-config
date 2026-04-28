@@ -96,6 +96,23 @@ _EXCLUDED_FROM_SYNC: set = {
     "denylist",
 }
 
+# Resource types that carry a 'labels' field and are therefore eligible for
+# label-based sync mode.  Confirmed from _norm_* methods in zia_push_service.
+LABEL_SUPPORTED_RESOURCE_TYPES: List[str] = [
+    "firewall_rule",
+    "url_filtering_rule",
+    "ssl_inspection_rule",
+    "forwarding_rule",
+    "bandwidth_control_rule",
+    "nat_control_rule",
+    "dlp_web_rule",
+    "firewall_dns_rule",
+    "firewall_ips_rule",
+    "sandbox_rule",
+    "traffic_capture_rule",
+    "cloud_app_control_rule",
+]
+
 # ---------------------------------------------------------------------------
 # Interval presets → cron conversion
 # ---------------------------------------------------------------------------
@@ -186,6 +203,9 @@ def create_task(
     sync_deletes: bool = False,
     enabled: bool = True,
     owner_email: Optional[str] = None,
+    sync_mode: str = "resource_type",
+    label_name: Optional[str] = None,
+    label_resource_types: Optional[List[str]] = None,
 ) -> ScheduledTask:
     """Create a new scheduled task and register it with the scheduler.
 
@@ -193,11 +213,25 @@ def create_task(
     """
     if source_tenant_id == target_tenant_id:
         raise ValueError("source_tenant_id and target_tenant_id must differ.")
-    if not resource_groups:
-        raise ValueError("resource_groups must be a non-empty list.")
-    for g in resource_groups:
-        if g not in RESOURCE_GROUP_MAP:
-            raise ValueError(f"Unknown resource group: '{g}'")
+
+    if sync_mode not in ("resource_type", "label"):
+        raise ValueError("sync_mode must be 'resource_type' or 'label'.")
+
+    if sync_mode == "resource_type":
+        if not resource_groups:
+            raise ValueError("resource_groups must be a non-empty list.")
+        for g in resource_groups:
+            if g not in RESOURCE_GROUP_MAP:
+                raise ValueError(f"Unknown resource group: '{g}'")
+    elif sync_mode == "label":
+        if not label_name or not label_name.strip():
+            raise ValueError("label_name is required when sync_mode is 'label'.")
+        if label_resource_types is not None:
+            for rtype in label_resource_types:
+                if rtype not in LABEL_SUPPORTED_RESOURCE_TYPES:
+                    raise ValueError(f"Unsupported label resource type: '{rtype}'")
+        # resource_groups may be [] in label mode; store as empty list
+        resource_groups = resource_groups or []
 
     cron_expression = resolve_schedule(schedule)
 
@@ -211,6 +245,9 @@ def create_task(
             sync_deletes=sync_deletes,
             enabled=enabled,
             owner_email=owner_email or None,
+            sync_mode=sync_mode,
+            label_name=label_name.strip() if label_name else None,
+            label_resource_types=label_resource_types or None,
         )
         session.add(task)
         session.flush()
@@ -254,6 +291,9 @@ def update_task(
     sync_deletes: Optional[bool] = None,
     enabled: Optional[bool] = None,
     owner_email: Optional[str] = None,
+    sync_mode: Optional[str] = None,
+    label_name: Optional[str] = None,
+    label_resource_types: Optional[List[str]] = None,
 ) -> Optional[ScheduledTask]:
     """Update an existing task. Only provided (non-None) fields are changed.
 
@@ -270,13 +310,47 @@ def update_task(
         if new_source == new_target:
             raise ValueError("source_tenant_id and target_tenant_id must differ.")
 
-        if resource_groups is not None:
-            if not resource_groups:
-                raise ValueError("resource_groups must be a non-empty list.")
-            for g in resource_groups:
-                if g not in RESOURCE_GROUP_MAP:
-                    raise ValueError(f"Unknown resource group: '{g}'")
-            task.resource_groups = resource_groups
+        effective_mode = sync_mode if sync_mode is not None else task.sync_mode
+
+        if sync_mode is not None:
+            if sync_mode not in ("resource_type", "label"):
+                raise ValueError("sync_mode must be 'resource_type' or 'label'.")
+
+        switching_to_resource_type = sync_mode == "resource_type" and task.sync_mode == "label"
+        switching_to_label = sync_mode == "label" and task.sync_mode == "resource_type"
+
+        if effective_mode == "resource_type":
+            if switching_to_resource_type and resource_groups is None:
+                raise ValueError(
+                    "resource_groups is required when switching sync_mode to 'resource_type'."
+                )
+            if resource_groups is not None:
+                if not resource_groups:
+                    raise ValueError("resource_groups must be a non-empty list.")
+                for g in resource_groups:
+                    if g not in RESOURCE_GROUP_MAP:
+                        raise ValueError(f"Unknown resource group: '{g}'")
+                task.resource_groups = resource_groups
+            if switching_to_resource_type:
+                task.label_name = None
+                task.label_resource_types = None
+        elif effective_mode == "label":
+            if switching_to_label:
+                task.resource_groups = []
+            elif resource_groups is not None:
+                task.resource_groups = []
+            if label_name is not None:
+                if not label_name.strip():
+                    raise ValueError("label_name cannot be empty when sync_mode is 'label'.")
+                task.label_name = label_name.strip()
+            if label_resource_types is not None:
+                for rtype in label_resource_types:
+                    if rtype not in LABEL_SUPPORTED_RESOURCE_TYPES:
+                        raise ValueError(f"Unsupported label resource type: '{rtype}'")
+                task.label_resource_types = label_resource_types or None
+
+        if sync_mode is not None:
+            task.sync_mode = sync_mode
 
         if name is not None:
             task.name = name
@@ -500,5 +574,8 @@ def _copy_task(task: ScheduledTask) -> ScheduledTask:
         owner_email=task.owner_email,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        sync_mode=task.sync_mode,
+        label_name=task.label_name,
+        label_resource_types=list(task.label_resource_types) if task.label_resource_types else None,
     )
     return copy

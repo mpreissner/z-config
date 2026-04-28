@@ -24,6 +24,26 @@ from db.models import ScheduledTask, TaskRunHistory, ZIAResource
 
 
 # ---------------------------------------------------------------------------
+# Label helper
+# ---------------------------------------------------------------------------
+
+def _has_label(raw_config: Dict, label_name: str) -> bool:
+    """Return True if raw_config['labels'] contains an entry with name == label_name.
+
+    Matching is case-sensitive. The labels field may be absent, None, or an empty
+    list — all of which return False. Only dicts with a 'name' key are matched;
+    entries without a 'name' key are skipped.
+    """
+    labels = raw_config.get("labels")
+    if not labels:
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("name") == label_name
+        for entry in labels
+    )
+
+
+# ---------------------------------------------------------------------------
 # Diff record
 # ---------------------------------------------------------------------------
 
@@ -58,6 +78,9 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         t_target = task.target_tenant_id
         t_groups = list(task.resource_groups)
         t_sync_deletes = task.sync_deletes
+        t_sync_mode = task.sync_mode or "resource_type"
+        t_label_name = task.label_name
+        t_label_resource_types = list(task.label_resource_types) if task.label_resource_types else None
 
     # 2. Create a "running" run record
     run_started = datetime.utcnow()
@@ -74,8 +97,12 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         run_id = run.id
 
     # 3. Expand resource groups to concrete resource_type strings
-    from services.scheduled_task_service import expand_resource_groups
-    resource_types = expand_resource_groups(t_groups)
+    if t_sync_mode == "label":
+        from services.scheduled_task_service import LABEL_SUPPORTED_RESOURCE_TYPES
+        resource_types = t_label_resource_types if t_label_resource_types else LABEL_SUPPORTED_RESOURCE_TYPES
+    else:
+        from services.scheduled_task_service import expand_resource_groups
+        resource_types = expand_resource_groups(t_groups)
 
     errors: List[Dict[str, str]] = []
     synced = 0
@@ -98,7 +125,11 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         )
 
         # 7. Compute diff between source and target DB rows
-        diff = _compute_diff(t_source, t_target, resource_types, sync_deletes=t_sync_deletes)
+        diff = _compute_diff(
+            t_source, t_target, resource_types,
+            sync_deletes=t_sync_deletes,
+            label_name=t_label_name if t_sync_mode == "label" else None,
+        )
 
         # 8. Push diff to target (best-effort)
         for rec in diff:
@@ -225,12 +256,14 @@ def _compute_diff(
     target_tenant_id: int,
     resource_types: List[str],
     sync_deletes: bool = False,
+    label_name: Optional[str] = None,
 ) -> List[_DiffRecord]:
     """Compare source and target ZIAResource rows; return ordered diff list.
 
     Matching is by name (cross-tenant IDs differ).
     Config comparison uses config_hash (SHA-256 of sorted JSON).
     Zscaler-managed resources are excluded via _is_zscaler_managed().
+    When label_name is set, only resources carrying that label are included.
     """
     from services.zia_push_service import _is_zscaler_managed, PUSH_ORDER
 
@@ -268,6 +301,19 @@ def _compute_diff(
             for r in tgt_rows:
                 if r.name and not _is_zscaler_managed(rtype, r.raw_config or {}):
                     tgt_by_name[r.name] = r
+
+            # Filter to labelled resources only when label_name is specified.
+            # _has_label() operates on already-loaded raw_config dicts — no new
+            # session is opened here.
+            if label_name is not None:
+                src_by_name = {
+                    name: r for name, r in src_by_name.items()
+                    if _has_label(r.raw_config or {}, label_name)
+                }
+                tgt_by_name = {
+                    name: r for name, r in tgt_by_name.items()
+                    if _has_label(r.raw_config or {}, label_name)
+                }
 
             # CREATE — in source, not in target
             for name, src in src_by_name.items():

@@ -38,6 +38,21 @@ const RESOURCE_GROUPS: Array<{ key: string; label: string; note?: string }> = [
   { key: "tenancy", label: "Tenancy Restriction Profiles" },
 ];
 
+const LABEL_SUPPORTED_RESOURCE_TYPES: Array<{ key: string; label: string }> = [
+  { key: "firewall_rule",          label: "Firewall Rules" },
+  { key: "url_filtering_rule",     label: "URL Filtering Rules" },
+  { key: "ssl_inspection_rule",    label: "SSL Inspection Rules" },
+  { key: "forwarding_rule",        label: "Forwarding Rules" },
+  { key: "bandwidth_control_rule", label: "Bandwidth Control Rules" },
+  { key: "nat_control_rule",       label: "NAT Control Rules" },
+  { key: "dlp_web_rule",           label: "DLP Web Rules" },
+  { key: "firewall_dns_rule",      label: "Firewall DNS Rules" },
+  { key: "firewall_ips_rule",      label: "Firewall IPS Rules" },
+  { key: "sandbox_rule",           label: "Sandbox Rules" },
+  { key: "traffic_capture_rule",   label: "Traffic Capture Rules" },
+  { key: "cloud_app_control_rule", label: "Cloud App Control Rules" },
+];
+
 const INTERVAL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "1h", label: "Every 1 hour" },
   { value: "4h", label: "Every 4 hours" },
@@ -47,6 +62,10 @@ const INTERVAL_OPTIONS: Array<{ value: string; label: string }> = [
 
 function groupLabel(key: string): string {
   return RESOURCE_GROUPS.find((g) => g.key === key)?.label ?? key;
+}
+
+export function labelTypeLabel(key: string): string {
+  return LABEL_SUPPORTED_RESOURCE_TYPES.find((t) => t.key === key)?.label ?? key;
 }
 
 function humanCron(cron: string): string {
@@ -140,6 +159,13 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
   const [syncDeletes, setSyncDeletes] = useState(initial?.sync_deletes ?? false);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [ownerEmail, setOwnerEmail] = useState(initial?.owner_email ?? "");
+  const [syncMode, setSyncMode] = useState<"resource_type" | "label">(
+    initial?.sync_mode ?? "resource_type"
+  );
+  const [labelName, setLabelName] = useState(initial?.label_name ?? "");
+  const [selectedLabelTypes, setSelectedLabelTypes] = useState<string[]>(
+    initial?.label_resource_types ?? LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => t.key)
+  );
   const [error, setError] = useState<string | null>(null);
 
   const queryClient = useQueryClient();
@@ -182,8 +208,16 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
       setError("Source and target tenants must be different.");
       return;
     }
-    if (selectedGroups.length === 0) {
+    if (syncMode === "resource_type" && selectedGroups.length === 0) {
       setError("Select at least one resource group.");
+      return;
+    }
+    if (syncMode === "label" && !labelName.trim()) {
+      setError("Label name is required.");
+      return;
+    }
+    if (syncMode === "label" && selectedLabelTypes.length === 0) {
+      setError("Select at least one resource type for label sync.");
       return;
     }
 
@@ -194,11 +228,19 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
       name: name.trim(),
       source_tenant_id: sourceTenantId as number,
       target_tenant_id: targetTenantId as number,
-      resource_groups: selectedGroups,
+      resource_groups: syncMode === "resource_type" ? selectedGroups : [],
       schedule,
       sync_deletes: syncDeletes,
       enabled,
       owner_email: ownerEmail.trim() || null,
+      sync_mode: syncMode,
+      label_name: syncMode === "label" ? labelName.trim() : null,
+      label_resource_types:
+        syncMode === "label"
+          ? (selectedLabelTypes.length === LABEL_SUPPORTED_RESOURCE_TYPES.length
+              ? null
+              : selectedLabelTypes)
+          : null,
     };
 
     if (mode === "create") {
@@ -272,26 +314,134 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
             </div>
           </div>
 
-          {/* Resource Groups */}
+          {/* Sync Mode */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Resource Groups</label>
-            <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
-              {RESOURCE_GROUPS.map((g) => (
-                <label key={g.key} className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={selectedGroups.includes(g.key)}
-                    onChange={() => toggleGroup(g.key)}
-                    className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
-                  />
-                  <span className="text-gray-700">{g.label}</span>
-                  {g.note && (
-                    <span className="text-gray-400 text-xs" title={g.note}>ⓘ</span>
-                  )}
-                </label>
-              ))}
+            <label className="block text-sm font-medium text-gray-700 mb-2">Sync Mode</label>
+            <div className="flex gap-6">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="syncMode"
+                  value="resource_type"
+                  checked={syncMode === "resource_type"}
+                  onChange={() => { setSyncMode("resource_type"); }}
+                  className="text-zs-500"
+                />
+                <span>By Resource Type</span>
+              </label>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="syncMode"
+                  value="label"
+                  checked={syncMode === "label"}
+                  onChange={() => { setSyncMode("label"); setSelectedGroups([]); }}
+                  className="text-zs-500"
+                />
+                <span>By Label</span>
+              </label>
             </div>
           </div>
+
+          {/* Resource Groups — resource_type mode only */}
+          {syncMode === "resource_type" && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Resource Groups</label>
+              <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
+                {RESOURCE_GROUPS.map((g) => (
+                  <label key={g.key} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedGroups.includes(g.key)}
+                      onChange={() => toggleGroup(g.key)}
+                      className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                    />
+                    <span className="text-gray-700">{g.label}</span>
+                    {g.note && (
+                      <span
+                        className="relative group/tooltip"
+                        onClick={(e) => e.preventDefault()}
+                      >
+                        <span className="text-gray-400 text-xs cursor-help select-none">ⓘ</span>
+                        <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-56 rounded bg-gray-800 px-2 py-1.5 text-xs text-white opacity-0 group-hover/tooltip:opacity-100 transition-opacity z-50 whitespace-normal text-center shadow-lg">
+                          {g.note}
+                        </span>
+                      </span>
+                    )}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Label mode panel */}
+          {syncMode === "label" && (
+            <div className="space-y-4">
+              {/* Label name input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Label Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={labelName}
+                  onChange={(e) => setLabelName(e.target.value)}
+                  placeholder="e.g. test123"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Case-sensitive. Only resources with this label will be synced.
+                </p>
+              </div>
+
+              {/* Label resource type multi-select */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Resource Types to Sync
+                  </label>
+                  <div className="flex gap-3 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLabelTypes(LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => t.key))}
+                      className="text-zs-600 hover:underline"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLabelTypes([])}
+                      className="text-gray-500 hover:underline"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
+                  {LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => (
+                    <label key={t.key} className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedLabelTypes.includes(t.key)}
+                        onChange={() =>
+                          setSelectedLabelTypes((prev) =>
+                            prev.includes(t.key)
+                              ? prev.filter((k) => k !== t.key)
+                              : [...prev, t.key]
+                          )
+                        }
+                        className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                      />
+                      <span className="text-gray-700">{t.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  Uncheck to exclude specific rule types from this sync. All are synced by default.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Schedule */}
           <div>
@@ -589,7 +739,7 @@ function TaskListTab({ onOpenMonitoring }: TaskListTabProps) {
           <table className="min-w-full divide-y divide-gray-300 text-sm">
             <thead className="bg-gray-50">
               <tr>
-                {["Name", "Source", "Target", "Resource Groups", "Schedule", "Status", "Last Run", "Next Run", "Actions"].map((h) => (
+                {["Name", "Source", "Target", "Scope", "Schedule", "Status", "Last Run", "Next Run", "Actions"].map((h) => (
                   <th
                     key={h}
                     className="py-3 px-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide"
@@ -614,7 +764,21 @@ function TaskListTab({ onOpenMonitoring }: TaskListTabProps) {
                   <td className="py-3 px-3 text-gray-600">{task.target_tenant_name}</td>
                   <td className="py-3 px-3 text-gray-600 max-w-xs">
                     <span className="text-xs">
-                      {task.resource_groups.map((g) => groupLabel(g)).join(", ")}
+                      {task.sync_mode === "label" ? (
+                        <>
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-xs font-medium mr-1">
+                            Label
+                          </span>
+                          {task.label_name}
+                          {task.label_resource_types && (
+                            <span className="text-gray-400 ml-1">
+                              ({task.label_resource_types.length} types)
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        task.resource_groups.map((g) => groupLabel(g)).join(", ")
+                      )}
                     </span>
                   </td>
                   <td className="py-3 px-3 text-gray-600 whitespace-nowrap">

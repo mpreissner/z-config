@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from api.dependencies import require_auth, check_tenant_access, AuthUser
 
@@ -33,6 +33,23 @@ class ScheduledTaskCreate(BaseModel):
     sync_deletes: bool = False
     enabled: bool = True
     owner_email: Optional[str] = None
+    sync_mode: str = "resource_type"
+    label_name: Optional[str] = None
+    label_resource_types: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> "ScheduledTaskCreate":
+        if self.sync_mode not in ("resource_type", "label"):
+            raise ValueError("sync_mode must be 'resource_type' or 'label'.")
+        if self.sync_mode == "resource_type":
+            if not self.resource_groups:
+                raise ValueError("resource_groups must be non-empty when sync_mode is 'resource_type'.")
+            if self.label_name:
+                raise ValueError("label_name must be absent when sync_mode is 'resource_type'.")
+        elif self.sync_mode == "label":
+            if not self.label_name or not self.label_name.strip():
+                raise ValueError("label_name is required when sync_mode is 'label'.")
+        return self
 
 
 class ScheduledTaskUpdate(BaseModel):
@@ -44,6 +61,21 @@ class ScheduledTaskUpdate(BaseModel):
     sync_deletes: Optional[bool] = None
     enabled: Optional[bool] = None
     owner_email: Optional[str] = None
+    sync_mode: Optional[str] = None
+    label_name: Optional[str] = None
+    label_resource_types: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> "ScheduledTaskUpdate":
+        if self.sync_mode is not None and self.sync_mode not in ("resource_type", "label"):
+            raise ValueError("sync_mode must be 'resource_type' or 'label'.")
+        if self.sync_mode == "resource_type":
+            if self.label_name is not None:
+                raise ValueError("label_name must be absent when sync_mode is 'resource_type'.")
+        if self.sync_mode == "label":
+            if self.label_name is not None and not self.label_name.strip():
+                raise ValueError("label_name cannot be empty when sync_mode is 'label'.")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +123,9 @@ def _serialize_task(task, last_run=None) -> Dict[str, Any]:
         "next_run_at": _next_run(task.cron_expression) if task.enabled else None,
         "created_at": task.created_at.isoformat() + "Z" if task.created_at else None,
         "updated_at": task.updated_at.isoformat() + "Z" if task.updated_at else None,
+        "sync_mode": task.sync_mode or "resource_type",
+        "label_name": task.label_name,
+        "label_resource_types": task.label_resource_types,
     }
 
 
@@ -181,6 +216,9 @@ def create_task(body: ScheduledTaskCreate, user: AuthUser = Depends(require_auth
             sync_deletes=body.sync_deletes,
             enabled=body.enabled,
             owner_email=body.owner_email,
+            sync_mode=body.sync_mode,
+            label_name=body.label_name,
+            label_resource_types=body.label_resource_types,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -232,6 +270,9 @@ def update_task(task_id: int, body: ScheduledTaskUpdate, user: AuthUser = Depend
             sync_deletes=body.sync_deletes,
             enabled=body.enabled,
             owner_email=body.owner_email,
+            sync_mode=body.sync_mode,
+            label_name=body.label_name,
+            label_resource_types=body.label_resource_types,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

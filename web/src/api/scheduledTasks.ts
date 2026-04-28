@@ -17,6 +17,9 @@ export interface ScheduledTask {
   next_run_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+  sync_mode: "resource_type" | "label";
+  label_name: string | null;
+  label_resource_types: string[] | null;
 }
 
 export interface TaskRunHistory {
@@ -48,6 +51,9 @@ export interface CreateScheduledTaskRequest {
   sync_deletes?: boolean;
   enabled?: boolean;
   owner_email?: string | null;
+  sync_mode?: "resource_type" | "label";
+  label_name?: string | null;
+  label_resource_types?: string[] | null;
 }
 
 export const fetchScheduledTasks = (): Promise<ScheduledTask[]> =>
