@@ -114,6 +114,7 @@ def zia_menu():
             if source_tenant is None or snap is None:
                 pass  # user cancelled; loop continues
             else:
+                _warn_subscription_diff(source_tenant, tenant)
                 baseline_path = f"{source_tenant.name}/{snap.name}"
                 baseline = {
                     "product": "ZIA",
@@ -4407,6 +4408,56 @@ def _delete_cloud_app_rule(client, tenant, rule_type: str):
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
     questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
+# License / Subscription Comparison
+# ------------------------------------------------------------------
+
+def _warn_subscription_diff(source_tenant, target_tenant):
+    """Print a warning if source and target ZIA subscriptions differ.
+
+    Silently returns if either tenant lacks subscription data or they match.
+    """
+    import json
+
+    src_subs = source_tenant.zia_subscriptions
+    tgt_subs = target_tenant.zia_subscriptions
+    if not src_subs or not tgt_subs:
+        return
+    if json.dumps(src_subs, sort_keys=True) == json.dumps(tgt_subs, sort_keys=True):
+        return
+
+    def _extract(subs):
+        arr = subs if isinstance(subs, list) else (subs.get("features") if isinstance(subs, dict) else None)
+        if not isinstance(arr, list):
+            return None
+        return {(f.get("name") if isinstance(f, dict) else str(f)) for f in arr if f}
+
+    src_feats = _extract(src_subs)
+    tgt_feats = _extract(tgt_subs)
+
+    from rich.panel import Panel
+    lines = [
+        "[bold yellow]⚠  License / Subscription Discrepancy[/bold yellow]",
+        "",
+        "The source and target tenants have different ZIA subscriptions.",
+        "Some resources or features may be silently modified or skipped during push.",
+    ]
+
+    if src_feats is not None and tgt_feats is not None:
+        only_src = sorted(src_feats - tgt_feats)
+        only_tgt = sorted(tgt_feats - src_feats)
+        if only_src:
+            lines.append(f"\n[yellow]  Features in source only ({len(only_src)}):[/yellow]")
+            for f in only_src:
+                lines.append(f"    {f}")
+        if only_tgt:
+            lines.append(f"\n[yellow]  Features in target only ({len(only_tgt)}):[/yellow]")
+            for f in only_tgt:
+                lines.append(f"    {f}")
+
+    console.print(Panel("\n".join(lines), border_style="yellow"))
 
 
 # ------------------------------------------------------------------

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchSettings, patchSettings, SystemSettings } from "../api/system";
-import { importDatabase, ImportDbResult } from "../api/admin";
+import { importDatabase, ImportDbResult, clearData, ClearDataResult } from "../api/admin";
+import { fetchTenants, Tenant } from "../api/tenants";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
 
@@ -346,6 +347,9 @@ export default function AdminSettingsPage() {
 
       {/* ── Import Database ───────────────────────────────────────────────── */}
       <ImportDatabaseCard />
+
+      {/* ── Clear Data ────────────────────────────────────────────────────── */}
+      <ClearDataCard />
     </div>
   );
 }
@@ -448,6 +452,111 @@ function ImportDatabaseCard() {
           className="px-4 py-2 text-sm font-medium rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50 transition-colors"
         >
           {loading ? "Importing…" : "Import Database"}
+        </button>
+      </div>
+    </SectionCard>
+  );
+}
+
+// ── Clear Data card ───────────────────────────────────────────────────────────
+
+function ClearDataCard() {
+  const { data: tenants } = useQuery<Tenant[]>({
+    queryKey: ["tenants"],
+    queryFn: fetchTenants,
+  });
+
+  const [scope, setScope] = useState<"all" | "one">("all");
+  const [tenantId, setTenantId] = useState<string>("");
+  const [confirm, setConfirm] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<ClearDataResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const sortedTenants = tenants
+    ? [...tenants].sort((a, b) => a.name.localeCompare(b.name))
+    : [];
+
+  async function handleClear() {
+    setLoading(true);
+    setResult(null);
+    setErr(null);
+    try {
+      const tid = scope === "one" && tenantId ? parseInt(tenantId, 10) : undefined;
+      const res = await clearData(tid);
+      setResult(res);
+      setConfirm(false);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Clear failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const canSubmit = !loading && confirm && (scope === "all" || !!tenantId);
+
+  return (
+    <SectionCard title="Clear Data">
+      <p className="text-xs text-gray-500">
+        Permanently deletes imported resources, config snapshots, sync logs, and audit log entries.
+        Tenant configuration (credentials, connection details) is preserved.
+      </p>
+
+      <FieldRow label="Scope">
+        <SelectInput
+          value={scope}
+          onChange={(v) => { setScope(v as "all" | "one"); setTenantId(""); setConfirm(false); setResult(null); }}
+          options={[
+            { value: "all", label: "All tenants" },
+            { value: "one", label: "Specific tenant" },
+          ]}
+        />
+      </FieldRow>
+
+      {scope === "one" && (
+        <FieldRow label="Tenant">
+          <select
+            value={tenantId}
+            onChange={(e) => { setTenantId(e.target.value); setConfirm(false); setResult(null); }}
+            className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+          >
+            <option value="">— select tenant —</option>
+            {sortedTenants.map((t) => (
+              <option key={t.id} value={String(t.id)}>{t.name}</option>
+            ))}
+          </select>
+        </FieldRow>
+      )}
+
+      <FieldRow label="Confirm">
+        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={confirm}
+            onChange={(e) => setConfirm(e.target.checked)}
+            className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+          />
+          I understand this cannot be undone
+        </label>
+      </FieldRow>
+
+      {err && <p className="text-xs text-red-600">{err}</p>}
+
+      {result && (
+        <p className="text-xs text-green-700 font-medium">
+          Cleared: {result.zia} ZIA, {result.zpa} ZPA, {result.zcc} ZCC resources,{" "}
+          {result.snapshots} snapshots, {result.sync_logs} sync logs,{" "}
+          {result.audit_entries} audit entries.
+        </p>
+      )}
+
+      <div>
+        <button
+          onClick={handleClear}
+          disabled={!canSubmit}
+          className="px-4 py-2 text-sm font-medium rounded-md bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 transition-colors"
+        >
+          {loading ? "Clearing…" : "Clear Data"}
         </button>
       </div>
     </SectionCard>

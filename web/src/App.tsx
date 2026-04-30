@@ -5,6 +5,7 @@ import { PrivateRoute } from "./components/PrivateRoute";
 import TenantsPage from "./pages/TenantsPage";
 import TenantWorkspacePage from "./pages/TenantWorkspacePage";
 import AuditPage from "./pages/AuditPage";
+import ScheduledTasksPage from "./pages/ScheduledTasksPage";
 import LoginPage from "./pages/LoginPage";
 import ChangePasswordPage from "./pages/ChangePasswordPage";
 import MfaEnrollModal from "./components/MfaEnrollModal";
@@ -54,6 +55,7 @@ export default function App() {
                   <Route path="/tenants/:id" element={<Navigate to="/tenants" replace />} />
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/audit" element={<AuditPage />} />
+                  <Route path="/scheduled-tasks" element={<ScheduledTasksPage />} />
                   {/* Tenant workspace routes */}
                   <Route path="/tenant/:id" element={<Navigate to="zia" replace />} />
                   <Route path="/tenant/:id/zia" element={<TenantWorkspacePage />} />

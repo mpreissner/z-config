@@ -343,3 +343,62 @@ class UserTenantEntitlement(Base):
 
     def __repr__(self) -> str:
         return f"<UserTenantEntitlement user_id={self.user_id} tenant_id={self.tenant_id}>"
+
+
+class ScheduledTask(Base):
+    """A recurring cross-tenant ZIA config sync job.
+
+    resource_groups is a list of group key strings that expand to the
+    constituent resource_type values synced by the engine.
+    cron_expression is always stored as a 5-field cron string regardless of
+    whether the user entered a preset interval or a custom expression.
+    """
+
+    __tablename__ = "scheduled_tasks"
+
+    id               = Column(Integer, primary_key=True)
+    name             = Column(String(255), nullable=False, unique=True)
+    source_tenant_id = Column(Integer, ForeignKey("tenant_configs.id"), nullable=False)
+    target_tenant_id = Column(Integer, ForeignKey("tenant_configs.id"), nullable=False)
+    resource_groups      = Column(JSON, nullable=False)
+    sync_mode            = Column(String(16),  nullable=False, default="resource_type")
+    label_name           = Column(String(255), nullable=True)
+    label_resource_types = Column(JSON,        nullable=True)
+    cron_expression      = Column(String(128), nullable=False)
+    sync_deletes     = Column(Boolean, default=False, nullable=False)
+    enabled          = Column(Boolean, default=True, nullable=False)
+    owner_email      = Column(String(512), nullable=True)
+    created_at       = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at       = Column(DateTime, default=datetime.utcnow,
+                             onupdate=datetime.utcnow, nullable=False)
+
+    source_tenant = relationship("TenantConfig", foreign_keys=[source_tenant_id])
+    target_tenant = relationship("TenantConfig", foreign_keys=[target_tenant_id])
+    runs          = relationship("TaskRunHistory", back_populates="task",
+                                 cascade="all, delete-orphan", lazy="select")
+
+    def __repr__(self) -> str:
+        return f"<ScheduledTask name={self.name!r} enabled={self.enabled}>"
+
+
+class TaskRunHistory(Base):
+    """Records the outcome of each scheduled (or manual) sync task execution."""
+
+    __tablename__ = "task_run_history"
+
+    id               = Column(Integer, primary_key=True)
+    task_id          = Column(Integer, ForeignKey("scheduled_tasks.id",
+                              ondelete="CASCADE"), nullable=False)
+    started_at       = Column(DateTime, nullable=False)
+    finished_at      = Column(DateTime, nullable=True)
+    status           = Column(String(16), nullable=False)
+    # status values: "running", "success", "partial", "failed"
+    resources_synced = Column(Integer, default=0, nullable=False)
+    errors_json      = Column(JSON, nullable=True)
+    # errors_json: list of {"resource_type": str, "resource_name": str,
+    #                        "operation": str, "error": str}
+
+    task = relationship("ScheduledTask", back_populates="runs")
+
+    def __repr__(self) -> str:
+        return f"<TaskRunHistory task_id={self.task_id} status={self.status!r}>"

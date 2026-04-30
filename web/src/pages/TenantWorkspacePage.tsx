@@ -3355,6 +3355,61 @@ function ZidApiClientsSection({ tenantName, isOpen }: { tenantName: string; isOp
   );
 }
 
+// ── License comparison ────────────────────────────────────────────────────────
+
+interface LicenseDiff {
+  onlyInSource: string[];
+  onlyInTarget: string[];
+}
+
+function computeLicenseDiff(src: unknown, tgt: unknown): LicenseDiff | null {
+  if (!src || !tgt) return null;
+  if (JSON.stringify(src) === JSON.stringify(tgt)) return null;
+
+  function extractFeatures(subs: unknown): Set<string> | null {
+    const arr = Array.isArray(subs) ? subs : (subs && typeof subs === "object" && "features" in subs && Array.isArray((subs as Record<string, unknown>).features) ? (subs as Record<string, unknown>).features as unknown[] : null);
+    if (!Array.isArray(arr)) return null;
+    return new Set(arr.map((f) => (f && typeof f === "object" && "name" in f ? String((f as Record<string, unknown>).name) : String(f))).filter(Boolean));
+  }
+
+  const srcFeats = extractFeatures(src);
+  const tgtFeats = extractFeatures(tgt);
+  if (srcFeats && tgtFeats) {
+    const onlyInSource = [...srcFeats].filter((f) => !tgtFeats.has(f)).sort();
+    const onlyInTarget = [...tgtFeats].filter((f) => !srcFeats.has(f)).sort();
+    if (onlyInSource.length === 0 && onlyInTarget.length === 0) return null;
+    return { onlyInSource, onlyInTarget };
+  }
+
+  return { onlyInSource: [], onlyInTarget: [] };
+}
+
+function LicenseWarning({ diff }: { diff: LicenseDiff }) {
+  const hasDetail = diff.onlyInSource.length > 0 || diff.onlyInTarget.length > 0;
+  return (
+    <div className="p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800 space-y-1.5">
+      <p className="font-medium">License / subscription discrepancy detected</p>
+      <p>Source and target tenants have different ZIA subscriptions. Some resources may be silently modified or skipped during push.</p>
+      {hasDetail && (
+        <div className="space-y-1 mt-1">
+          {diff.onlyInSource.length > 0 && (
+            <div>
+              <span className="font-medium">Source-only features:</span>
+              <span className="ml-1 font-mono">{diff.onlyInSource.join(", ")}</span>
+            </div>
+          )}
+          {diff.onlyInTarget.length > 0 && (
+            <div>
+              <span className="font-medium">Target-only features:</span>
+              <span className="ml-1 font-mono">{diff.onlyInTarget.join(", ")}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Progress bar ──────────────────────────────────────────────────────────────
 
 function ImportProgressBar({ active, message }: { active: boolean; message?: string }) {
@@ -3434,7 +3489,11 @@ function ImportProductModal({
                   <p className="text-xs text-gray-400 text-right">{importProgress.done} / {importProgress.total}</p>
                 </div>
               ) : (
-                <ImportProgressBar active />
+                <div className="mt-2 space-y-1.5">
+                  <div className="h-1.5 w-full bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-full w-2/5 bg-zs-500 rounded-full animate-indeterminate" />
+                  </div>
+                </div>
               )}
               <p className="text-xs text-gray-400 italic">This may take several minutes depending on the number of resources in the tenant.</p>
             </div>
@@ -3535,7 +3594,7 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
   }
 
   const sortedTenants = allTenants
-    ? [...allTenants].sort((a, b) => a.name.localeCompare(b.name))
+    ? [...allTenants].filter((t) => t.id !== tenant.id).sort((a, b) => a.name.localeCompare(b.name))
     : [];
 
   const err = mutErr ?? previewStreamError ?? applyStreamError ?? null;
@@ -3632,6 +3691,10 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
       </div>
     );
   }
+
+  // ── License diff ───────────────────────────────────────────────────────────
+  const sourceTenant = allTenants?.find((t) => t.id === sourceTenantId) ?? null;
+  const licenseDiff = sourceTenant ? computeLicenseDiff(sourceTenant.zia_subscriptions, tenant.zia_subscriptions) : null;
 
   // ── Preview summary helpers ────────────────────────────────────────────────
   const actionCounts: Record<string, { create: number; update: number; delete: number }> = {};
@@ -3827,6 +3890,8 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
               </button>
             </div>
           )}
+
+          {licenseDiff && <LicenseWarning diff={licenseDiff} />}
 
           {!isApplyRunning && (preview.creates > 0 || preview.updates > 0 || preview.deletes > 0) && (
             <div className="space-y-2">
@@ -4295,11 +4360,11 @@ export default function TenantWorkspacePage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === "zia" && <ZiaTab tenant={tenant} />}
-      {activeTab === "zpa" && tenant.zpa_customer_id && <ZpaTab tenant={tenant} />}
-      {activeTab === "zdx" && <ZdxTab tenant={tenant} />}
-      {activeTab === "zcc" && <ZccTab tenant={tenant} />}
-      {activeTab === "zid" && <ZidTab tenant={tenant} />}
+      {activeTab === "zia" && <ZiaTab key={tenant.id} tenant={tenant} />}
+      {activeTab === "zpa" && tenant.zpa_customer_id && <ZpaTab key={tenant.id} tenant={tenant} />}
+      {activeTab === "zdx" && <ZdxTab key={tenant.id} tenant={tenant} />}
+      {activeTab === "zcc" && <ZccTab key={tenant.id} tenant={tenant} />}
+      {activeTab === "zid" && <ZidTab key={tenant.id} tenant={tenant} />}
 
       {importModal && (
         <ImportProductModal

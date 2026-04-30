@@ -38,7 +38,7 @@ reference/
 
 # Internal notes / research (not for the repo)
 notes/
-docs/
+docs/specs/
 
 # Mempalace
 mempalace.yaml

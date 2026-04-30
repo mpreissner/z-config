@@ -88,3 +88,19 @@ export function importDatabase(dbFile: File, keyFile?: File): Promise<ImportDbRe
   if (keyFile) form.append("key_file", keyFile);
   return apiFetch("/api/v1/admin/import-db", { method: "POST", body: form });
 }
+
+export interface ClearDataResult {
+  zia: number;
+  zpa: number;
+  zcc: number;
+  snapshots: number;
+  sync_logs: number;
+  audit_entries: number;
+}
+
+export function clearData(tenantId?: number): Promise<ClearDataResult> {
+  return apiFetch("/api/v1/admin/clear-data", {
+    method: "POST",
+    body: JSON.stringify({ tenant_id: tenantId ?? null }),
+  });
+}

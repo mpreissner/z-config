@@ -689,8 +689,11 @@ class ZIAClient:
         return self.zia_get(f"/zia/api/v1/urlFilteringRules/{rule_id}")
 
     def update_url_filtering_rule(self, rule_id: str, config: Dict) -> bool:
-        # Always use direct HTTP with the camelCase config dict
-        self.zia_put(f"/zia/api/v1/urlFilteringRules/{rule_id}", config)
+        if self._govcloud:
+            self.zia_put(f"/zia/api/v1/urlFilteringRules/{rule_id}", config)
+            return True
+        result, resp, err = self._sdk.zia.url_filtering.update_rule(int(rule_id), **config)
+        _unwrap(result, resp, err)
         return True
 
     # ------------------------------------------------------------------

@@ -746,9 +746,29 @@ def _generate_key():
 def _clear_imported_data():
     console.print(
         "\n[bold]Clear Imported Data & Audit Log[/bold]\n"
-        "[dim]Deletes all ZPA resources, sync logs, and audit log entries.\n"
-        "Tenant configuration is preserved.[/dim]\n"
+        "[dim]Deletes imported ZIA/ZPA/ZCC resources, snapshots, sync logs, and audit log entries.\n"
+        "Tenant configuration (credentials, metadata) is preserved.[/dim]\n"
     )
+
+    # Tenant scope selection
+    scope_choice = questionary.select(
+        "Scope:",
+        choices=[
+            questionary.Choice("All tenants", value="all"),
+            questionary.Choice("Select specific tenant", value="one"),
+        ],
+    ).ask()
+    if scope_choice is None:
+        return
+
+    tenant_id = None
+    if scope_choice == "one":
+        from cli.menus import select_tenant
+        tenant = select_tenant()
+        if tenant is None:
+            return
+        tenant_id = tenant.id
+
     confirmed = questionary.confirm(
         "This cannot be undone. Proceed?", default=False
     ).ask()
@@ -756,16 +776,35 @@ def _clear_imported_data():
         return
 
     from db.database import get_session
-    from db.models import AuditLog, SyncLog, ZPAResource
+    from db.models import AuditLog, RestorePoint, SyncLog, ZIAResource, ZPAResource, ZCCResource
 
     with get_session() as session:
-        zpa_count  = session.query(ZPAResource).delete()
-        sync_count = session.query(SyncLog).delete()
-        audit_count = session.query(AuditLog).delete()
+        q_zia      = session.query(ZIAResource)
+        q_zpa      = session.query(ZPAResource)
+        q_zcc      = session.query(ZCCResource)
+        q_snap     = session.query(RestorePoint)
+        q_sync     = session.query(SyncLog)
+        q_audit    = session.query(AuditLog)
+        if tenant_id is not None:
+            q_zia   = q_zia.filter_by(tenant_id=tenant_id)
+            q_zpa   = q_zpa.filter_by(tenant_id=tenant_id)
+            q_zcc   = q_zcc.filter_by(tenant_id=tenant_id)
+            q_snap  = q_snap.filter_by(tenant_id=tenant_id)
+            q_sync  = q_sync.filter_by(tenant_id=tenant_id)
+            q_audit = q_audit.filter_by(tenant_id=tenant_id)
+        zia_count   = q_zia.delete()
+        zpa_count   = q_zpa.delete()
+        zcc_count   = q_zcc.delete()
+        snap_count  = q_snap.delete()
+        sync_count  = q_sync.delete()
+        audit_count = q_audit.delete()
 
     console.print(
         f"[green]✓ Cleared:[/green] "
+        f"{zia_count} ZIA resources, "
         f"{zpa_count} ZPA resources, "
+        f"{zcc_count} ZCC resources, "
+        f"{snap_count} snapshots, "
         f"{sync_count} sync logs, "
         f"{audit_count} audit entries."
     )

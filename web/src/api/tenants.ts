@@ -15,6 +15,7 @@ export interface Tenant {
   last_validation_error: string | null;
   notes: string | null;
   created_at: string | null;
+  zia_subscriptions: unknown | null;
 }
 
 export interface TenantCreate {

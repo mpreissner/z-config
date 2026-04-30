@@ -36,6 +36,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -177,6 +178,7 @@ READONLY_FIELDS: set = {
     "predefined",
     "last_modified_by",
     "last_modified_time",
+    "last_mod_time",      # alternate timestamp field used by some resources (e.g. location_group)
     "created_by",
     "creation_time",
     "created_at",
@@ -1153,11 +1155,9 @@ class ZIAPushService:
             if rtype in ("allowlist", "denylist"):
                 continue  # no per-item delete path
 
-            snap_ids = {
-                str(entry["id"])
-                for entry in snapshot_resources.get(rtype, [])
-                if "id" in entry
-            }
+            snap_entries = snapshot_resources.get(rtype, [])
+            snap_ids = {str(e["id"]) for e in snap_entries if "id" in e}
+            snap_names = {e["name"] for e in snap_entries if e.get("name")}
 
             for zia_id, entry in existing.get(rtype, {}).items():
                 raw = entry.get("raw_config", {})
@@ -1166,7 +1166,7 @@ class ZIAPushService:
                 name = entry.get("name", "")
                 if name in SKIP_NAMED.get(rtype, set()):
                     continue
-                if zia_id in snap_ids:
+                if zia_id in snap_ids or (name and name in snap_names):
                     continue  # resource is in the snapshot — keep it
                 candidates.append(PushRecord(
                     resource_type=rtype,
@@ -1451,7 +1451,12 @@ class ZIAPushService:
                     progress_callback(pass_num, rtype, rec)
 
                 if rec.is_failed and not rec.is_permanent_failure:
-                    entry["__last_error"] = rec.failure_reason
+                    reason = rec.failure_reason
+                    if "429" in reason or "rate limit" in reason.lower():
+                        # Honor the Retry-After header if present, else default to 2s.
+                        m = re.search(r"Retry-After.*?(\d+)", reason)
+                        time.sleep(int(m.group(1)) + 0.5 if m else 2.0)
+                    entry["__last_error"] = reason
                     remaining.append(entry)
                 else:
                     records.append(rec)
@@ -1712,10 +1717,12 @@ class ZIAPushService:
                                           zia_id=found_id)
                     except Exception as upd_exc:
                         return self._classify_error(resource_type, name, upd_exc)
+                # Name lookup failed (likely transient — rate limit on the list call).
+                # Use a non-permanent status so the multi-pass retry can try again.
                 return PushRecord(
                     resource_type=resource_type,
                     name=name,
-                    status="failed:permanent:duplicate — resource exists but name lookup failed",
+                    status="failed:duplicate — resource exists but name lookup failed (will retry)",
                 )
             return self._classify_error(resource_type, name, exc)
 
@@ -2084,6 +2091,8 @@ class ZIAPushService:
                 ("groups",          "group"),
                 ("departments",     "department"),
                 ("users",           "user"),
+                ("device_groups",   "device_group"),
+                ("devices",         "devices"),
                 ("zpa_app_segments", "zpa_app_segment"),
             ),
             empty_strip=("device_trust_levels", "user_agent_types", "user_risk_score_levels",
@@ -2114,6 +2123,16 @@ class ZIAPushService:
                                           "url": default.get("url", "")}
                 else:
                     cfg.pop("cbi_profile", None)
+                    # ISOLATE requires cbi_profile; the API rejects it without one.
+                    # Downgrade to CAUTION so the rule can still be created.
+                    if cfg.get("action") == "ISOLATE":
+                        cfg["action"] = "CAUTION"
+                        existing_warn = cfg.get("__norm_warning") or ""
+                        cfg["__norm_warning"] = (
+                            (existing_warn + "; " if existing_warn else "") +
+                            "action changed ISOLATE→CAUTION: no matching CBI isolation profile "
+                            "in target (create a matching profile, then restore this rule)"
+                        )
         return cfg
 
     def _norm_dlp_web_rule(self, cfg: dict) -> dict:
@@ -2430,16 +2449,17 @@ class ZIAPushService:
         Only called when a create unexpectedly 409s (snapshot was stale).
         """
         from services.zia_import_service import RESOURCE_DEFINITIONS
-        list_method_name = next(
-            (d.list_method for d in RESOURCE_DEFINITIONS if d.resource_type == resource_type),
+        defn = next(
+            (d for d in RESOURCE_DEFINITIONS if d.resource_type == resource_type),
             None,
         )
-        if not list_method_name:
+        if not defn:
             return None
         try:
-            items = getattr(self._client, list_method_name)()
+            items = getattr(self._client, defn.list_method)()
             for item in items:
-                if item.get("name") == name:
+                # Use the resource-specific name field (e.g. configured_name for url_category)
+                if item.get(defn.name_field) == name or item.get("name") == name:
                     return str(item.get("id", ""))
         except Exception:
             pass

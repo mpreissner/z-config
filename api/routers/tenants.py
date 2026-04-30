@@ -31,6 +31,7 @@ def _serialize(t) -> dict:
         "last_validation_error": t.last_validation_error,
         "notes": t.notes,
         "created_at": t.created_at.isoformat() if t.created_at else None,
+        "zia_subscriptions": t.zia_subscriptions,
     }
 
 
@@ -565,6 +566,12 @@ def apply_snapshot(
                     push_records = service.push_classified(
                         dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                     )
+
+                # Re-import target tenant so DB reflects the pushed state.
+                from services.zia_import_service import ZIAImportService
+                ZIAImportService(client, tenant_id=tenant_id).run(
+                    progress_callback=on_import_progress
+                )
             except _PushCancelled as exc:
                 rollback_records = service.rollback_pushed(
                     exc.pushed_records, on_rollback_progress

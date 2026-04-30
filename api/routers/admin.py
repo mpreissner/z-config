@@ -12,7 +12,10 @@ from pydantic import BaseModel
 from api.dependencies import require_admin, AuthUser
 from api.auth_utils import hash_password
 from db.database import get_session, init_db, get_db_url
-from db.models import User, UserTenantEntitlement, TenantConfig
+from db.models import (
+    AuditLog, RestorePoint, SyncLog, TenantConfig,
+    User, UserTenantEntitlement, ZCCResource, ZIAResource, ZPAResource,
+)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
@@ -203,6 +206,51 @@ def delete_entitlement(entitlement_id: int, _: AuthUser = Depends(require_admin)
         if not ent:
             raise HTTPException(status_code=404, detail="Entitlement not found")
         session.delete(ent)
+
+
+# ── Clear Data ───────────────────────────────────────────────────────────────
+
+class ClearDataRequest(BaseModel):
+    tenant_id: Optional[int] = None
+
+
+@router.post("/clear-data")
+def clear_data(body: ClearDataRequest, _: AuthUser = Depends(require_admin)):
+    tenant_id = body.tenant_id
+    if tenant_id is not None:
+        with get_session() as session:
+            if not session.query(TenantConfig).filter_by(id=tenant_id).first():
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+    with get_session() as session:
+        q_zia   = session.query(ZIAResource)
+        q_zpa   = session.query(ZPAResource)
+        q_zcc   = session.query(ZCCResource)
+        q_snap  = session.query(RestorePoint)
+        q_sync  = session.query(SyncLog)
+        q_audit = session.query(AuditLog)
+        if tenant_id is not None:
+            q_zia   = q_zia.filter_by(tenant_id=tenant_id)
+            q_zpa   = q_zpa.filter_by(tenant_id=tenant_id)
+            q_zcc   = q_zcc.filter_by(tenant_id=tenant_id)
+            q_snap  = q_snap.filter_by(tenant_id=tenant_id)
+            q_sync  = q_sync.filter_by(tenant_id=tenant_id)
+            q_audit = q_audit.filter_by(tenant_id=tenant_id)
+        zia_count   = q_zia.delete()
+        zpa_count   = q_zpa.delete()
+        zcc_count   = q_zcc.delete()
+        snap_count  = q_snap.delete()
+        sync_count  = q_sync.delete()
+        audit_count = q_audit.delete()
+
+    return {
+        "zia": zia_count,
+        "zpa": zpa_count,
+        "zcc": zcc_count,
+        "snapshots": snap_count,
+        "sync_logs": sync_count,
+        "audit_entries": audit_count,
+    }
 
 
 # ── Database Import ───────────────────────────────────────────────────────────
