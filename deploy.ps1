@@ -97,43 +97,67 @@ foreach ($vol in @("zs-config_zs-db", "zs-config_zs-plugins")) {
     }
 }
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+# ── Inject host trust store ───────────────────────────────────────────────────
+# Exports trusted root certs into docker/ca-bundle.pem so the image includes
+# any corporate SSL-inspection CAs present on this machine.  Cleared in the
+# finally block so the file is never committed with real cert content.
 
-Write-Host "Building image..."
-docker compose build
+$Bundle = Join-Path $RepoDir "docker\ca-bundle.pem"
+Set-Content -Path $Bundle -Value ""
 
-# ── Deploy ────────────────────────────────────────────────────────────────────
-
-Write-Host "Stopping existing container..."
-docker compose down
-
-Write-Host "Starting container..."
-docker compose up -d
-
-# ── Health check ──────────────────────────────────────────────────────────────
-
-Write-Host "Waiting for health check..."
-$ready = $false
-for ($i = 1; $i -le 15; $i++) {
-    try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:8000/health" -UseBasicParsing -ErrorAction Stop
-        if ($resp.StatusCode -eq 200) {
-            $ready = $true
-            break
+try {
+    Write-Host "Exporting Windows certificate store -> docker\ca-bundle.pem"
+    foreach ($storePath in @("Cert:\LocalMachine\Root", "Cert:\CurrentUser\Root")) {
+        foreach ($cert in (Get-ChildItem $storePath -ErrorAction SilentlyContinue)) {
+            $pem = "-----BEGIN CERTIFICATE-----`n" +
+                   [Convert]::ToBase64String($cert.RawData, 'InsertLineBreaks') +
+                   "`n-----END CERTIFICATE-----`n"
+            Add-Content -Path $Bundle -Value $pem
         }
-    } catch {}
-    Write-Host -NoNewline "."
-    Start-Sleep -Seconds 1
-}
+    }
+    $certCount = (Select-String -Path $Bundle -Pattern "BEGIN CERTIFICATE" -ErrorAction SilentlyContinue).Count
+    Write-Host "  Exported $certCount certificates"
 
-Write-Host ""
-if ($ready) {
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    Write-Host "Building image..."
+    docker compose build
+
+    # ── Deploy ────────────────────────────────────────────────────────────────
+
+    Write-Host "Stopping existing container..."
+    docker compose down
+
+    Write-Host "Starting container..."
+    docker compose up -d
+
+    # ── Health check ──────────────────────────────────────────────────────────
+
+    Write-Host "Waiting for health check..."
+    $ready = $false
+    for ($i = 1; $i -le 15; $i++) {
+        try {
+            $resp = Invoke-WebRequest -Uri "http://localhost:8000/health" -UseBasicParsing -ErrorAction Stop
+            if ($resp.StatusCode -eq 200) {
+                $ready = $true
+                break
+            }
+        } catch {}
+        Write-Host -NoNewline "."
+        Start-Sleep -Seconds 1
+    }
+
     Write-Host ""
-    Write-Host "zs-config is running at http://localhost:8000"
-    Write-Host ""
-    docker compose logs --tail=5
-} else {
-    Write-Warning "Health check did not pass within 15 seconds. Check logs:"
-    Write-Host "  docker compose logs"
-    exit 1
+    if ($ready) {
+        Write-Host ""
+        Write-Host "zs-config is running at http://localhost:8000"
+        Write-Host ""
+        docker compose logs --tail=5
+    } else {
+        Write-Warning "Health check did not pass within 15 seconds. Check logs:"
+        Write-Host "  docker compose logs"
+        exit 1
+    }
+} finally {
+    Set-Content -Path $Bundle -Value ""
 }

@@ -19,7 +19,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       # Lock down CORS in production — comma-separated list of allowed origins
       # ALLOWED_ORIGINS: "https://your-host.example.com"
-      # Optional: supply a corporate CA bundle
+      # Override the build-time CA bundle at runtime (e.g. if cert changes after image build)
       # REQUESTS_CA_BUNDLE: /data/db/ca-bundle.pem
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
