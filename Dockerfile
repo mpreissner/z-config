@@ -23,11 +23,17 @@ WORKDIR /app
 # - libxml2-dev / libxslt-dev / libxmlsec1-dev / pkg-config: required by xmlsec1 (SAML auth)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    ca-certificates \
     libxml2-dev \
     libxslt-dev \
     libxmlsec1-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# Inject host trust store (populated by scripts/build.sh; no-op if empty).
+# Captures corporate SSL-inspection CAs so zscaler-sdk-python calls succeed.
+COPY docker/ca-bundle.pem /usr/local/share/ca-certificates/zs-config-bundle.crt
+RUN update-ca-certificates
 
 # Install Python deps (api extras required)
 COPY pyproject.toml requirements.txt* ./
@@ -58,6 +64,10 @@ ENV PYTHONUNBUFFERED=1
 # Point HOME at the persistent DB volume so the Fernet key file
 # (~/.config/zs-config/secret.key) survives container restarts and image upgrades.
 ENV HOME=/data/db
+# Point requests and Python's ssl module at the system trust store so
+# zscaler-sdk-python honours corporate SSL-inspection CAs injected at build time.
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 EXPOSE 8000
 

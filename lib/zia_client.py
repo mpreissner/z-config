@@ -74,54 +74,53 @@ class ZIAClient:
         import requests as _req
         raise _req.HTTPError(msg, response=resp)
 
+    def _zia_request(self, method: str, path: str, json=None, params=None) -> "requests.Response":
+        """Authenticated direct HTTP request with automatic 429 retry/backoff.
+
+        Retries up to 3 times on 429, honouring Retry-After when present and
+        falling back to exponential backoff (2 / 4 / 8 s) otherwise.
+        """
+        import requests
+        import time
+        url = f"{self._oneapi_base_url}{path}"
+        max_attempts = 4
+        resp = None
+        for attempt in range(max_attempts):
+            token = self.auth.get_token()
+            headers = {"Authorization": f"Bearer {token}"}
+            if json is not None:
+                headers["Content-Type"] = "application/json"
+            resp = requests.request(
+                method, url,
+                headers=headers, json=json, params=params, timeout=30,
+            )
+            if resp.status_code != 429 or attempt == max_attempts - 1:
+                break
+            try:
+                delay = float(resp.headers.get("Retry-After", ""))
+            except (ValueError, TypeError):
+                delay = 2 ** (attempt + 1)  # 2, 4, 8 s
+            time.sleep(delay)
+        self._raise_for_status(resp)
+        return resp
+
     def zia_get(self, path: str) -> dict:
         """Direct HTTP GET to the ZIA API — returns the raw camelCase JSON."""
-        import requests
-        token = self.auth.get_token()
-        resp = requests.get(
-            f"{self._oneapi_base_url}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        self._raise_for_status(resp)
-        return resp.json()
+        return self._zia_request("GET", path).json()
 
     def zia_put(self, path: str, payload: dict) -> dict:
         """Direct HTTP PUT to the ZIA API — bypasses the SDK's GET-merge-PUT behavior."""
-        import requests
-        token = self.auth.get_token()
-        url = f"{self._oneapi_base_url}{path}"
-        resp = requests.put(
-            url, json=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        self._raise_for_status(resp)
+        resp = self._zia_request("PUT", path, json=payload)
         return resp.json() if resp.content else {}
 
     def zia_post(self, path: str, payload) -> dict:
         """Direct HTTP POST to the ZIA API — bypasses SDK serialization."""
-        import requests
-        token = self.auth.get_token()
-        url = f"{self._oneapi_base_url}{path}"
-        resp = requests.post(
-            url, json=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        self._raise_for_status(resp)
+        resp = self._zia_request("POST", path, json=payload)
         return resp.json() if resp.content else {}
 
     def zia_delete(self, path: str) -> None:
         """Direct HTTP DELETE to the ZIA API."""
-        import requests
-        token = self.auth.get_token()
-        resp = requests.delete(
-            f"{self._oneapi_base_url}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        self._raise_for_status(resp)
+        self._zia_request("DELETE", path)
 
     # ------------------------------------------------------------------
     # Activation
@@ -246,17 +245,8 @@ class ZIAClient:
 
     def list_users(self, name: Optional[str] = None, group: Optional[str] = None, dept: Optional[str] = None) -> List[Dict]:
         if self._govcloud:
-            import requests
-            token = self.auth.get_token()
             params = {k: v for k, v in [("name", name), ("group", group), ("dept", dept)] if v}
-            resp = requests.get(
-                f"{self._oneapi_base_url}/zia/api/v1/users",
-                params=params,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._zia_request("GET", "/zia/api/v1/users", params=params or None).json()
             return data if isinstance(data, list) else []
         params = {}
         if name:
@@ -1319,16 +1309,9 @@ class ZIAClient:
     # ------------------------------------------------------------------
 
     def list_url_filter_cloud_app_settings(self) -> List[Dict]:
-        import requests
-        token = self.auth.get_token()
-        resp = requests.get(
-            f"{self._oneapi_base_url}/zia/api/v1/advancedUrlFilterAndCloudAppSettings",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15,
-        )
-        resp.raise_for_status()
+        data = self.zia_get("/zia/api/v1/advancedUrlFilterAndCloudAppSettings")
         return [{"id": 1, "name": "url_filter_cloud_app_settings",
-                  "access_control": "READ_WRITE", **resp.json()}]
+                  "access_control": "READ_WRITE", **data}]
 
     def update_url_filter_cloud_app_settings(self, rule_id: str, config: Dict) -> bool:
         """PUT singleton settings — rule_id is unused (singleton endpoint)."""
@@ -1376,11 +1359,4 @@ class ZIAClient:
         return self.zia_put(f"{self._TENANCY_PATH}/{rule_id}", config)
 
     def delete_tenancy_restriction_profile(self, rule_id: str) -> None:
-        import requests
-        token = self.auth.get_token()
-        resp = requests.delete(
-            f"{self._oneapi_base_url}{self._TENANCY_PATH}/{rule_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=15,
-        )
-        resp.raise_for_status()
+        self.zia_delete(f"{self._TENANCY_PATH}/{rule_id}")

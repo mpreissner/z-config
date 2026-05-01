@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.1] - 2026-05-01
+
+### Fixed
+
+- **GovCloud SSL trust** — the container now injects the host CA certificate store at build time (`deploy.sh` / `deploy.ps1` export from macOS Keychain / Windows cert store into the image), resolving SSL errors against GovCloud endpoints when the host is behind SSL inspection.
+- **GovCloud import 429 rate limiting** — GovCloud API calls now retry automatically on 429 responses (up to 3 attempts, honouring `Retry-After` with exponential backoff fallback). Previously, a rate-limit response would silently drop the affected resource type from the import.
+- **Tenant credential re-validation on edit** — editing a tenant in the web UI now re-validates credentials and refreshes org metadata when any auth-affecting field is changed. Previously, stale or incorrect credentials could not be corrected through the edit flow.
+
+### Changed
+
+- `zscaler-sdk-python` minimum bumped to `>=1.9.25`, picking up an internal fix for camelCase key normalization that could cause certain ZIA response fields to deserialize as `None`.
+
+---
+
 ## [2.1.0] - 2026-04-28
 
 ### Added

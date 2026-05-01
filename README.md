@@ -9,6 +9,8 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ## What's New — v2.1.0
 
+> **v2.1.1 is the current release** — GovCloud SSL and rate-limit fixes, credential re-validation on tenant edit. See the [changelog](CHANGELOG.md) for details.
+
 - **Scheduled Cross-Tenant Sync** — cron-driven ZIA configuration sync between tenants. Sync by resource type or by ZIA rule label, with per-task run history and error drill-down.
 - **Label-based sync mode** — target resources by ZIA rule label (`prod`, `baseline`, etc.) across up to 12 rule types, without syncing the entire tenant config.
 - **Apply Snapshot reliability** — push fixes for URL Filtering Rule camelCase payloads, DLP Web Rule retry behavior, 429 rate-limit backoff, and ISOLATE-action fallback when no CBI profile exists in the target.

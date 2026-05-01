@@ -176,7 +176,7 @@ def create_tenant(body: TenantCreate, user: AuthUser = Depends(require_admin)):
 def update_tenant(tenant_id: int, body: TenantUpdate, user: AuthUser = Depends(require_admin)):
     from db.database import get_session
     from db.models import TenantConfig
-    from services.config_service import update_tenant as _update
+    from services.config_service import update_tenant as _update, fetch_org_info, decrypt_secret
     with get_session() as session:
         t = session.query(TenantConfig).filter_by(id=tenant_id, is_active=True).first()
         if not t:
@@ -208,7 +208,7 @@ def update_tenant(tenant_id: int, body: TenantUpdate, user: AuthUser = Depends(r
     if not updated:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    _write_audit([dict(
+    audit_events = [dict(
         tenant_id=tenant_id,
         product=None,
         operation="update_tenant",
@@ -217,7 +217,55 @@ def update_tenant(tenant_id: int, body: TenantUpdate, user: AuthUser = Depends(r
         resource_type="tenant",
         resource_name=name,
         timestamp=datetime.utcnow(),
-    )])
+    )]
+
+    # Re-validate whenever something that affects auth was changed.
+    creds_changed = any([body.client_secret, body.client_id, body.vanity_domain,
+                         body.govcloud is not None])
+    if creds_changed:
+        err = None
+        org_info = None
+        subscriptions = None
+        try:
+            secret = decrypt_secret(updated.client_secret_enc)
+            org_info, subscriptions, err = fetch_org_info(
+                zidentity_base_url=updated.zidentity_base_url,
+                client_id=updated.client_id,
+                client_secret=secret,
+                oneapi_base_url=updated.oneapi_base_url,
+            )
+        except Exception as exc:
+            err = str(exc)
+
+        with get_session() as session:
+            tenant = session.query(TenantConfig).filter_by(id=tenant_id).first()
+            if err:
+                tenant.last_validation_error = f"Validation failed; check API credentials. ({err})"
+            else:
+                tenant.last_validation_error = None
+                if org_info:
+                    tenant.zia_tenant_id = str(org_info.get("pdomain", "")) or None
+                    tenant.zia_cloud = org_info.get("cloudName") or None
+                    tenant.zpa_tenant_cloud = org_info.get("zpaTenantCloud") or None
+                if subscriptions:
+                    tenant.zia_subscriptions = subscriptions
+            session.flush()
+            session.refresh(tenant)
+            updated = tenant
+
+        audit_events.append(dict(
+            tenant_id=tenant_id,
+            product="ZIA",
+            operation="validate_credentials",
+            action="UPDATE",
+            status="FAILURE" if err else "SUCCESS",
+            resource_type="tenant",
+            resource_name=name,
+            error_message=err if err else None,
+            timestamp=datetime.utcnow(),
+        ))
+
+    _write_audit(audit_events)
     return _serialize(updated)
 
 

@@ -83,6 +83,30 @@ for vol in zs-config_zs-db zs-config_zs-plugins; do
     fi
 done
 
+# ── Inject host trust store ───────────────────────────────────────────────────
+# Exports trusted root certs into docker/ca-bundle.pem so the image includes
+# any corporate SSL-inspection CAs present on this machine.  Cleared on exit
+# so the file is never committed with real cert content.
+
+BUNDLE="$REPO_DIR/docker/ca-bundle.pem"
+cleanup_bundle() { : > "$BUNDLE"; }
+trap cleanup_bundle EXIT
+
+: > "$BUNDLE"
+if [[ "$(uname)" == "Darwin" ]]; then
+    echo "Exporting macOS trust store → docker/ca-bundle.pem"
+    security find-certificate -a -p \
+        /System/Library/Keychains/SystemRootCertificates.keychain >> "$BUNDLE"
+    security find-certificate -a -p \
+        /Library/Keychains/System.keychain >> "$BUNDLE" 2>/dev/null || true
+    security find-certificate -a -p \
+        "$HOME/Library/Keychains/login.keychain-db" >> "$BUNDLE" 2>/dev/null || true
+else
+    # On Linux, copy the host system store (includes any corp CAs installed there)
+    [[ -f /etc/ssl/certs/ca-certificates.crt ]] && \
+        cp /etc/ssl/certs/ca-certificates.crt "$BUNDLE" || true
+fi
+
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 echo "Building image..."
