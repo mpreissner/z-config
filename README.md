@@ -7,15 +7,15 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v2.1.0
+## What's New — v2.1.2
 
-> **v2.1.1 is the current release** — GovCloud SSL and rate-limit fixes, credential re-validation on tenant edit. See the [changelog](CHANGELOG.md) for details.
+> **v2.1.2 is the current release** — algorithm-agnostic encryption, key rotation UI, FIPS mode, and TUI-only container support. See the [changelog](CHANGELOG.md) for details.
 
-- **Scheduled Cross-Tenant Sync** — cron-driven ZIA configuration sync between tenants. Sync by resource type or by ZIA rule label, with per-task run history and error drill-down.
-- **Label-based sync mode** — target resources by ZIA rule label (`prod`, `baseline`, etc.) across up to 12 rule types, without syncing the entire tenant config.
-- **Apply Snapshot reliability** — push fixes for URL Filtering Rule camelCase payloads, DLP Web Rule retry behavior, 429 rate-limit backoff, and ISOLATE-action fallback when no CBI profile exists in the target.
-- **Clear Data on Settings page** — admins can now wipe imported resources, snapshots, sync logs, and audit entries (all tenants or a specific one) directly from the web UI.
-- **Admin role improvements** — Scheduled Tasks nav hidden from admin users; Clear Data now correctly erases config snapshots.
+- **Encryption algorithm choice** — choose between Fernet (default), AES-256-GCM, or ChaCha20-Poly1305 for tenant secret encryption. Switch algorithms at any time via key rotation.
+- **Key rotation** — rotate the encryption key and re-encrypt all tenant secrets in one atomic operation, from Admin → Settings or the TUI Settings menu.
+- **FIPS mode** — restrict algorithm selection to FIPS-compliant options (Fernet, AES-256-GCM). ChaCha20-Poly1305 is disabled in the UI and rejected at the API when FIPS mode is on.
+- **Auto-rotation schedule** — set a rotation interval (daily, weekly, monthly, or a custom number of days) and the key rotates automatically on server startup when due.
+- **TUI-only container mode** — set `ZS_TUI_ONLY=1` to launch the TUI directly from the Docker container instead of starting the web server.
 
 ---
 
@@ -127,7 +127,7 @@ User Management, Tenant Entitlements, System Settings (session timeout, idle tim
 - **Config Import** — 27 ZPA + 42 ZIA + 6 ZCC resource types into a local SQLite cache with SHA-256 change detection
 - **Config Snapshots** — save, compare (field-level diff), restore (ZIA only, wipe-or-delta, cross-tenant), delete
 - **Audit Log** — immutable record of every operation
-- **Zero-config encryption** — tenant secrets encrypted at rest; key auto-generated on first launch
+- **Encryption at rest** — tenant secrets encrypted with configurable algorithm (Fernet/AES-256-GCM/ChaCha20); key rotation and FIPS mode available via Admin Settings or TUI
 - **Auto-update** — silent PyPI check on startup; shows changelog and upgrades in-place
 
 ---
@@ -188,8 +188,10 @@ zs-config
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ZSCALER_SECRET_KEY` | auto-generated | Fernet key for secret encryption |
+| `ZSCALER_SECRET_KEY` | auto-generated | Fernet key for secret encryption (legacy override) |
 | `ZSCALER_DB_URL` | `~/.local/share/zs-config/zscaler.db` | SQLAlchemy DB URL |
+| `ZSCALER_DB_PATH` | — | Path to the SQLite `.db` file; key file stored in the same directory |
+| `ZS_TUI_ONLY` | `0` | Set to `1` to launch the TUI directly instead of the web server |
 | `REQUESTS_CA_BUNDLE` | system trust store | PEM CA bundle for outbound HTTPS |
 
 **SSL inspection:** zs-config uses the OS native trust store via `truststore` (macOS Keychain, Windows Certificate Store), so corporate inspection certs are trusted without any configuration. Alternatively, drop a PEM file at `~/.config/zs-config/ca-bundle.pem`.

@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.2] - 2026-05-01
+
+### Added
+
+- **Encryption algorithm selection** — tenant secrets can now be encrypted with Fernet (default, unchanged), AES-256-GCM, or ChaCha20-Poly1305. The active algorithm is stored in `app_settings` and applied transparently to all encrypt/decrypt operations.
+- **Key rotation** — `POST /api/v1/admin/rotate-key` re-encrypts all tenant secrets with a freshly generated key in a single atomic operation: decrypts all rows with the current key, generates a new key, re-encrypts, flushes, writes the new key file (with `.bak` rollback on commit failure), then commits. Available from Admin → Settings → Database & Maintenance → Encryption and from the TUI Settings menu (Security: Rotate Encryption Key).
+- **FIPS mode** — a FIPS mode toggle in Admin Settings restricts algorithm selection to Fernet and AES-256-GCM. ChaCha20-Poly1305 is disabled in the UI and rejected with HTTP 400 when FIPS mode is enabled.
+- **Auto-rotation schedule** — configurable rotation interval (days). On server startup, `rotate_key_if_due()` compares `key_last_rotated_at` against the interval and rotates automatically if due. Startup continues normally if auto-rotation fails.
+- **`lib/crypto.py`** — new algorithm-agnostic crypto abstraction (`generate_key`, `encrypt`, `decrypt`, `load_key`, `save_key`) used by both `config_service.py` and `encryption_service.py`.
+- **`entrypoint.sh`** — new container entrypoint; branches on `ZS_TUI_ONLY=1` to launch the TUI directly (`python -m cli.z_config`) instead of `uvicorn`.
+- **`ZS_TUI_ONLY` env var** — set to `1` to run the container in TUI-only mode. The FastAPI server will not start.
+
+### Changed
+
+- `services/config_service.py` — stripped internal Fernet key management; now delegates entirely to `lib/crypto`. `encrypt_secret()` / `decrypt_secret()` read the active algorithm from `app_settings` on each call.
+- Admin Settings → Database & Maintenance is now a single collapsible card combining Import Database, Clear Data, and the new Encryption section.
+
+---
+
 ## [2.1.1] - 2026-05-01
 
 ### Fixed
