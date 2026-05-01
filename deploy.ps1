@@ -34,6 +34,70 @@ try {
     exit 1
 }
 
+# ── docker-compose.yml diff check ────────────────────────────────────────────
+
+$script:DcBackup = $null
+
+function Invoke-ComposeDiff {
+    param([string]$Branch)
+    $dcFile = Join-Path $RepoDir "docker-compose.yml"
+    if (-not (Test-Path $dcFile)) { return }
+
+    $tmpRemote = [System.IO.Path]::GetTempFileName()
+    try {
+        $content = & git show "origin/${Branch}:docker-compose.yml" 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $content) {
+            Remove-Item $tmpRemote -ErrorAction SilentlyContinue; return
+        }
+        [System.IO.File]::WriteAllLines($tmpRemote, $content)
+    } catch {
+        Remove-Item $tmpRemote -ErrorAction SilentlyContinue; return
+    }
+
+    $savedPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & git diff --no-index --quiet $dcFile $tmpRemote 2>$null
+    $hasDiff = ($LASTEXITCODE -ne 0)
+    $ErrorActionPreference = $savedPref
+
+    if (-not $hasDiff) {
+        Remove-Item $tmpRemote -ErrorAction SilentlyContinue; return
+    }
+
+    Write-Host ""
+    Write-Host "docker-compose.yml differs from upstream (origin/$Branch):"
+    Write-Host "────────────────────────────────────────────────────────────"
+    $ErrorActionPreference = "Continue"
+    & git diff --no-index --src-prefix="local/" --dst-prefix="upstream/" $dcFile $tmpRemote
+    $ErrorActionPreference = $savedPref
+    Write-Host "────────────────────────────────────────────────────────────"
+    Write-Host ""
+    Remove-Item $tmpRemote -ErrorAction SilentlyContinue
+
+    if (-not [Console]::IsInputRedirected) {
+        Write-Host "  [1] Use upstream version (recommended)"
+        Write-Host "  [2] Keep my local version"
+        $dcChoice = Read-Host "Choice [1/2, default 1]"
+        if ($dcChoice -eq "2") {
+            $script:DcBackup = [System.IO.Path]::GetTempFileName()
+            Copy-Item $dcFile $script:DcBackup
+            Write-Host "Local docker-compose.yml saved; will be restored after pull."
+        }
+    } else {
+        Write-Host "Non-interactive — using upstream docker-compose.yml."
+    }
+    Write-Host ""
+}
+
+function Restore-Compose {
+    if ($script:DcBackup -and (Test-Path $script:DcBackup)) {
+        Copy-Item $script:DcBackup (Join-Path $RepoDir "docker-compose.yml") -Force
+        Remove-Item $script:DcBackup -ErrorAction SilentlyContinue
+        $script:DcBackup = $null
+        Write-Host "Restored local docker-compose.yml."
+    }
+}
+
 # ── Clone if not already inside the repo ─────────────────────────────────────
 
 $IsRepo = $false
@@ -47,16 +111,20 @@ if ($IsRepo) {
     Set-Location $RepoDir
     Write-Host "Fetching latest code..."
     git fetch origin
+    Invoke-ComposeDiff $Branch
     git checkout $Branch
     git pull origin $Branch
+    Restore-Compose
 } else {
     $RepoDir = Join-Path $ScriptDir "zs-config"
     if (Test-Path $RepoDir) {
         Write-Host "Found existing clone at $RepoDir, pulling latest..."
         Set-Location $RepoDir
         git fetch origin
+        Invoke-ComposeDiff $Branch
         git checkout $Branch
         git pull origin $Branch
+        Restore-Compose
     } else {
         Write-Host "Cloning $RepoUrl into $RepoDir..."
         git clone --branch $Branch $RepoUrl $RepoDir
@@ -160,4 +228,7 @@ try {
     }
 } finally {
     Set-Content -Path $Bundle -Value ""
+    if ($script:DcBackup -and (Test-Path $script:DcBackup)) {
+        Remove-Item $script:DcBackup -ErrorAction SilentlyContinue
+    }
 }
