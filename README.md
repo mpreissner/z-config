@@ -9,8 +9,6 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ## What's New — v2.1.2
 
-> **v2.1.2 is the current release** — algorithm-agnostic encryption, key rotation UI, FIPS mode, and TUI-only container support. See the [changelog](CHANGELOG.md) for details.
-
 - **Encryption algorithm choice** — choose between Fernet (default), AES-256-GCM, or ChaCha20-Poly1305 for tenant secret encryption. Switch algorithms at any time via key rotation.
 - **Key rotation** — rotate the encryption key and re-encrypt all tenant secrets in one atomic operation, from Admin → Settings or the TUI Settings menu.
 - **FIPS mode** — restrict algorithm selection to FIPS-compliant options (Fernet, AES-256-GCM). ChaCha20-Poly1305 is disabled in the UI and rejected at the API when FIPS mode is on.
