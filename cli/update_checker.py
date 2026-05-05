@@ -186,14 +186,14 @@ def check_for_updates() -> bool:
         console.print("[dim]Skipping update. You can update manually later.[/dim]")
         return True
 
-    # v2.2.0+ requires libsqlcipher for full database encryption.
+    # v3.0.0+ requires libsqlcipher for full database encryption.
     # Attempt to install it via the system package manager before the pip
     # upgrade runs — sqlcipher3 compiles against the system library and will
     # fail to install without it.
-    if _parse_ver(latest) >= (2, 2, 0) and not _sqlcipher_available():
+    if _parse_ver(latest) >= (3, 0, 0) and not _sqlcipher_available():
         console.print(
             Panel(
-                "v2.2.0+ encrypts the entire database using SQLCipher.\n"
+                "v3.0.0+ encrypts the entire database using SQLCipher.\n"
                 "This requires [bold]libsqlcipher[/bold] to be installed on your system.\n\n"
                 "If you decline, the upgrade will be skipped.",
                 title="[yellow]System dependency required[/yellow]",
@@ -206,7 +206,7 @@ def check_for_updates() -> bool:
         ).ask()
 
         if not install_answer:
-            console.print("[dim]Upgrade skipped. libsqlcipher is required for v2.2.0+.[/dim]")
+            console.print("[dim]Upgrade skipped. libsqlcipher is required for v3.0.0+.[/dim]")
             return True
 
         if not _install_libsqlcipher():
