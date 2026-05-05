@@ -88,11 +88,8 @@ def rotate_key(new_algorithm: str) -> dict:
                 bak_path.unlink(missing_ok=True)
 
     rotated_at = datetime.utcnow().isoformat()
-    try:
-        set_setting("encryption_algorithm", new_algorithm)
-        set_setting("key_last_rotated_at", rotated_at)
-    except Exception as exc:
-        log.warning("Key rotation succeeded but failed to update app_settings: %s", exc)
+    set_setting("encryption_algorithm", new_algorithm)
+    set_setting("key_last_rotated_at", rotated_at)
 
     return {"rotated": len(new_enc_map), "algorithm": new_algorithm, "rotated_at": rotated_at}
 

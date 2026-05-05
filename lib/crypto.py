@@ -133,13 +133,23 @@ def load_key(algorithm: str) -> bytes:
 
 
 def save_key(key_material: bytes, algorithm: str) -> None:
-    """Atomically write key_material to the canonical key file path."""
+    """Atomically write key_material to the active key file path.
+
+    Mirrors the resolution order in load_key() so the written file is always
+    the one that will be read back: ZSCALER_DB_PATH sibling takes priority over
+    the default ~/.config path.
+    """
     if algorithm == CryptoAlgorithm.FERNET:
         encoded = key_material  # already base64url
     else:
         encoded = base64.b64encode(key_material)
 
-    key_path = _canonical_key_path()
+    db_path_env = os.environ.get("ZSCALER_DB_PATH")
+    if db_path_env:
+        key_path = Path(db_path_env).parent / "secret.key"
+    else:
+        key_path = _canonical_key_path()
+
     key_path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp = key_path.with_suffix(".key.tmp")
