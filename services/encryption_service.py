@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import text
 
-from db.database import get_engine, get_session, get_setting, set_setting
+from db.database import get_engine, get_session, get_setting, set_setting, is_sqlcipher_active
 from db.models import TenantConfig
 from lib.crypto import (
     CryptoAlgorithm,
@@ -28,8 +28,9 @@ def _sqlcipher_rekey(new_raw_key: bytes) -> None:
     """Issue PRAGMA rekey on one raw connection from the pool.
 
     Re-encrypts the entire SQLCipher database file with the new 32-byte key.
-    Must be called after the new key file has been written (so subsequent
-    creator-based connections use the new key) but before session.commit().
+    Must be called after the column commit and after save_key() so that the
+    creator callable (which reads the key file) uses the new key on subsequent
+    connections.
     """
     engine = get_engine()
     hex_key = binascii.hexlify(new_raw_key).decode()
@@ -89,11 +90,10 @@ def rotate_key(new_algorithm: str) -> dict:
         # Re-encrypt with the new key
         new_enc_map = [(rid, encrypt(pt, new_algorithm, new_key)) for rid, pt in plaintext_map]
 
-        # Write new ciphertext to DB rows (flush, don't commit yet)
+        # Write new ciphertext to DB rows
         enc_lookup = dict(new_enc_map)
         for row in rows:
             row.client_secret_enc = enc_lookup[row.id]
-        session.flush()
 
         # Resolve the key file path (mirrors logic in lib/crypto.save_key)
         key_path = Path.home() / ".config" / "zs-config" / "secret.key"
@@ -105,44 +105,34 @@ def rotate_key(new_algorithm: str) -> dict:
         if key_path.exists():
             shutil.copy2(key_path, bak_path)
 
-        rekey_attempted = False
+        # Phase 1: commit column re-encryption — closes the write transaction so
+        # PRAGMA rekey can run on a clean connection.
         try:
-            # Write the new key file atomically
-            save_key(new_key, new_algorithm)
-
-            # Re-encrypt the SQLCipher DB file with the derived key.
-            # This must happen after save_key() so that the creator callable
-            # (which reads the key file) will use the new key on subsequent
-            # connections. PRAGMA rekey is issued before session.commit().
-            new_sqlcipher_key = _derive_new_sqlcipher_key(new_algorithm, new_key)
-            _sqlcipher_rekey(new_sqlcipher_key)
-            rekey_attempted = True
-
-            # Commit the column re-encryption changes
             session.commit()
         except Exception:
-            if not rekey_attempted:
-                # rekey hasn't run yet — restore the old key file and roll back
-                if bak_path.exists():
-                    os.replace(bak_path, key_path)
-                session.rollback()
-                raise RuntimeError(
-                    "Key file replaced but SQLCipher rekey failed — old key restored from backup. "
-                    "Re-run rotation."
-                )
-            else:
-                # rekey succeeded but session.commit() failed.
-                # The DB file is now encrypted with the new key.
-                # The new key file is already in place.
-                # Rolling back only undoes the column changes; re-run rotation to fix.
-                session.rollback()
-                raise RuntimeError(
-                    "SQLCipher database re-encrypted with new key, but column commit failed. "
-                    "Key file and DB encryption are consistent. Re-run rotation to re-encrypt columns."
-                )
-        finally:
             if bak_path.exists():
-                bak_path.unlink(missing_ok=True)
+                os.replace(bak_path, key_path)
+            bak_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "Column re-encryption commit failed — old key restored, no changes made. "
+                "Re-run rotation."
+            )
+
+        # Phase 2: write new key file and re-encrypt the SQLCipher DB file.
+        # Column data is already committed with the new key at this point.
+        try:
+            save_key(new_key, new_algorithm)
+            if is_sqlcipher_active():
+                new_sqlcipher_key = _derive_new_sqlcipher_key(new_algorithm, new_key)
+                _sqlcipher_rekey(new_sqlcipher_key)
+        except Exception:
+            # Do NOT restore the old key file — columns are committed with the new key.
+            raise RuntimeError(
+                "Column re-encryption committed but key file update or SQLCipher rekey failed. "
+                "Key file and DB encryption may be inconsistent. Re-run rotation."
+            )
+        finally:
+            bak_path.unlink(missing_ok=True)
 
     # Drain the connection pool so subsequent connections use the new key
     get_engine().dispose()

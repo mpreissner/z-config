@@ -4,7 +4,6 @@ import logging
 import os
 import platform
 import shutil
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Optional
@@ -28,6 +27,7 @@ else:
 
 _engine = None
 _SessionFactory = None
+_sqlcipher_active: bool = False
 
 
 def get_db_url() -> str:
@@ -115,25 +115,24 @@ def _migrate_to_encrypted(db_path: str) -> None:
     if platform.system() != "Windows":
         os.chmod(backup_path, 0o600)
 
-    try:
-        # Step 2: open plaintext source with stdlib sqlite3
-        src = sqlite3.connect(db_path)
+    tmp_path = db_path + ".sqlcipher.tmp"
 
-        # Step 3: open encrypted destination with sqlcipher3
-        dst = sqlcipher.connect(tmp_path)
+    try:
         key_bytes = _derive_sqlcipher_key()
         hex_key = binascii.hexlify(key_bytes).decode()
-        dst.execute(f"PRAGMA key = \"x'{hex_key}'\"")
-        dst.execute("PRAGMA cipher_compatibility = 4")
 
-        # Step 4: copy page-by-page using the sqlite3 online backup API
-        src.backup(dst)
+        # Open the plaintext source without PRAGMA key (sqlcipher3 passthrough mode).
+        # ATTACH a new encrypted destination and export via sqlcipher_export(),
+        # which is the SQLCipher-recommended migration path.
+        conn = sqlcipher.connect(db_path, check_same_thread=False)
+        try:
+            conn.execute(f"ATTACH DATABASE '{tmp_path}' AS encrypted KEY \"x'{hex_key}'\"")
+            conn.execute("SELECT sqlcipher_export('encrypted')")
+            conn.execute("DETACH DATABASE encrypted")
+        finally:
+            conn.close()
 
-        # Step 5: close both connections
-        dst.close()
-        src.close()
-
-        # Step 6: atomic replace — tmp becomes the real DB file
+        # Atomic replace — encrypted tmp becomes the real DB file
         os.replace(tmp_path, db_path)
 
         log.info(
@@ -143,7 +142,6 @@ def _migrate_to_encrypted(db_path: str) -> None:
             backup_path,
         )
     except Exception:
-        # Clean up partial tmp file but never remove the backup
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
@@ -158,7 +156,7 @@ def init_db(db_url: Optional[str] = None) -> None:
     Call this once at application startup (CLI entry point, script startup,
     or FastAPI lifespan). Safe to call multiple times.
     """
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _sqlcipher_active
     if not os.environ.get("ZSCALER_DB_URL") and not os.environ.get("ZSCALER_DB_PATH"):
         _migrate_db_path()
         _DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +168,7 @@ def init_db(db_url: Optional[str] = None) -> None:
     if effective_url.startswith("sqlite:///") and not os.environ.get("ZSCALER_DB_URL"):
         db_path = effective_url.removeprefix("sqlite:///")
         _migrate_to_encrypted(db_path)
+        _sqlcipher_active = True
         _engine = create_engine(
             "sqlite+pysqlite://",
             echo=False,
@@ -177,6 +176,7 @@ def init_db(db_url: Optional[str] = None) -> None:
         )
     else:
         # PostgreSQL or explicit ZSCALER_DB_URL — no SQLCipher
+        _sqlcipher_active = False
         _engine = create_engine(
             effective_url,
             echo=False,
@@ -297,6 +297,11 @@ def get_engine():
     """Return the SQLAlchemy engine (initialising the DB if needed)."""
     _ensure_init()
     return _engine
+
+
+def is_sqlcipher_active() -> bool:
+    """Return True if the database is encrypted with SQLCipher."""
+    return _sqlcipher_active
 
 
 def _ensure_init() -> None:
