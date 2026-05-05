@@ -89,7 +89,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Scheduled Tasks** (cron-driven cross-tenant sync by resource type or label)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven cross-tenant sync by resource type or label)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals
@@ -126,7 +126,7 @@ User Management, Tenant Entitlements, System Settings (session timeout, idle tim
 - **ZIdentity** — Users (list/search/reset-password/set-password/skip-MFA), Groups, API Clients
 - **Config Import** — 27 ZPA + 42 ZIA + 6 ZCC resource types into a local SQLite cache with SHA-256 change detection
 - **Config Snapshots** — save, compare (field-level diff), restore (ZIA only, wipe-or-delta, cross-tenant), delete
-- **Audit Log** — immutable record of every operation
+- **Audit Log** — immutable record of every operation with full-text search
 - **Encryption at rest** — tenant secrets encrypted with configurable algorithm (Fernet/AES-256-GCM/ChaCha20); key rotation and FIPS mode available via Admin Settings or TUI
 - **Auto-update** — silent PyPI check on startup; shows changelog and upgrades in-place
 
