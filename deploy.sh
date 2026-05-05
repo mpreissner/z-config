@@ -67,6 +67,8 @@ _compose_diff() {
         if [[ "${_dc_choice:-1}" == "2" ]]; then
             DC_BACKUP="$(mktemp)"
             cp "$dc_file" "$DC_BACKUP"
+            # Reset the file so git pull proceeds without conflict; restored afterward.
+            git -C "$REPO_DIR" checkout -- docker-compose.yml
             echo "Local docker-compose.yml saved; will be restored after pull."
         fi
     else
