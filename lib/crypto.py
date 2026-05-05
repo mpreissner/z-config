@@ -132,6 +132,17 @@ def load_key(algorithm: str) -> bytes:
     return new_key
 
 
+def get_active_algorithm() -> str:
+    """Return the active encryption algorithm without touching the database.
+
+    Reads ZSCALER_ENCRYPTION_ALGORITHM env var, defaulting to fernet.
+    This avoids the circular import that would result from calling get_session()
+    inside db/database.py (which is not yet initialised when _derive_sqlcipher_key
+    is called during engine creation).
+    """
+    return os.environ.get("ZSCALER_ENCRYPTION_ALGORITHM", CryptoAlgorithm.FERNET)
+
+
 def save_key(key_material: bytes, algorithm: str) -> None:
     """Atomically write key_material to the active key file path.
 

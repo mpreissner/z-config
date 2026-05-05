@@ -25,6 +25,9 @@ services:
       # Access via: docker exec -it zs-config python -m cli.z_config
       # The HEALTHCHECK will fail in TUI mode — add "healthcheck: disable" to your override.
       # ZS_TUI_ONLY: "1"
+      # Column-level encryption algorithm. Must match the algorithm used to encrypt
+      # client_secret_enc. Only set this if you have rotated away from the default.
+      # ZSCALER_ENCRYPTION_ALGORITHM: "fernet"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s

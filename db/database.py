@@ -1,5 +1,9 @@
+import base64
+import binascii
+import logging
 import os
 import platform
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Optional
@@ -8,6 +12,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base, AppSettings
+
+log = logging.getLogger(__name__)
 
 # Default SQLite path — stored in a user data directory so it survives
 # package upgrades and works correctly when installed via pip/pipx.
@@ -21,6 +27,7 @@ else:
 
 _engine = None
 _SessionFactory = None
+_sqlcipher_active: bool = False
 
 
 def get_db_url() -> str:
@@ -32,10 +39,115 @@ def get_db_url() -> str:
 
 def _migrate_db_path() -> None:
     """Move the database file from the legacy z-config path to zs-config if needed."""
-    import shutil
     if not _DEFAULT_DB_PATH.exists() and _LEGACY_DB_PATH.exists():
         _DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(_LEGACY_DB_PATH), str(_DEFAULT_DB_PATH))
+
+
+# ---------------------------------------------------------------------------
+# SQLCipher helpers
+# ---------------------------------------------------------------------------
+
+def _is_plaintext_sqlite(db_path: str) -> bool:
+    """Return True if the file exists and starts with the SQLite plaintext magic header."""
+    try:
+        with open(db_path, "rb") as f:
+            header = f.read(16)
+        return header == b"SQLite format 3\x00"
+    except FileNotFoundError:
+        return False  # new DB — SQLCipher will create it encrypted
+
+
+def _derive_sqlcipher_key() -> bytes:
+    """Derive the 32-byte SQLCipher key from the active secret.key material."""
+    from lib.crypto import load_key, CryptoAlgorithm, get_active_algorithm
+
+    algorithm = get_active_algorithm()
+    raw = load_key(algorithm)
+
+    if algorithm == CryptoAlgorithm.FERNET:
+        # Fernet key is 44 base64url chars encoding exactly 32 bytes total.
+        # Use all 32 decoded bytes as the SQLCipher key material.
+        decoded = base64.urlsafe_b64decode(raw)  # 32 bytes
+        return decoded[0:32]
+    else:
+        # aes256gcm and chacha20poly1305: load_key returns 32 raw bytes
+        return raw[:32]
+
+
+def _make_sqlcipher_creator(db_path: str):
+    """Return a callable that creates sqlcipher3 connections with PRAGMA key set.
+
+    The creator callable is passed to create_engine() so every connection from
+    the pool opens the encrypted database correctly. PRAGMA key must be the first
+    statement executed on each new connection.
+    """
+    def creator():
+        import sqlcipher3.dbapi2 as sqlcipher
+        conn = sqlcipher.connect(db_path, check_same_thread=False)
+        key_bytes = _derive_sqlcipher_key()
+        hex_key = binascii.hexlify(key_bytes).decode()
+        conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+        conn.execute("PRAGMA cipher_compatibility = 4")  # SQLCipher 4 defaults
+        conn.execute("PRAGMA journal_mode = WAL")        # keep WAL after encryption
+        return conn
+
+    return creator
+
+
+def _migrate_to_encrypted(db_path: str) -> None:
+    """Convert a plaintext SQLite database to SQLCipher in-place.
+
+    Retains a .plaintext.bak file that the operator must manually delete after
+    confirming the encrypted database is healthy. Fails fast on any error and
+    does not remove the backup.
+    """
+    if not _is_plaintext_sqlite(db_path):
+        return  # already encrypted or does not exist
+
+    import sqlcipher3.dbapi2 as sqlcipher
+
+    backup_path = db_path + ".plaintext.bak"
+    tmp_path = db_path + ".sqlcipher.tmp"
+
+    # Step 1: copy plaintext file to backup
+    shutil.copy2(db_path, backup_path)
+    if platform.system() != "Windows":
+        os.chmod(backup_path, 0o600)
+
+    tmp_path = db_path + ".sqlcipher.tmp"
+
+    try:
+        key_bytes = _derive_sqlcipher_key()
+        hex_key = binascii.hexlify(key_bytes).decode()
+
+        # Open the plaintext source without PRAGMA key (sqlcipher3 passthrough mode).
+        # ATTACH a new encrypted destination and export via sqlcipher_export(),
+        # which is the SQLCipher-recommended migration path.
+        conn = sqlcipher.connect(db_path, check_same_thread=False)
+        try:
+            conn.execute(f"ATTACH DATABASE '{tmp_path}' AS encrypted KEY \"x'{hex_key}'\"")
+            conn.execute("SELECT sqlcipher_export('encrypted')")
+            conn.execute("DETACH DATABASE encrypted")
+        finally:
+            conn.close()
+
+        # Atomic replace — encrypted tmp becomes the real DB file
+        os.replace(tmp_path, db_path)
+
+        log.info(
+            "Database encrypted with SQLCipher. "
+            "Plaintext backup retained at %s — delete it manually after verifying the "
+            "encrypted database is healthy.",
+            backup_path,
+        )
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def init_db(db_url: Optional[str] = None) -> None:
@@ -44,20 +156,45 @@ def init_db(db_url: Optional[str] = None) -> None:
     Call this once at application startup (CLI entry point, script startup,
     or FastAPI lifespan). Safe to call multiple times.
     """
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _sqlcipher_active
     if not os.environ.get("ZSCALER_DB_URL") and not os.environ.get("ZSCALER_DB_PATH"):
         _migrate_db_path()
         _DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     elif not os.environ.get("ZSCALER_DB_URL"):
         Path(os.environ["ZSCALER_DB_PATH"]).parent.mkdir(parents=True, exist_ok=True)
-    _engine = create_engine(
-        db_url or get_db_url(),
-        echo=False,
-        connect_args={"check_same_thread": False},  # needed for SQLite + threading
-    )
+
+    effective_url = db_url or get_db_url()
+
+    if effective_url.startswith("sqlite:///") and not os.environ.get("ZSCALER_DB_URL"):
+        db_path = effective_url.removeprefix("sqlite:///")
+        _migrate_to_encrypted(db_path)
+        _sqlcipher_active = True
+        _engine = create_engine(
+            "sqlite+pysqlite://",
+            echo=False,
+            creator=_make_sqlcipher_creator(db_path),
+        )
+    else:
+        # PostgreSQL or explicit ZSCALER_DB_URL — no SQLCipher
+        _sqlcipher_active = False
+        _engine = create_engine(
+            effective_url,
+            echo=False,
+            connect_args={"check_same_thread": False},  # needed for SQLite + threading
+        )
+
     _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False)
-    Base.metadata.create_all(_engine)
-    _migrate(_engine)
+
+    try:
+        Base.metadata.create_all(_engine)
+        _migrate(_engine)
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to open database. If the database is encrypted, "
+            "check that ZSCALER_SECRET_KEY or secret.key contains the correct key. "
+            f"Original error: {exc}"
+        ) from exc
+
     _secure_db_file()
 
 
@@ -160,6 +297,11 @@ def get_engine():
     """Return the SQLAlchemy engine (initialising the DB if needed)."""
     _ensure_init()
     return _engine
+
+
+def is_sqlcipher_active() -> bool:
+    """Return True if the database is encrypted with SQLCipher."""
+    return _sqlcipher_active
 
 
 def _ensure_init() -> None:
