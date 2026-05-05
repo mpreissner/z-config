@@ -679,7 +679,11 @@ def apply_snapshot(
                     wipe_records = []
                     wipe_failed_items = []
                     wiped = 0
-                    dry_run = service.classify_baseline(baseline, import_progress_callback=on_import_progress)
+                    dry_run = service.classify_baseline(
+                        baseline,
+                        import_progress_callback=on_import_progress,
+                        skip_import=True,
+                    )
                     push_records = service.push_classified(
                         dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                     )

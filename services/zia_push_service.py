@@ -554,6 +554,7 @@ class ZIAPushService:
         self,
         baseline: dict,
         import_progress_callback: Optional[Callable] = None,
+        skip_import: bool = False,
     ) -> DryRunResult:
         """Import target state, load DB, classify each baseline entry.
 
@@ -567,10 +568,15 @@ class ZIAPushService:
             baseline: Parsed snapshot export JSON dict (must have 'resources' key).
             import_progress_callback: Called during the fresh import phase.
                 Signature: callback(resource_type: str, done: int, total: int)
+            skip_import: When True, skip the ZIAImportService.run() call and use
+                the current DB state as-is.  Pass True only when the caller knows
+                a fresh import was already performed (e.g. during preview) and no
+                wipe has occurred since then.
         """
-        from services.zia_import_service import ZIAImportService
-        import_svc = ZIAImportService(self._client, self._tenant_id)
-        import_svc.run(progress_callback=import_progress_callback)
+        if not skip_import:
+            from services.zia_import_service import ZIAImportService
+            import_svc = ZIAImportService(self._client, self._tenant_id)
+            import_svc.run(progress_callback=import_progress_callback)
 
         existing = self._load_existing_from_db()
         # Build a lookup of all IDs currently in the target so cross-tenant ref
