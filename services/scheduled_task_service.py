@@ -445,11 +445,10 @@ def start_scheduler() -> None:
 
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-    from db.database import get_db_url
+    from db.database import get_engine
 
-    db_url = get_db_url()
     jobstores = {
-        "default": SQLAlchemyJobStore(url=db_url),
+        "default": SQLAlchemyJobStore(engine=get_engine()),
     }
     _scheduler = BackgroundScheduler(jobstores=jobstores)
     _scheduler.start()

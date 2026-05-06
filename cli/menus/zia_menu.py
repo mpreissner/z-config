@@ -64,7 +64,8 @@ def zia_menu():
                 questionary.Choice("Cloud Applications", value="cloud_applications"),
                 questionary.Choice("Cloud App Control", value="cloud_app_control"),
                 questionary.Separator("── Baseline ──"),
-                questionary.Choice("Apply Snapshot from Another Tenant", value="cross_tenant_snap"),
+                questionary.Choice("Clone Config from Another Tenant", value="cross_tenant_snap"),
+                questionary.Choice("Templates", value="templates"),
                 questionary.Separator(),
                 questionary.Choice("Activation", value="activation"),
                 questionary.Choice("Import Config", value="import"),
@@ -115,6 +116,13 @@ def zia_menu():
                 pass  # user cancelled; loop continues
             else:
                 _warn_subscription_diff(source_tenant, tenant)
+                # Prompt for Full Clone mode
+                full_clone = questionary.confirm(
+                    "Enable Full Clone? (Also copies static IPs, VPN credentials, GRE tunnels, locations, sublocations live from the source tenant — VPN PSKs require manual action in target)",
+                    default=False,
+                ).ask()
+                if full_clone is None:
+                    continue
                 baseline_path = f"{source_tenant.name}/{snap.name}"
                 baseline = {
                     "product": "ZIA",
@@ -125,7 +133,9 @@ def zia_menu():
                     "resource_count": snap.resource_count,
                     "resources": snap.snapshot["resources"],
                 }
-                apply_baseline_menu(client, tenant, baseline=baseline, baseline_path=baseline_path)
+                apply_baseline_menu(client, tenant, baseline=baseline, baseline_path=baseline_path, full_clone=full_clone, source_tenant=source_tenant)
+        elif choice == "templates":
+            templates_menu(tenant)
         elif choice == "reset_na":
             _reset_zia_na_resources(client, tenant)
         elif choice in ("back", None):
@@ -4517,6 +4527,423 @@ def _pick_cross_tenant_snapshot(current_tenant):
 
 
 # ------------------------------------------------------------------
+# Templates menu
+# ------------------------------------------------------------------
+
+def templates_menu(tenant):
+    """Browse, create, apply and delete ZIA templates (tenant-agnostic snapshots)."""
+    from datetime import timezone
+    from db.database import get_session
+    from services.template_service import list_templates, get_template, delete_template, create_template_from_snapshot, preview_template_from_snapshot
+    from services.config_service import list_tenants
+    from services.snapshot_service import list_snapshots
+
+    while True:
+        render_banner()
+        console.print("\n[bold]ZIA Templates[/bold]")
+        console.print("[dim]Templates are portable ZIA snapshots with tenant-specific resources stripped.[/dim]\n")
+
+        with get_session() as session:
+            templates = list_templates(session)
+
+        choices = []
+        for tmpl in templates:
+            local_ts = ""
+            if tmpl.created_at:
+                local_ts = tmpl.created_at.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+            desc_suffix = f"  {tmpl.description}" if tmpl.description else ""
+            label = f"{tmpl.name}  [{local_ts}]  {tmpl.resource_count} resources{desc_suffix}"
+            choices.append(questionary.Choice(label, value=tmpl))
+
+        choices.append(questionary.Separator())
+        choices.append(questionary.Choice("Create template from snapshot", value="create"))
+        choices.append(questionary.Choice("<- Back", value=_CANCEL))
+
+        selection = questionary.select(
+            "Select a template to view/apply/delete, or create a new one:",
+            choices=choices,
+            use_indicator=True,
+        ).ask()
+
+        if selection is None or selection is _CANCEL:
+            break
+
+        if selection == "create":
+            _templates_create(tenant)
+            continue
+
+        # Selected a template — show detail + actions
+        tmpl = selection
+        _template_detail_menu(tmpl, tenant)
+
+
+def _templates_create(tenant):
+    """Interactively create a ZIA template from a snapshot."""
+    from db.database import get_session
+    from services.template_service import create_template_from_snapshot, preview_template_from_snapshot
+    from services.config_service import list_tenants
+    from services.snapshot_service import list_snapshots
+    from services import audit_service
+    from datetime import timezone
+
+    render_banner()
+    console.print("\n[bold]Create Template from Snapshot[/bold]\n")
+
+    all_tenants = list_tenants()
+    if not all_tenants:
+        console.print("[yellow]No tenants configured.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    tenant_choices = [questionary.Choice(t.name, value=t) for t in sorted(all_tenants, key=lambda x: x.name)]
+    tenant_choices.append(questionary.Choice("<- Cancel", value=_CANCEL))
+    source_tenant = questionary.select(
+        "Select source tenant:",
+        choices=tenant_choices,
+        use_indicator=True,
+    ).ask()
+    if source_tenant is None or source_tenant is _CANCEL:
+        return
+
+    with get_session() as session:
+        snaps = list_snapshots(source_tenant.id, "ZIA", session)
+
+    if not snaps:
+        console.print(f"[yellow]No ZIA snapshots found for {source_tenant.name}.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    snap_choices = []
+    for snap in snaps:
+        local_ts = snap.created_at.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        comment_suffix = f"  {snap.comment}" if snap.comment else ""
+        label = f"{snap.name}  [{local_ts}]  {snap.resource_count} resources{comment_suffix}"
+        snap_choices.append(questionary.Choice(label, value=snap))
+    snap_choices.append(questionary.Choice("<- Cancel", value=_CANCEL))
+
+    selected_snap = questionary.select(
+        f"Select snapshot from {source_tenant.name}:",
+        choices=snap_choices,
+        use_indicator=True,
+    ).ask()
+    if selected_snap is None or selected_snap is _CANCEL:
+        return
+
+    # Preview
+    with get_session() as session:
+        try:
+            preview = preview_template_from_snapshot(
+                snapshot_id=selected_snap.id,
+                source_tenant_id=source_tenant.id,
+                session=session,
+            )
+        except LookupError as exc:
+            console.print(f"[red]✗ {exc}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+    from rich.table import Table as _Table
+    preview_table = _Table(title="Template Preview", show_lines=False)
+    preview_table.add_column("Resource Type")
+    preview_table.add_column("Status")
+    preview_table.add_column("Count", justify="right")
+    for r in preview.get("included", []):
+        preview_table.add_row(r["resource_type"], "[green]included[/green]", str(r["count"]))
+    for r in preview.get("stripped", []):
+        preview_table.add_row(r["resource_type"], "[dim]stripped[/dim]", str(r["count"]))
+    console.print(preview_table)
+
+    if not preview.get("included"):
+        console.print("[red]No portable resources in this snapshot — cannot create a template.[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    name = questionary.text("Template name (unique):").ask()
+    if not name or not name.strip():
+        return
+    name = name.strip()
+
+    description = questionary.text("Description (optional, press Enter to skip):").ask()
+    if description is None:
+        return
+    description = description.strip() or None
+
+    confirmed = questionary.confirm(f"Create template '{name}'?", default=True).ask()
+    if not confirmed:
+        return
+
+    pending_audit = []
+    try:
+        with get_session() as session:
+            tmpl = create_template_from_snapshot(
+                snapshot_id=selected_snap.id,
+                source_tenant_id=source_tenant.id,
+                name=name,
+                description=description,
+                session=session,
+            )
+            tmpl_id = tmpl.id
+            tmpl_name = tmpl.name
+            tmpl_resource_count = tmpl.resource_count
+            tmpl_stripped_types = list(tmpl.stripped_types or [])
+
+        pending_audit.append(dict(
+            product="ZIA",
+            operation="create_template",
+            action="CREATE",
+            status="SUCCESS",
+            resource_type="zia_template",
+            resource_id=str(tmpl_id),
+            resource_name=tmpl_name,
+            details={
+                "source_tenant_id": source_tenant.id,
+                "source_snapshot_id": selected_snap.id,
+                "resource_count": tmpl_resource_count,
+                "stripped_types": tmpl_stripped_types,
+            },
+        ))
+        console.print(f"[green]✓ Template '{tmpl_name}' created ({tmpl_resource_count} resources).[/green]")
+    except ValueError as exc:
+        err_str = str(exc)
+        if "duplicate_name:" in err_str:
+            console.print(f"[red]✗ A template with that name already exists.[/red]")
+        else:
+            console.print(f"[red]✗ {exc}[/red]")
+    except LookupError as exc:
+        console.print(f"[red]✗ {exc}[/red]")
+
+    for ev in pending_audit:
+        audit_service.log(**ev)
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+def _template_detail_menu(tmpl, current_tenant):
+    """Show template detail and offer apply / delete."""
+    from db.database import get_session
+    from db.models import ZIATemplate
+    from services.template_service import delete_template, get_template
+    from services.config_service import list_tenants
+    from services import audit_service
+
+    while True:
+        render_banner()
+        console.print(f"\n[bold]Template: {tmpl.name}[/bold]")
+        if tmpl.description:
+            console.print(f"[dim]{tmpl.description}[/dim]")
+        console.print(f"Resources: {tmpl.resource_count}  |  Stripped types: {len(tmpl.stripped_types or [])}")
+        if tmpl.stripped_types:
+            console.print(f"[dim]Stripped: {', '.join(tmpl.stripped_types)}[/dim]")
+        console.print()
+
+        action = questionary.select(
+            "Action:",
+            choices=[
+                questionary.Choice("Apply to tenant", value="apply"),
+                questionary.Choice("Delete template", value="delete"),
+                questionary.Choice("<- Back", value=_CANCEL),
+            ],
+            use_indicator=True,
+        ).ask()
+
+        if action is None or action is _CANCEL:
+            break
+
+        if action == "delete":
+            confirmed = questionary.confirm(f"Delete template '{tmpl.name}'? This cannot be undone.", default=False).ask()
+            if confirmed:
+                pending_audit = []
+                try:
+                    with get_session() as session:
+                        delete_template(tmpl.id, session)
+                    pending_audit.append(dict(
+                        product="ZIA",
+                        operation="delete_template",
+                        action="DELETE",
+                        status="SUCCESS",
+                        resource_type="zia_template",
+                        resource_id=str(tmpl.id),
+                        resource_name=tmpl.name,
+                    ))
+                    console.print(f"[green]✓ Template '{tmpl.name}' deleted.[/green]")
+                except LookupError as exc:
+                    console.print(f"[red]✗ {exc}[/red]")
+                for ev in pending_audit:
+                    audit_service.log(**ev)
+                questionary.press_any_key_to_continue("Press any key to continue...").ask()
+                break  # template deleted — exit detail menu
+
+        elif action == "apply":
+            _template_apply(tmpl)
+
+        # After apply, loop back to detail menu
+
+
+def _template_apply(tmpl):
+    """Apply a template to a selected tenant via the push service."""
+    from db.database import get_session
+    from services.config_service import list_tenants
+    from services.encryption_service import decrypt_secret
+    from lib.zia_client import ZIAClient
+    from services.zia_push_service import ZIAPushService
+    from services.zia_import_service import ZIAImportService
+    from services import audit_service
+
+    render_banner()
+    console.print(f"\n[bold]Apply Template: {tmpl.name}[/bold]")
+    if tmpl.description:
+        console.print(f"[dim]{tmpl.description}[/dim]")
+    console.print()
+
+    all_tenants = list_tenants()
+    if not all_tenants:
+        console.print("[yellow]No tenants configured.[/yellow]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    tenant_choices = [questionary.Choice(t.name, value=t) for t in sorted(all_tenants, key=lambda x: x.name)]
+    tenant_choices.append(questionary.Choice("<- Cancel", value=_CANCEL))
+    target_tenant = questionary.select(
+        "Select target tenant:",
+        choices=tenant_choices,
+        use_indicator=True,
+    ).ask()
+    if target_tenant is None or target_tenant is _CANCEL:
+        return
+
+    mode = questionary.select(
+        "Push mode:",
+        choices=[
+            questionary.Choice("Wipe-first  — delete resources absent from template first, then push", value="wipe"),
+            questionary.Choice("Delta-only  — non-destructive: creates and updates only", value="delta"),
+        ],
+    ).ask()
+    if mode is None:
+        return
+
+    confirmed = questionary.confirm(
+        f"Apply template '{tmpl.name}' to {target_tenant.name} ({mode} mode)?",
+        default=False,
+    ).ask()
+    if not confirmed:
+        return
+
+    # Build client for target tenant
+    target_secret = decrypt_secret(target_tenant.client_secret_enc) if target_tenant.client_secret_enc else None
+    if target_secret is None:
+        console.print("[red]✗ Target tenant credentials not available.[/red]")
+        questionary.press_any_key_to_continue("Press any key to continue...").ask()
+        return
+
+    tgt_client = ZIAClient(
+        client_id=target_tenant.client_id,
+        client_secret=target_secret,
+        cloud=target_tenant.zia_cloud,
+        govcloud=target_tenant.govcloud,
+        oneapi_base_url=target_tenant.oneapi_base_url,
+        zidentity_base_url=target_tenant.zidentity_base_url,
+    )
+
+    snap_resources = tmpl.snapshot or {}
+    baseline = {"product": "ZIA", "resources": snap_resources}
+
+    service = ZIAPushService(tgt_client, tenant_id=target_tenant.id, full_clone=False)
+
+    with console.status(f"[cyan]Syncing current state from {target_tenant.name}...[/cyan]") as status:
+        def _import_progress(rtype, done, total):
+            status.update(f"[cyan]Comparing: {rtype} ({done}/{total})[/cyan]")
+        dry_run = service.classify_baseline(baseline, import_progress_callback=_import_progress)
+
+    creates, updates, deletes = dry_run.changes_by_action()
+    console.print(f"  [green]{len(creates)} to create[/green]  [cyan]{len(updates)} to update[/cyan]  [red]{len(deletes)} to delete[/red]")
+
+    push_records = []
+    delete_records = []
+
+    if mode == "wipe":
+        wipe_confirmed = questionary.confirm(
+            f"Delete {len(dry_run.to_delete)} resource(s) absent from template before pushing?",
+            default=False,
+        ).ask()
+        if not wipe_confirmed:
+            return
+        with console.status("[red]Deleting extraneous resources...[/red]") as status:
+            def _wipe_progress(_, rtype, rec):
+                status.update(f"[red]Deleting {rtype} — {rec.name}[/red]")
+            delete_records = service.execute_deletes(dry_run.to_delete, progress_callback=_wipe_progress)
+        deleted = sum(1 for r in delete_records if r.is_deleted)
+        console.print(f"  [red]Deleted:[/red] {deleted}")
+        if deleted > 0:
+            try:
+                tgt_client.activate()
+            except Exception as exc:
+                console.print(f"[yellow]⚠ Activation after wipe failed: {exc}[/yellow]")
+
+    if creates or updates:
+        with console.status("[cyan]Pushing template...[/cyan]") as status:
+            current_pass = [0]
+            def _push_progress(pass_num, rtype, rec):
+                if pass_num != current_pass[0]:
+                    current_pass[0] = pass_num
+                status.update(f"[cyan][Pass {pass_num}] {rtype} — {rec.name}[/cyan]")
+            push_records = service.push_classified(dry_run, progress_callback=_push_progress)
+
+    created = sum(1 for r in push_records if r.is_created)
+    updated = sum(1 for r in push_records if r.is_updated)
+    failed  = sum(1 for r in push_records if r.is_failed)
+
+    console.print(f"\n[bold]Template apply complete[/bold]")
+    console.print(f"  [green]Created:[/green] {created}  [cyan]Updated:[/cyan] {updated}  [red]Failed:[/red] {failed}")
+
+    all_push = push_records + delete_records
+    failures = [r for r in all_push if r.is_failed]
+    if failures:
+        console.print("[bold red]Failures:[/bold red]")
+        for r in failures:
+            console.print(f"  [dim]{r.resource_type}:[/dim] {r.name} — {r.failure_reason[:80]}")
+
+    warned = [r for r in all_push if r.warnings]
+    if warned:
+        console.print("[bold yellow]Manual action required:[/bold yellow]")
+        for r in warned:
+            for w in r.warnings:
+                console.print(f"  [dim]{r.resource_type}:[/dim] {r.name} — {w}")
+
+    status_str = "SUCCESS" if failed == 0 else "PARTIAL"
+    pending_audit = [dict(
+        product="ZIA",
+        operation="apply_template",
+        action="CREATE",
+        status=status_str,
+        tenant_id=target_tenant.id,
+        resource_type="tenant",
+        resource_name=target_tenant.name,
+        details={
+            "template_id": tmpl.id,
+            "template_name": tmpl.name,
+            "mode": mode,
+            "created": created,
+            "updated": updated,
+            "failed": failed,
+        },
+    )]
+    for ev in pending_audit:
+        audit_service.log(**ev)
+
+    if created > 0 or updated > 0:
+        activate_now = questionary.confirm("Activate changes in ZIA now?", default=True).ask()
+        if activate_now:
+            try:
+                result = tgt_client.activate()
+                state = result.get("status", "UNKNOWN") if result else "UNKNOWN"
+                console.print(f"[green]✓ Activated — status: {state}[/green]")
+            except Exception as e:
+                console.print(f"[red]✗ Activation failed: {e}[/red]")
+
+    questionary.press_any_key_to_continue("Press any key to continue...").ask()
+
+
+# ------------------------------------------------------------------
 # Apply Baseline from JSON
 # ------------------------------------------------------------------
 
@@ -4609,7 +5036,7 @@ def _write_push_log(baseline_path, tenant, dry_run, push_records):
         return None
 
 
-def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
+def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None, full_clone: bool = False, source_tenant=None):
     import json
     from collections import defaultdict
     from services.zia_push_service import SKIP_TYPES, ZIAPushService
@@ -4630,7 +5057,8 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
     else:
         _src_tenant  = baseline.get("tenant_name", baseline_path.split("/")[0]) if baseline else baseline_path.split("/")[0]
         _snap_name   = baseline.get("snapshot_name", "") if baseline else ""
-        _page_title    = "Apply Snapshot from Another Tenant"
+        _clone_label = " [Full Clone]" if full_clone else ""
+        _page_title    = f"Clone Config from Another Tenant{_clone_label}"
         _page_subtitle = f"Applying snapshot '{_snap_name}' from {_src_tenant} to {tenant.name}."
         _table_title   = "Snapshot Contents"
         _count_col     = "Count"
@@ -4692,7 +5120,7 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
         return
 
     # ── Step 2: import + classify (dry run) ───────────────────────────────
-    service = ZIAPushService(client, tenant_id=tenant.id)
+    service = ZIAPushService(client, tenant_id=tenant.id, full_clone=full_clone)
     console.print()
 
     with console.status(f"[cyan]Syncing current state from {tenant.name}...[/cyan]") as status:
@@ -4792,7 +5220,70 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
             except Exception as e:
                 console.print(f"[yellow]⚠ Activation after wipe failed: {e} — proceeding anyway[/yellow]")
 
-    # ── Step 4b: push creates + updates ───────────────────────────────────
+    # ── Step 4b (Full Clone): fetch and push FC-specific resource types ───
+    fc_push_records: list = []
+    if full_clone and source_tenant is not None:
+        from services.encryption_service import decrypt_secret
+        from lib.zia_client import ZIAClient
+        from services.zia_import_service import ZIAImportService
+
+        console.print()
+        console.print("[bold cyan]Full Clone — fetching tenant-specific resources from source...[/bold cyan]")
+
+        src_secret = decrypt_secret(source_tenant.client_secret_enc) if source_tenant.client_secret_enc else None
+        if src_secret is None:
+            console.print("[red]✗ Cannot fetch clone resources: source tenant credentials not available.[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
+
+        src_client = ZIAClient(
+            client_id=source_tenant.client_id,
+            client_secret=src_secret,
+            cloud=source_tenant.zia_cloud,
+            govcloud=source_tenant.govcloud,
+            oneapi_base_url=source_tenant.oneapi_base_url,
+            zidentity_base_url=source_tenant.zidentity_base_url,
+        )
+        src_import_svc = ZIAImportService(src_client, tenant_id=source_tenant.id)
+
+        with console.status(f"[cyan]Fetching clone resources from {source_tenant.name}...[/cyan]") as status:
+            def _clone_fetch_progress(rtype, done, total):
+                status.update(f"[cyan]Fetching {rtype} from {source_tenant.name} ({done}/{total})[/cyan]")
+            clone_resources = src_import_svc.run_clone_resources(progress_callback=_clone_fetch_progress)
+
+        console.print(f"  Fetched {sum(len(v) for v in clone_resources.values())} clone resources across {len(clone_resources)} types.")
+
+        with console.status(f"[cyan]Pushing Full Clone resources to {tenant.name}...[/cyan]") as status:
+            def _fc_wipe_progress(rtype, rec):
+                status.update(f"[red]FC wipe {rtype} — {rec.name}[/red]")
+
+            def _fc_import_progress(rtype, done, total):
+                status.update(f"[cyan]FC import {rtype} ({done}/{total})[/cyan]")
+
+            def _fc_push_progress(_pass_num, rtype, rec):
+                status.update(f"[cyan]FC push {rtype} — {rec.name}[/cyan]")
+
+            fc_wipe_records, fc_push_records = service.run_full_clone(
+                clone_resources=clone_resources,
+                wipe=(mode == "wipe"),
+                wipe_progress_callback=_fc_wipe_progress,
+                import_progress_callback=_fc_import_progress,
+                push_progress_callback=_fc_push_progress,
+            )
+
+        fc_created = sum(1 for r in fc_push_records if r.is_created)
+        fc_updated = sum(1 for r in fc_push_records if r.is_updated)
+        fc_failed  = sum(1 for r in fc_push_records if r.is_failed)
+        console.print(f"  [green]FC created:[/green] {fc_created}  [cyan]FC updated:[/cyan] {fc_updated}  [red]FC failed:[/red] {fc_failed}")
+
+        fc_warned = [r for r in fc_push_records if r.warnings]
+        if fc_warned:
+            console.print("[bold yellow]Full Clone manual actions required:[/bold yellow]")
+            for r in fc_warned:
+                for w in r.warnings:
+                    console.print(f"  [dim]{r.resource_type}:[/dim] {r.name} — {w}")
+
+    # ── Step 4c: push creates + updates ───────────────────────────────────
     push_records = []
     current_pass = [0]
 
@@ -4833,7 +5324,7 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None):
         console.print(f"  [dim]Skipped:[/dim]  {skipped}")
         console.print(f"  [red]Failed:[/red]   {failed}")
 
-    push_records = push_records + delete_records
+    push_records = push_records + delete_records + fc_push_records
 
     # Results table by type (push records only — skips are uninteresting here)
     if push_records:

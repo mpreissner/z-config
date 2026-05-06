@@ -7,13 +7,14 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v2.1.2
+## What's New — v3.0.0
 
-- **Encryption algorithm choice** — choose between Fernet (default), AES-256-GCM, or ChaCha20-Poly1305 for tenant secret encryption. Switch algorithms at any time via key rotation.
-- **Key rotation** — rotate the encryption key and re-encrypt all tenant secrets in one atomic operation, from Admin → Settings or the TUI Settings menu.
-- **FIPS mode** — restrict algorithm selection to FIPS-compliant options (Fernet, AES-256-GCM). ChaCha20-Poly1305 is disabled in the UI and rejected at the API when FIPS mode is on.
-- **Auto-rotation schedule** — set a rotation interval (daily, weekly, monthly, or a custom number of days) and the key rotates automatically on server startup when due.
-- **TUI-only container mode** — set `ZS_TUI_ONLY=1` to launch the TUI directly from the Docker container instead of starting the web server.
+> **v3.0.0 is the current release** — full SQLite database encryption via SQLCipher. This is a breaking change for native TUI users (requires `libsqlcipher`). See the [changelog](CHANGELOG.md) for details.
+
+- **Full database encryption** — the entire SQLite database file is now encrypted with SQLCipher (AES-256-CBC). Previous versions only encrypted tenant secrets at the column level; v3.0.0 encrypts every row and every table at rest. Existing plaintext databases are migrated automatically on first launch — a `.plaintext.bak` backup is retained until you manually delete it.
+- **Key rotation re-encrypts the database file** — `PRAGMA rekey` is issued alongside column re-encryption so the full-database key and the column key rotate atomically.
+- **Native TUI users: system dependency required** — `libsqlcipher` must be installed before upgrading. The TUI auto-updater handles this automatically (brew on macOS; apt/dnf/pacman/zypper on Linux). Docker deployments are unaffected.
+- **Docker: no changes required** — `libsqlcipher` and `sqlcipher3` are bundled in the container image. Run `./deploy.sh` to rebuild.
 
 ---
 
@@ -87,7 +88,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Scheduled Tasks** (cron-driven cross-tenant sync by resource type or label)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven cross-tenant sync by resource type or label)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals
@@ -124,8 +125,8 @@ User Management, Tenant Entitlements, System Settings (session timeout, idle tim
 - **ZIdentity** — Users (list/search/reset-password/set-password/skip-MFA), Groups, API Clients
 - **Config Import** — 27 ZPA + 42 ZIA + 6 ZCC resource types into a local SQLite cache with SHA-256 change detection
 - **Config Snapshots** — save, compare (field-level diff), restore (ZIA only, wipe-or-delta, cross-tenant), delete
-- **Audit Log** — immutable record of every operation
-- **Encryption at rest** — tenant secrets encrypted with configurable algorithm (Fernet/AES-256-GCM/ChaCha20); key rotation and FIPS mode available via Admin Settings or TUI
+- **Audit Log** — immutable record of every operation with full-text search
+- **Encryption at rest** — full SQLite database encryption via SQLCipher (AES-256-CBC); tenant secrets additionally encrypted at the column level (Fernet/AES-256-GCM/ChaCha20); key rotation, FIPS mode, and auto-rotation available via Admin Settings or TUI
 - **Auto-update** — silent PyPI check on startup; shows changelog and upgrades in-place
 
 ---
@@ -156,6 +157,16 @@ zs-config/
 
 ### TUI only (no Docker)
 
+v3.0.0+ requires `libsqlcipher` on your system before installing. The TUI auto-updater installs it for you if you upgrade from within the TUI, but for a fresh install run the appropriate command first:
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install sqlcipher` |
+| Debian/Ubuntu | `sudo apt-get install libsqlcipher-dev` |
+| Fedora/RHEL | `sudo dnf install sqlcipher-devel` |
+| Arch | `sudo pacman -S sqlcipher` |
+| openSUSE | `sudo zypper install sqlcipher-devel` |
+
 ```bash
 pipx install zs-config   # recommended
 # or
@@ -164,7 +175,7 @@ pip install zs-config
 zs-config
 ```
 
-On first launch an encryption key is generated at `~/.config/zs-config/secret.key`. Go to **Settings → Add Tenant**, then run **Import Config** to populate the local cache.
+On first launch an encryption key is generated at `~/.config/zs-config/secret.key` and the database is created encrypted. Go to **Settings → Add Tenant**, then run **Import Config** to populate the local cache.
 
 ### TUI inside the Docker container
 

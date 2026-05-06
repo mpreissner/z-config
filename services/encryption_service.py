@@ -1,12 +1,15 @@
 """Key rotation service — shared by the API endpoint and startup auto-rotation."""
 
+import binascii
 import logging
 import os
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from db.database import get_session, get_setting, set_setting
+from sqlalchemy import text
+
+from db.database import get_engine, get_session, get_setting, set_setting, is_sqlcipher_active
 from db.models import TenantConfig
 from lib.crypto import (
     CryptoAlgorithm,
@@ -21,8 +24,40 @@ from lib.crypto import (
 log = logging.getLogger(__name__)
 
 
+def _sqlcipher_rekey(new_raw_key: bytes) -> None:
+    """Issue PRAGMA rekey on one raw connection from the pool.
+
+    Re-encrypts the entire SQLCipher database file with the new 32-byte key.
+    Must be called after the column commit and after save_key() so that the
+    creator callable (which reads the key file) uses the new key on subsequent
+    connections.
+    """
+    engine = get_engine()
+    hex_key = binascii.hexlify(new_raw_key).decode()
+    with engine.connect() as conn:
+        conn.execute(text(f"PRAGMA rekey = \"x'{hex_key}'\""))
+        conn.commit()
+
+
+def _derive_new_sqlcipher_key(new_algorithm: str, new_key: bytes) -> bytes:
+    """Derive the 32-byte SQLCipher key from newly generated key material."""
+    import base64
+
+    if new_algorithm == CryptoAlgorithm.FERNET:
+        # Fernet key is 44 base64url chars encoding exactly 32 bytes total.
+        decoded = base64.urlsafe_b64decode(new_key)  # 32 bytes
+        return decoded[0:32]
+    else:
+        # aes256gcm and chacha20poly1305: raw 32 bytes
+        return new_key[:32]
+
+
 def rotate_key(new_algorithm: str) -> dict:
     """Re-encrypt all TenantConfig secrets with a freshly generated key.
+
+    Also re-encrypts the SQLCipher database file via PRAGMA rekey so the
+    full-database encryption key is rotated atomically alongside the column
+    encryption key.
 
     Returns {"rotated": N, "algorithm": ..., "rotated_at": "..."}.
     Raises ValueError on validation failure, RuntimeError on partial failure.
@@ -55,13 +90,12 @@ def rotate_key(new_algorithm: str) -> dict:
         # Re-encrypt with the new key
         new_enc_map = [(rid, encrypt(pt, new_algorithm, new_key)) for rid, pt in plaintext_map]
 
-        # Write new ciphertext to DB rows (flush, don't commit yet)
+        # Write new ciphertext to DB rows
         enc_lookup = dict(new_enc_map)
         for row in rows:
             row.client_secret_enc = enc_lookup[row.id]
-        session.flush()
 
-        # Write new key file (atomic); keep a backup of the old key
+        # Resolve the key file path (mirrors logic in lib/crypto.save_key)
         key_path = Path.home() / ".config" / "zs-config" / "secret.key"
         db_path_env = os.environ.get("ZSCALER_DB_PATH")
         if db_path_env:
@@ -71,28 +105,41 @@ def rotate_key(new_algorithm: str) -> dict:
         if key_path.exists():
             shutil.copy2(key_path, bak_path)
 
+        # Phase 1: commit column re-encryption — closes the write transaction so
+        # PRAGMA rekey can run on a clean connection.
         try:
-            save_key(new_key, new_algorithm)
             session.commit()
         except Exception:
-            # Restore the old key file if we wrote the new one before the commit failed
             if bak_path.exists():
                 os.replace(bak_path, key_path)
-            session.rollback()
+            bak_path.unlink(missing_ok=True)
             raise RuntimeError(
-                "Key file replaced but database commit failed — old key restored from backup. "
+                "Column re-encryption commit failed — old key restored, no changes made. "
                 "Re-run rotation."
             )
+
+        # Phase 2: write new key file and re-encrypt the SQLCipher DB file.
+        # Column data is already committed with the new key at this point.
+        try:
+            save_key(new_key, new_algorithm)
+            if is_sqlcipher_active():
+                new_sqlcipher_key = _derive_new_sqlcipher_key(new_algorithm, new_key)
+                _sqlcipher_rekey(new_sqlcipher_key)
+        except Exception:
+            # Do NOT restore the old key file — columns are committed with the new key.
+            raise RuntimeError(
+                "Column re-encryption committed but key file update or SQLCipher rekey failed. "
+                "Key file and DB encryption may be inconsistent. Re-run rotation."
+            )
         finally:
-            if bak_path.exists():
-                bak_path.unlink(missing_ok=True)
+            bak_path.unlink(missing_ok=True)
+
+    # Drain the connection pool so subsequent connections use the new key
+    get_engine().dispose()
 
     rotated_at = datetime.utcnow().isoformat()
-    try:
-        set_setting("encryption_algorithm", new_algorithm)
-        set_setting("key_last_rotated_at", rotated_at)
-    except Exception as exc:
-        log.warning("Key rotation succeeded but failed to update app_settings: %s", exc)
+    set_setting("encryption_algorithm", new_algorithm)
+    set_setting("key_last_rotated_at", rotated_at)
 
     return {"rotated": len(new_enc_map), "algorithm": new_algorithm, "rotated_at": rotated_at}
 

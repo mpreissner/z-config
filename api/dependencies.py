@@ -63,8 +63,11 @@ def require_admin(user: AuthUser = Depends(require_auth)) -> AuthUser:
 
 
 def check_tenant_access(tenant_id: int, user: AuthUser) -> None:
-    """Raise 404 if user is not admin and has no entitlement for tenant_id.
+    """Raise 404 if user has no entitlement for tenant_id.
 
+    Always enforced regardless of role — admins are not exempt.
+    Use an explicit `if user.role != "admin"` guard before calling this
+    for endpoints that intentionally allow admins through.
     Uses 404 (not 403) to avoid leaking tenant existence to unauthorized users.
     Must never be called from inside an existing with get_session() block.
     """

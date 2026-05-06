@@ -36,6 +36,8 @@ from __future__ import annotations
 import copy
 import json
 import re
+import secrets
+import string
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
@@ -127,12 +129,17 @@ SKIP_TYPES: set = {
     "admin_user",
     "admin_role",
     "location_group",       # read-only in SDK
-    "location",             # tenant-specific; public IPs and VPN credentials cannot be copied cross-tenant
+    "location",             # tenant-specific; Full Clone only
     "location_lite",        # predefined/system locations (Road Warrior etc.) — imported for ID remapping only
     "device_group",         # predefined OS/platform groups (Windows, iOS, etc.) — imported for ID remapping only
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
+    # Full Clone-only types — pushed via _push_full_clone_entry, never via classify_baseline
+    "static_ip",
+    "vpn_credential",
+    "gre_tunnel",
+    "sublocation",
 }
 
 # Specific resource names that are system-managed and must never be pushed,
@@ -226,6 +233,11 @@ _DELETE_METHODS: Dict[str, str] = {
     "dlp_dictionary":                "delete_dlp_dictionary",
     "tenancy_restriction_profile":   "delete_tenancy_restriction_profile",
     "location":                      "delete_location",
+    # Full Clone types
+    "static_ip":                     "delete_static_ip",
+    "vpn_credential":                "delete_vpn_credential",
+    "gre_tunnel":                    "delete_gre_tunnel",
+    "sublocation":                   "delete_sublocation",
 }
 
 _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
@@ -262,6 +274,11 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
                                       "update_advanced_settings"),
     "browser_control_settings":      ("update_browser_control_settings",
                                       "update_browser_control_settings"),
+    # Full Clone types
+    "static_ip":      ("create_static_ip",      "update_static_ip"),
+    "vpn_credential": ("create_vpn_credential",  "update_vpn_credential"),
+    "gre_tunnel":     ("create_gre_tunnel",       "update_gre_tunnel"),
+    "sublocation":    ("create_sublocation",      "update_sublocation"),
 }
 
 # GET methods for live configVersion fetch before UPDATE.
@@ -440,13 +457,17 @@ class DryRunResult:
 # ---------------------------------------------------------------------------
 
 class ZIAPushService:
-    def __init__(self, client, tenant_id: int):
+    def __init__(self, client, tenant_id: int, full_clone: bool = False):
         self._client = client
         self._tenant_id = tenant_id
+        self._full_clone = full_clone
         self._id_remap: Dict[str, str] = {}          # source_id (str) → target_id (str)
         self._target_known_ids: Dict[str, set] = {}  # resource_type → set of zia_ids in target
         self._usable_dlp_engine_ids: set = set()     # target DLP engine IDs that can be used in rules
         self._cbi_profile_map: Dict[str, dict] = {}  # profile name (lower) → {id, name, url, default}
+        # Tracks static IPs created during a Full Clone push (source_id → target_id).
+        # Used to clear GRE tunnel sourceIp references that we cannot replicate.
+        self._created_static_ip_ids: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public API — wipe phase
@@ -533,6 +554,7 @@ class ZIAPushService:
         self,
         baseline: dict,
         import_progress_callback: Optional[Callable] = None,
+        skip_import: bool = False,
     ) -> DryRunResult:
         """Import target state, load DB, classify each baseline entry.
 
@@ -546,10 +568,15 @@ class ZIAPushService:
             baseline: Parsed snapshot export JSON dict (must have 'resources' key).
             import_progress_callback: Called during the fresh import phase.
                 Signature: callback(resource_type: str, done: int, total: int)
+            skip_import: When True, skip the ZIAImportService.run() call and use
+                the current DB state as-is.  Pass True only when the caller knows
+                a fresh import was already performed (e.g. during preview) and no
+                wipe has occurred since then.
         """
-        from services.zia_import_service import ZIAImportService
-        import_svc = ZIAImportService(self._client, self._tenant_id)
-        import_svc.run(progress_callback=import_progress_callback)
+        if not skip_import:
+            from services.zia_import_service import ZIAImportService
+            import_svc = ZIAImportService(self._client, self._tenant_id)
+            import_svc.run(progress_callback=import_progress_callback)
 
         existing = self._load_existing_from_db()
         # Build a lookup of all IDs currently in the target so cross-tenant ref
@@ -1279,6 +1306,241 @@ class ZIAPushService:
         return wipe_records, dry_run.skipped + push_records
 
     # ------------------------------------------------------------------
+    # Full Clone pipeline
+    # ------------------------------------------------------------------
+
+    # Push order for Full Clone types — prepended before the standard PUSH_ORDER
+    _FC_PUSH_PREFIX: List[str] = ["static_ip", "vpn_credential", "gre_tunnel"]
+    # Appended after the standard PUSH_ORDER (locations must exist before sublocations)
+    _FC_PUSH_SUFFIX: List[str] = ["location", "sublocation"]
+
+    # Wipe order for Full Clone types — prepended before the standard WIPE_ORDER
+    # (reverse of push: sublocations deleted before locations, etc.)
+    _FC_WIPE_PREFIX: List[str] = ["sublocation", "location"]
+    # Appended after the standard WIPE_ORDER (delete GRE/VPN before static_ip)
+    _FC_WIPE_SUFFIX: List[str] = ["gre_tunnel", "vpn_credential", "static_ip"]
+
+    def run_full_clone(
+        self,
+        clone_resources: dict,
+        wipe: bool = True,
+        wipe_progress_callback: Optional[Callable] = None,
+        import_progress_callback: Optional[Callable] = None,
+        push_progress_callback: Optional[Callable] = None,
+    ) -> Tuple[List[WipeRecord], List[PushRecord]]:
+        """Full Clone pipeline: wipe Full Clone types from target, then push from source.
+
+        clone_resources is the dict returned by ZIAImportService.run_clone_resources()
+        (in-memory, not persisted):
+            {"static_ip": [{"id": str, "name": str, "raw_config": dict}, ...], ...}
+
+        Full Clone types pushed in order:
+          static_ip → vpn_credential → gre_tunnel → (existing PUSH_ORDER) → location → sublocation
+
+        Wipe reverses that order:
+          sublocation → location → (existing WIPE_ORDER) → gre_tunnel → vpn_credential → static_ip
+
+        Returns (wipe_records, push_records).
+        """
+        _FC_TYPES = set(self._FC_PUSH_PREFIX + self._FC_PUSH_SUFFIX)
+
+        # ----------------------------------------------------------------
+        # Wipe phase — delete Full Clone types from the target in wipe order
+        # ----------------------------------------------------------------
+        wipe_records: List[WipeRecord] = []
+        if wipe:
+            wipe_records = self._wipe_full_clone_types(wipe_progress_callback)
+
+        # ----------------------------------------------------------------
+        # Push phase — push Full Clone types from source in push order
+        # ----------------------------------------------------------------
+        push_records: List[PushRecord] = []
+        self._created_static_ip_ids = {}
+
+        ordered_fc_types = (
+            [t for t in self._FC_PUSH_PREFIX if t in clone_resources]
+            + [t for t in self._FC_PUSH_SUFFIX if t in clone_resources]
+        )
+
+        for rtype in ordered_fc_types:
+            entries = clone_resources.get(rtype) or []
+            for entry in entries:
+                rec = self._push_full_clone_entry(rtype, entry)
+                if push_progress_callback:
+                    push_progress_callback(1, rtype, rec)
+                push_records.append(rec)
+
+        return wipe_records, push_records
+
+    def _wipe_full_clone_types(
+        self,
+        progress_callback: Optional[Callable] = None,
+    ) -> List[WipeRecord]:
+        """Delete all user-created Full Clone resources from the target tenant.
+
+        Fetches current live state via the client (does not rely on DB import).
+        Order: sublocation → location → gre_tunnel → vpn_credential → static_ip.
+        """
+        _WIPE_ORDER_FC = self._FC_WIPE_PREFIX + self._FC_WIPE_SUFFIX
+
+        _FC_LIST_METHODS: Dict[str, str] = {
+            "static_ip":      "list_static_ips",
+            "vpn_credential": "list_vpn_credentials",
+            "gre_tunnel":     "list_gre_tunnels",
+            "location":       "list_locations",
+            "sublocation":    "list_sublocations",
+        }
+        _FC_ID_FIELDS: Dict[str, str] = {
+            "vpn_credential": "id",
+            "gre_tunnel":     "id",
+            "static_ip":      "id",
+            "location":       "id",
+            "sublocation":    "id",
+        }
+
+        records: List[WipeRecord] = []
+        for rtype in _WIPE_ORDER_FC:
+            list_method_name = _FC_LIST_METHODS.get(rtype)
+            if not list_method_name:
+                continue
+            try:
+                items = getattr(self._client, list_method_name)() or []
+            except Exception:
+                items = []
+
+            for item in items:
+                if _is_zscaler_managed(rtype, item):
+                    continue
+                zia_id = str(item.get("id", ""))
+                name = item.get("name", "") or zia_id
+                if not zia_id:
+                    continue
+                wr = WipeRecord(rtype, name, zia_id, "pending_delete")
+                deleted_wr = self._wipe_delete_one(wr)
+                if progress_callback:
+                    progress_callback(rtype, deleted_wr)
+                records.append(deleted_wr)
+
+        return records
+
+    def _push_full_clone_entry(self, resource_type: str, entry: dict) -> PushRecord:
+        """Push one Full Clone resource entry to the target.
+
+        Applies type-specific field masking before push:
+        - vpn_credential: PSK masked ("*****") → omit psk field, emit manual warning
+        - location: clear ipAddresses, emit warning if non-empty
+        - gre_tunnel: clear sourceIp, emit warning
+        - sublocation: uses parentId from entry to route to correct parent
+        """
+        raw_config = dict(entry.get("raw_config") or entry)
+        source_id = str(raw_config.get("id", entry.get("id", "")))
+        name = (raw_config.get("name") or entry.get("name") or source_id or "?")
+        warnings: List[str] = []
+
+        if resource_type not in _WRITE_METHODS:
+            return PushRecord(resource_type, name, "skipped")
+
+        create_method_name, update_method_name = _WRITE_METHODS[resource_type]
+        create_method = getattr(self._client, create_method_name)
+
+        # Strip read-only fields
+        payload = self._strip(raw_config)
+
+        # ---- Per-type masking ----
+        if resource_type == "vpn_credential":
+            psk = payload.get("psk") or payload.get("preSharedKey") or ""
+            if psk == "*****" or not psk:
+                # PSK is masked — generate a random placeholder so the credential
+                # can be created, then surface it in warnings for manual update.
+                alphabet = string.ascii_letters + string.digits
+                placeholder_psk = "".join(secrets.choice(alphabet) for _ in range(20))
+                payload["psk"] = placeholder_psk
+                payload.pop("preSharedKey", None)
+                warnings.append(
+                    f"PSK cannot be transferred — a random placeholder was set "
+                    f"({placeholder_psk}). Update the PSK manually in the target tenant."
+                )
+            # Strip per-org fields that cannot be replicated
+            for f in ("id", "location", "locationId"):
+                payload.pop(f, None)
+
+        elif resource_type == "location":
+            ip_addresses = payload.pop("ip_addresses", None) or payload.pop("ipAddresses", None)
+            if ip_addresses:
+                warnings.append(
+                    f"location '{name}': ipAddresses cleared — public IP associations are "
+                    f"organisation-specific and must be configured manually in the target tenant"
+                )
+            # Also clear VPN credential bindings — they reference source-tenant PSK IDs
+            for f in ("vpn_credentials", "vpnCredentials"):
+                payload.pop(f, None)
+            # Clear read-only / topology-specific fields handled by _norm_location
+            for f in ("dynamiclocation_groups", "static_location_groups", "child_count"):
+                payload.pop(f, None)
+
+        elif resource_type == "gre_tunnel":
+            source_ip = payload.pop("source_ip", None) or payload.pop("sourceIp", None)
+            if source_ip:
+                warnings.append(
+                    f"gre_tunnel '{name}': sourceIp cleared — the source IP must be a "
+                    f"static IP registered in the target tenant; configure manually after clone"
+                )
+            # primary_dest_vip and secondary_dest_vip are auto-assigned by ZIA
+            for f in ("primary_dest_vip", "secondaryDestVip", "secondary_dest_vip",
+                      "primaryDestVip", "last_modification_time", "lastModificationTime"):
+                payload.pop(f, None)
+
+        elif resource_type == "sublocation":
+            # parentId must be present in payload; if source parent was remapped, update
+            parent_id = payload.get("parentId") or payload.get("parent_id")
+            if parent_id:
+                remapped = self._id_remap.get(str(parent_id))
+                if remapped:
+                    payload["parentId"] = int(remapped)
+                    payload.pop("parent_id", None)
+            # Clear the same location-specific fields
+            for f in ("ip_addresses", "ipAddresses", "vpn_credentials", "vpnCredentials",
+                      "dynamiclocation_groups", "static_location_groups", "child_count"):
+                payload.pop(f, None)
+
+        elif resource_type == "static_ip":
+            # Static IPs bind to a specific public IP; keep ip_address in payload
+            # so the target receives it — operator must have the IP allocated already.
+            for f in ("routable_ip", "routableIp", "geo_override", "geoOverride"):
+                pass  # keep these; they're valid config fields
+
+        try:
+            result = create_method(payload)
+            new_id = str(result.get("id", ""))
+            if source_id and new_id:
+                self._register_remap(source_id, new_id)
+                if resource_type == "static_ip":
+                    self._created_static_ip_ids[source_id] = new_id
+            rec = PushRecord(resource_type, name, "created", zia_id=new_id or None)
+            rec.warnings.extend(warnings)
+            return rec
+        except Exception as exc:
+            exc_str = str(exc)
+            # 409 → resource already exists on target; try update by name
+            if ("409" in exc_str or "DUPLICATE_ITEM" in exc_str
+                    or "already exists" in exc_str.lower()):
+                found_id = self._find_by_name_live(resource_type, name)
+                if found_id:
+                    if source_id:
+                        self._register_remap(source_id, found_id)
+                    try:
+                        update_method = getattr(self._client, update_method_name)
+                        update_method(found_id, payload)
+                        rec = PushRecord(resource_type, name, "updated", zia_id=found_id)
+                        rec.warnings.extend(warnings)
+                        return rec
+                    except Exception as upd_exc:
+                        return self._classify_error(resource_type, name, upd_exc)
+            rec = self._classify_error(resource_type, name, exc)
+            rec.warnings.extend(warnings)
+            return rec
+
+    # ------------------------------------------------------------------
     # Wipe internals
     # ------------------------------------------------------------------
 
@@ -1906,6 +2168,11 @@ class ZIAPushService:
             "url_filter_cloud_app_settings": self._norm_url_filter_cloud_app_settings,
             "advanced_settings":             self._norm_advanced_settings,
             "browser_control_settings":      self._norm_browser_control_settings,
+            # Full Clone types
+            "static_ip":      self._norm_static_ip,
+            "vpn_credential": self._norm_vpn_credential,
+            "gre_tunnel":     self._norm_gre_tunnel,
+            "sublocation":    self._norm_sublocation,
         }
         handler = handlers.get(resource_type)
         if handler:
@@ -2298,6 +2565,49 @@ class ZIAPushService:
             empty_strip=("device_trust_levels", "user_agent_types", "user_risk_score_levels",
                          "cloud_app_instances"),
         )
+        return cfg
+
+    # ---- Full Clone normalizers ----
+
+    def _norm_static_ip(self, cfg: dict) -> dict:
+        # Strip read-only server-computed fields; keep ip_address and comment.
+        for f in ("managed_by", "last_modification_time", "lastModificationTime",
+                  "routable_ip", "routableIp", "geo_override", "geoOverride",
+                  "latitude", "longitude", "city", "country_code", "countryCode",
+                  "region_code", "regionCode"):
+            cfg.pop(f, None)
+        return cfg
+
+    def _norm_vpn_credential(self, cfg: dict) -> dict:
+        # PSK handling — mask detection happens in _push_full_clone_entry;
+        # for baseline-push comparison purposes, strip psk so masked/empty
+        # credentials don't trigger spurious updates.
+        for f in ("psk", "preSharedKey", "location", "locationId",
+                  "managed_by", "last_modification_time", "lastModificationTime"):
+            cfg.pop(f, None)
+        return cfg
+
+    def _norm_gre_tunnel(self, cfg: dict) -> dict:
+        # source_ip references a static IP registered to this org — must be cleared.
+        # dest VIPs are auto-assigned by ZIA.
+        for f in ("source_ip", "sourceIp",
+                  "primary_dest_vip", "primaryDestVip",
+                  "secondary_dest_vip", "secondaryDestVip",
+                  "last_modification_time", "lastModificationTime",
+                  "managed_by"):
+            cfg.pop(f, None)
+        return cfg
+
+    def _norm_sublocation(self, cfg: dict) -> dict:
+        # Delegate to location normalizer (same field restrictions) then also
+        # remap parentId if the parent location was created in this session.
+        cfg = self._norm_location(cfg)
+        parent_id = cfg.get("parentId") or cfg.get("parent_id")
+        if parent_id:
+            remapped = self._id_remap.get(str(parent_id))
+            if remapped:
+                cfg["parentId"] = int(remapped) if str(remapped).isdigit() else remapped
+                cfg.pop("parent_id", None)
         return cfg
 
     def _strip(self, config: dict) -> dict:

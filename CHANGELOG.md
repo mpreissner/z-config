@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.0.0] - 2026-05-06
+
+### Breaking Changes
+
+- **`libsqlcipher` system dependency required for native TUI** — v3.0.0 encrypts the entire SQLite database file using SQLCipher. The `sqlcipher3` Python package compiles a C extension against `libsqlcipher`, which must be present on the system before installation or upgrade. Docker deployments are unaffected (bundled in the image). The TUI auto-updater handles the system install automatically when upgrading from within the TUI; for a fresh install see the [Installation](#installation) section in the README.
+
+### Added
+
+- **Full SQLite database encryption (SQLCipher)** — the entire database file is now encrypted with AES-256-CBC via SQLCipher. All tables, indexes, and metadata are encrypted at rest. Previous versions encrypted only the `client_secret_enc` column; v3.0.0 encrypts the full file. The SQLCipher key is derived from the same `secret.key` material used for column encryption, so no separate key management is required.
+- **Automatic plaintext migration** — on first launch after upgrading, an existing plaintext SQLite database is converted to SQLCipher in-place using `ATTACH DATABASE + sqlcipher_export()` (the SQLCipher-recommended migration path). A `.plaintext.bak` file is retained alongside the database until manually deleted.
+- **Key rotation re-encrypts the database file** — `PRAGMA rekey` is issued atomically with column re-encryption so the full-database encryption key rotates in the same operation. The two phases are committed in order (columns first, then rekey) so a failure in phase 2 leaves a clear recovery path.
+- **TUI auto-upgrade libsqlcipher gate** — when upgrading from the TUI to v3.0.0+, the update checker detects whether `sqlcipher3` is importable. If not, it offers to install `libsqlcipher` via the system package manager (brew / apt-get / dnf / pacman / zypper) before running the pip/pipx upgrade. If the user declines, the upgrade is skipped.
+
+### Fixed
+
+- **APScheduler job store bypassed SQLCipher** — `SQLAlchemyJobStore` was initialized with a plain `url=` argument, causing it to create its own SQLAlchemy engine without the SQLCipher `creator` function. This caused "file is not a database" errors on startup when SQLCipher was active. Fixed by passing `engine=get_engine()` so the job store shares the existing SQLCipher-capable engine.
+
+---
+
+## [2.1.3] - 2026-05-05
+
+### Added
+
+- **ZIA Policy Templates** — create reusable, portable ZIA policy baselines from any config snapshot. Templates strip tenant-specific resource types (locations, VPN credentials, static IPs, identity data, etc.) and individual entries that reference non-portable scopes, producing a clean baseline that can be applied to any target tenant via the standard Apply Snapshot flow. A preview step shows exactly which resource types and entries are included or stripped, and why.
+- **Audit Log search** — client-side filter on the Audit Log page matches across all visible fields (product, operation, action, status, resource name/type, error message, and details). The pagination footer shows the matching entry count when a search is active.
+
+### Fixed
+
+- **Clone Config — VPN credentials incorrectly pushed without full clone** — `static_ip`, `vpn_credential`, `gre_tunnel`, and `sublocation` are now classified as Full Clone-only types. The standard clone path (without "Full Clone" checked) no longer attempts to push these types.
+- **Clone Config — masked PSK causes push failure** — when a full clone is performed and the source PSK is masked (`*****`), the push service now generates a random 20-character alphanumeric placeholder PSK, creates the credential with that placeholder, and surfaces a post-push warning so the operator can update the PSK manually in the target tenant.
+- **Clone Config — redundant target tenant import on apply** — the preview step already imports the target tenant; proceeding to apply was triggering a second import unnecessarily. The delta apply path now skips the redundant import, reducing apply time by one full ZIA import round-trip.
+- **Template preview — silent system rule strips surfaced as warnings** — Zscaler default/catch-all rules (order < 0) that exist in every tenant were being counted as user-visible strip warnings when creating a template. These are now stripped silently; only user-created rules dropped for portability reasons appear in the preview warnings.
+- **Template — URL categories incorrectly stripped** — built-in URL categories are required in the template so the push service can build source→target ID remaps for rule payloads. All URL categories (built-in and custom) are now retained in the template; built-ins are matched by name in the target and skipped if they already exist.
+- **`deploy.sh` — local file modifications abort git update** — the deploy script now uses `git reset --hard origin/<branch>` instead of `git pull`, avoiding conflicts when locally modified files (e.g. `docker-compose.yml`, `deploy.sh` itself) are present on the host. A `docker-compose.yml` customization dialog was also added: when the local file differs from upstream, the operator is prompted to keep their local version or use the upstream one; the local copy is moved aside before the reset and restored afterward.
+
+---
+
 ## [2.1.2] - 2026-05-01
 
 ### Added

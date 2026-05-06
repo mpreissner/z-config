@@ -66,7 +66,7 @@ _compose_diff() {
         read -r -p "Choice [1/2, default 1]: " _dc_choice
         if [[ "${_dc_choice:-1}" == "2" ]]; then
             DC_BACKUP="$(mktemp)"
-            cp "$dc_file" "$DC_BACKUP"
+            mv "$dc_file" "$DC_BACKUP"
             echo "Local docker-compose.yml saved; will be restored after pull."
         fi
     else
@@ -93,7 +93,7 @@ if [[ -f "$SCRIPT_DIR/.git/config" ]] || git -C "$SCRIPT_DIR" rev-parse --git-di
     git fetch origin
     _compose_diff "$BRANCH"
     git checkout "$BRANCH"
-    git pull origin "$BRANCH"
+    git reset --hard "origin/$BRANCH"
     _restore_compose
 else
     REPO_DIR="$SCRIPT_DIR/zs-config"
@@ -103,7 +103,7 @@ else
         git fetch origin
         _compose_diff "$BRANCH"
         git checkout "$BRANCH"
-        git pull origin "$BRANCH"
+        git reset --hard "origin/$BRANCH"
         _restore_compose
     else
         echo "Cloning $REPO_URL into $REPO_DIR..."

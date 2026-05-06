@@ -9,20 +9,48 @@ const PAGE_SIZE = 25;
 
 export default function AuditPage() {
   const [page, setPage] = useState(0);
+  const [search, setSearch] = useState("");
 
   const { data: entries, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["audit", { limit: 500 }],
     queryFn: () => fetchAuditLog({ limit: 500 }),
   });
 
-  const totalPages = entries ? Math.ceil(entries.length / PAGE_SIZE) : 0;
-  const pageEntries = entries
-    ? entries.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const filtered = entries
+    ? (() => {
+        const q = search.trim().toLowerCase();
+        if (!q) return entries;
+        return entries.filter((e) => {
+          const details =
+            e.details != null
+              ? typeof e.details === "object"
+                ? JSON.stringify(e.details)
+                : String(e.details)
+              : "";
+          return [
+            e.product,
+            e.operation,
+            e.action,
+            e.status,
+            e.resource_name,
+            e.resource_type,
+            e.error_message,
+            details,
+          ]
+            .filter(Boolean)
+            .some((f) => f!.toLowerCase().includes(q));
+        });
+      })()
+    : [];
+
+  const totalPages = filtered ? Math.ceil(filtered.length / PAGE_SIZE) : 0;
+  const pageEntries = filtered
+    ? filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
     : [];
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-semibold text-gray-900">Audit Log</h1>
         <button
           onClick={() => { setPage(0); refetch(); }}
@@ -40,6 +68,16 @@ export default function AuditPage() {
             <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         </button>
+      </div>
+
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="Search audit log..."
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+          className="w-full max-w-sm rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        />
       </div>
 
       {isLoading && <LoadingSpinner />}
@@ -73,7 +111,7 @@ export default function AuditPage() {
                       colSpan={7}
                       className="py-8 text-center text-gray-500"
                     >
-                      No audit entries.
+                      {search.trim() ? "No matching entries." : "No audit entries."}
                     </td>
                   </tr>
                 )}
@@ -122,6 +160,7 @@ export default function AuditPage() {
             <div className="mt-4 flex items-center justify-between text-sm text-gray-500">
               <span>
                 Page {page + 1} of {totalPages}
+                {search.trim() && ` (${filtered.length} matching)`}
               </span>
               <div className="flex gap-2">
                 <button

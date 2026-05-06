@@ -322,7 +322,8 @@ def import_zia(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
     from api.jobs import store
 
-    check_tenant_access(tenant_id, user)
+    if user.role != "admin":
+        check_tenant_access(tenant_id, user)
     client, tenant_name = _get_import_client(tenant_id)
     job_id = store.create()
 
@@ -374,7 +375,8 @@ def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
     from lib.zpa_client import ZPAClient
     from services.config_service import decrypt_secret
 
-    check_tenant_access(tenant_id, user)
+    if user.role != "admin":
+        check_tenant_access(tenant_id, user)
     with get_session() as session:
         t = session.query(TenantConfig).filter_by(id=tenant_id, is_active=True).first()
         if not t:
@@ -438,6 +440,7 @@ class ApplySnapshotRequest(BaseModel):
     source_tenant_id: int
     snapshot_id: int
     wipe_mode: bool = False
+    full_clone: bool = False
 
 
 @router.post("/{tenant_id}/snapshots/preview", status_code=202)
@@ -537,13 +540,43 @@ def apply_snapshot(
         if not snap:
             raise HTTPException(status_code=404, detail="Snapshot not found")
         snap_name = snap.name
-        snap_resources = snap.snapshot["resources"]
+        snap_resources = dict(snap.snapshot["resources"])
+
+    # For Full Clone: fetch a live source client to pull clone resource types
+    source_client = None
+    if req.full_clone:
+        source_client, _ = _get_import_client(req.source_tenant_id)
 
     client, tenant_name = _get_import_client(tenant_id)
     job_id = store.create()
 
     def run():
-        service = ZIAPushService(client, tenant_id=tenant_id)
+        service = ZIAPushService(client, tenant_id=tenant_id, full_clone=req.full_clone)
+
+        # If Full Clone: fetch live clone resources from source tenant and merge
+        # into the baseline resources dict in memory (does not modify the DB snapshot).
+        clone_resources: dict = {}
+        if req.full_clone and source_client:
+            from services.zia_import_service import ZIAImportService
+            src_import_svc = ZIAImportService(source_client, tenant_id=req.source_tenant_id)
+
+            def on_clone_fetch_progress(resource_type: str, done: int, total: int):
+                store.append(job_id, {
+                    "type": "progress", "phase": "clone_fetch",
+                    "resource_type": resource_type, "done": done, "total": total,
+                })
+
+            clone_resources = src_import_svc.run_clone_resources(
+                progress_callback=on_clone_fetch_progress
+            )
+            # Merge clone resource types into snap_resources for Full Clone push
+            # (clone_resources values are {"id": ..., "name": ..., "raw_config": ...} dicts
+            #  from run_clone_resources — snap_resources expects the same shape)
+            for rtype, entries in clone_resources.items():
+                # run_clone_resources returns {"id": str, "name": str, "raw_config": dict}
+                # which matches the snapshot resource shape used by classify_baseline
+                snap_resources[rtype] = entries
+
         baseline = {"product": "ZIA", "resources": snap_resources}
 
         wipe_done = [0]
@@ -593,7 +626,43 @@ def apply_snapshot(
 
         try:
             try:
-                if req.wipe_mode:
+                if req.full_clone:
+                    # Full Clone path — wipe FC types then push FC types + baseline
+                    fc_wipe_records, fc_push_records = service.run_full_clone(
+                        clone_resources=clone_resources,
+                        wipe=req.wipe_mode,
+                        wipe_progress_callback=on_wipe_progress,
+                        import_progress_callback=on_import_progress,
+                        push_progress_callback=on_push_progress,
+                    )
+                    # After FC push: run the standard baseline push for portable types
+                    if req.wipe_mode:
+                        wipe_records_bl, push_records_bl = service.apply_baseline(
+                            baseline,
+                            wipe=req.wipe_mode,
+                            wipe_progress_callback=on_wipe_progress,
+                            import_progress_callback=on_import_progress,
+                            push_progress_callback=on_push_progress,
+                            stop_fn=stop_fn,
+                        )
+                        wipe_records = fc_wipe_records + wipe_records_bl
+                    else:
+                        wipe_records_bl = []
+                        dry_run = service.classify_baseline(
+                            baseline, import_progress_callback=on_import_progress
+                        )
+                        push_records_bl = service.push_classified(
+                            dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
+                        )
+                        wipe_records = fc_wipe_records
+                    push_records = fc_push_records + push_records_bl
+                    wipe_failed_items = [
+                        {"resource_type": r.resource_type, "name": r.name,
+                         "reason": r.status[len("failed:"):]}
+                        for r in wipe_records if r.is_failed
+                    ]
+                    wiped = sum(1 for r in wipe_records if r.is_deleted)
+                elif req.wipe_mode:
                     wipe_records, push_records = service.apply_baseline(
                         baseline,
                         wipe_progress_callback=on_wipe_progress,
@@ -610,7 +679,11 @@ def apply_snapshot(
                     wipe_records = []
                     wipe_failed_items = []
                     wiped = 0
-                    dry_run = service.classify_baseline(baseline, import_progress_callback=on_import_progress)
+                    dry_run = service.classify_baseline(
+                        baseline,
+                        import_progress_callback=on_import_progress,
+                        skip_import=True,
+                    )
                     push_records = service.push_classified(
                         dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                     )
@@ -652,6 +725,10 @@ def apply_snapshot(
             total_failed = len(failed_items)
             status = "SUCCESS" if total_failed == 0 else "PARTIAL"
 
+            _mode = ("full_clone_wipe" if req.full_clone and req.wipe_mode
+                     else "full_clone" if req.full_clone
+                     else "wipe" if req.wipe_mode
+                     else "delta")
             _write_audit([dict(
                 tenant_id=tenant_id,
                 product="ZIA",
@@ -663,7 +740,7 @@ def apply_snapshot(
                 details={
                     "source_tenant_id": req.source_tenant_id,
                     "snapshot_name": snap_name,
-                    "mode": "wipe" if req.wipe_mode else "delta",
+                    "mode": _mode,
                     "wiped": wiped,
                     "created": created,
                     "updated": updated,
@@ -675,7 +752,7 @@ def apply_snapshot(
             store.complete(job_id, {
                 "status": status,
                 "snapshot_name": snap_name,
-                "mode": "wipe" if req.wipe_mode else "delta",
+                "mode": _mode,
                 "wiped": wiped,
                 "created": created,
                 "updated": updated,
@@ -699,3 +776,13 @@ def apply_snapshot(
 
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id}
+
+
+# ---------------------------------------------------------------------------
+# Template apply — spec section 9.2: POST /api/v1/tenants/{tenant_id}/templates/apply
+# ---------------------------------------------------------------------------
+
+from api.routers.templates import apply_template_to_tenant  # noqa: E402
+router.post("/{tenant_id}/templates/apply", status_code=202, tags=["Templates"])(
+    apply_template_to_tenant
+)

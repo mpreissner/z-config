@@ -3526,11 +3526,12 @@ function ImportProductModal({
   );
 }
 
-// ── Apply Snapshot panel ───────────────────────────────────────────────────────
+// ── Clone Config panel ────────────────────────────────────────────────────────
 
-function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
+function CloneConfigPanel({ tenant }: { tenant: Tenant }) {
   const [sourceTenantId, setSourceTenantId] = useState<number | "">("");
   const [snapshotId, setSnapshotId] = useState<number | "">("");
+  const [fullClone, setFullClone] = useState(false);
   const [mutErr, setMutErr] = useState<string | null>(null);
 
   // SSE job IDs
@@ -3554,14 +3555,14 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
 
   const previewMut = useMutation({
     mutationFn: () =>
-      previewApplySnapshot(tenant.id, sourceTenantId as number, snapshotId as number),
+      previewApplySnapshot(tenant.id, sourceTenantId as number, snapshotId as number, fullClone),
     onSuccess: (data) => { setPreviewJobId(data.job_id); setMutErr(null); },
     onError: (e: Error) => setMutErr(e.message),
   });
 
   const applyMut = useMutation({
     mutationFn: (wipeMode: boolean) =>
-      applySnapshot(tenant.id, sourceTenantId as number, snapshotId as number, wipeMode),
+      applySnapshot(tenant.id, sourceTenantId as number, snapshotId as number, wipeMode, fullClone),
     onSuccess: (data) => { setApplyJobId(data.job_id); setMutErr(null); },
     onError: (e: Error) => setMutErr(e.message),
   });
@@ -3591,6 +3592,7 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
     setApplyJobId(null);
     setMutErr(null);
     setSnapshotId("");
+    setFullClone(false);
   }
 
   const sortedTenants = allTenants
@@ -3614,7 +3616,7 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
             <p className="text-xs mt-1">Any changes already pushed to ZIA remain in effect.</p>
           )}
         </div>
-        <button onClick={reset} className="text-xs text-zs-600 hover:underline">Apply another snapshot</button>
+        <button onClick={reset} className="text-xs text-zs-600 hover:underline">Clone again</button>
       </div>
     );
   }
@@ -3627,10 +3629,14 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
         <div className={`p-3 rounded-md text-sm ${ok ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"}`}>
           <p className="font-medium">
             {applyResult.status} — Snapshot &ldquo;{applyResult.snapshot_name}&rdquo; applied
-            <span className="ml-2 font-normal text-xs opacity-70">({applyResult.mode === "wipe" ? "Wipe & Push" : "Delta Push"})</span>
+            <span className="ml-2 font-normal text-xs opacity-70">({
+              applyResult.mode === "full_clone_wipe" ? "Full Clone · Wipe & Push" :
+              applyResult.mode === "full_clone" ? "Full Clone · Delta Push" :
+              applyResult.mode === "wipe" ? "Wipe & Push" : "Delta Push"
+            })</span>
           </p>
           <p className="text-xs mt-1">
-            {applyResult.mode === "wipe" && applyResult.wiped > 0 && `${applyResult.wiped} wiped · `}
+            {(applyResult.mode === "wipe" || applyResult.mode === "full_clone_wipe") && applyResult.wiped > 0 && `${applyResult.wiped} wiped · `}
             {applyResult.created} created · {applyResult.updated} updated
             {applyResult.failed > 0 && ` · ${applyResult.failed} failed`}
           </p>
@@ -3686,7 +3692,7 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
           onClick={() => { reset(); }}
           className="text-xs text-zs-600 hover:underline"
         >
-          Apply another snapshot
+          Clone again
         </button>
       </div>
     );
@@ -3762,6 +3768,24 @@ function ApplySnapshotPanel({ tenant }: { tenant: Tenant }) {
           </select>
         </div>
       </div>
+
+      {/* Full Clone toggle */}
+      <label className="flex items-start gap-2 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={fullClone}
+          onChange={(e) => { setFullClone(e.target.checked); setPreviewJobId(null); setMutErr(null); }}
+          disabled={!sourceTenantId || !snapshotId}
+          className="mt-0.5"
+        />
+        <div>
+          <span className="text-sm font-medium text-gray-800">Full Clone</span>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Also copies tenant-specific resources (static IPs, VPN credentials, GRE tunnels, locations, sublocations) live from the source tenant.
+            VPN credential pre-shared keys cannot be copied — manual action will be required in the target tenant.
+          </p>
+        </div>
+      </label>
 
       {err && <p className="text-xs text-red-600">{err}</p>}
 
@@ -4069,9 +4093,9 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
         </Accordion>
       </SectionGroup>
 
-      {/* Apply Snapshot */}
-      <SectionGroup title="Apply Snapshot from Other Tenant" isOpen={!!groups.applySnapshot} onToggle={() => toggleGroup("applySnapshot")}>
-        <ApplySnapshotPanel tenant={tenant} />
+      {/* Clone Config */}
+      <SectionGroup title="Clone Config from Another Tenant" isOpen={!!groups.applySnapshot} onToggle={() => toggleGroup("applySnapshot")}>
+        <CloneConfigPanel tenant={tenant} />
       </SectionGroup>
     </div>
   );

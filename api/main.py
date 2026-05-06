@@ -41,6 +41,7 @@ from api.routers import auth as auth_router, tenants as tenants_router, admin as
 from api.routers import zcc as zcc_router, zdx as zdx_router, zid as zid_router
 from api.routers import jobs as jobs_router
 from api.routers import scheduled_tasks as scheduled_tasks_router
+from api.routers import templates as templates_router
 from api.auth_utils import decode_token
 from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
@@ -173,6 +174,7 @@ app.include_router(tenants_router.router)
 app.include_router(admin_router.router)
 app.include_router(jobs_router.router)
 app.include_router(scheduled_tasks_router.router)
+app.include_router(templates_router.router)
 
 
 @app.get("/health", tags=["System"])

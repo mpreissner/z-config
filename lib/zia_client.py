@@ -1305,6 +1305,138 @@ class ZIAClient:
         _unwrap(result, resp, err)
 
     # ------------------------------------------------------------------
+    # Traffic Forwarding — Static IPs, VPN Credentials, GRE Tunnels
+    # ------------------------------------------------------------------
+
+    def list_static_ips(self) -> List[Dict]:
+        if self._govcloud:
+            data = self.zia_get("/zia/api/v1/staticIP")
+            return data if isinstance(data, list) else []
+        result, resp, err = self._sdk.zia.traffic_static_ip.list_static_ips()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_static_ip(self, config: Dict) -> Dict:
+        if self._govcloud:
+            return self.zia_post("/zia/api/v1/staticIP", config)
+        result, resp, err = self._sdk.zia.traffic_static_ip.add_static_ip(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_static_ip(self, ip_id: str, config: Dict) -> Dict:
+        if self._govcloud:
+            return self.zia_put(f"/zia/api/v1/staticIP/{ip_id}", config)
+        result, resp, err = self._sdk.zia.traffic_static_ip.update_static_ip(int(ip_id), **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_static_ip(self, ip_id: str) -> None:
+        if self._govcloud:
+            self.zia_delete(f"/zia/api/v1/staticIP/{ip_id}")
+            return
+        result, resp, err = self._sdk.zia.traffic_static_ip.delete_static_ip(int(ip_id))
+        _unwrap(result, resp, err)
+
+    def list_vpn_credentials(self) -> List[Dict]:
+        if self._govcloud:
+            data = self.zia_get("/zia/api/v1/vpnCredentials")
+            return data if isinstance(data, list) else []
+        result, resp, err = self._sdk.zia.traffic_vpn_credentials.list_vpn_credentials()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_vpn_credential(self, config: Dict) -> Dict:
+        if self._govcloud:
+            return self.zia_post("/zia/api/v1/vpnCredentials", config)
+        result, resp, err = self._sdk.zia.traffic_vpn_credentials.add_vpn_credential(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_vpn_credential(self, cred_id: str, config: Dict) -> Dict:
+        if self._govcloud:
+            return self.zia_put(f"/zia/api/v1/vpnCredentials/{cred_id}", config)
+        result, resp, err = self._sdk.zia.traffic_vpn_credentials.update_vpn_credential(
+            int(cred_id), **config
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_vpn_credential(self, cred_id: str) -> None:
+        if self._govcloud:
+            self.zia_delete(f"/zia/api/v1/vpnCredentials/{cred_id}")
+            return
+        result, resp, err = self._sdk.zia.traffic_vpn_credentials.delete_vpn_credential(
+            int(cred_id)
+        )
+        _unwrap(result, resp, err)
+
+    def list_gre_tunnels(self) -> List[Dict]:
+        if self._govcloud:
+            data = self.zia_get("/zia/api/v1/greTunnels")
+            return data if isinstance(data, list) else []
+        result, resp, err = self._sdk.zia.gre_tunnel.list_gre_tunnels()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_gre_tunnel(self, config: Dict) -> Dict:
+        # Use direct HTTP for both paths — the SDK gre_tunnel.add_gre_tunnel signature
+        # may not follow the standard (result, resp, err) tuple pattern.
+        return self.zia_post("/zia/api/v1/greTunnels", config)
+
+    def update_gre_tunnel(self, tunnel_id: str, config: Dict) -> Dict:
+        return self.zia_put(f"/zia/api/v1/greTunnels/{tunnel_id}", config)
+
+    def delete_gre_tunnel(self, tunnel_id: str) -> None:
+        if self._govcloud:
+            self.zia_delete(f"/zia/api/v1/greTunnels/{tunnel_id}")
+            return
+        result, resp, err = self._sdk.zia.gre_tunnel.delete_gre_tunnel(int(tunnel_id))
+        _unwrap(result, resp, err)
+
+    def list_sublocations(self) -> List[Dict]:
+        """Fetch all sublocations by iterating parent locations.
+
+        The ZIA API has no top-level sublocations endpoint — only per-parent:
+        GET /zia/api/v1/locations/{id}/sublocations
+
+        This method iterates all parent locations and returns a flat list with
+        parentId preserved in each record.
+        """
+        parents = self.list_locations()
+        result: List[Dict] = []
+        for loc in parents:
+            parent_id = loc.get("id")
+            if not parent_id:
+                continue
+            try:
+                if self._govcloud:
+                    subs = self.zia_get(f"/zia/api/v1/locations/{parent_id}/sublocations")
+                    subs = subs if isinstance(subs, list) else []
+                else:
+                    items, resp, err = self._sdk.zia.locations.list_sub_locations(parent_id)
+                    subs = _to_dicts(_unwrap(items, resp, err))
+                for s in subs:
+                    s["parentId"] = parent_id
+                    result.append(s)
+            except Exception:
+                # Sub-location fetch failure for one parent should not abort the whole import
+                continue
+        return result
+
+    def create_sublocation(self, config: Dict) -> Dict:
+        """Create a sublocation — uses the same endpoint as create_location, with parentId in payload."""
+        if self._govcloud:
+            return self.zia_post("/zia/api/v1/locations", config)
+        result, resp, err = self._sdk.zia.locations.add_location(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_sublocation(self, sub_id: str, config: Dict) -> Dict:
+        if self._govcloud:
+            return self.zia_put(f"/zia/api/v1/locations/{sub_id}", config)
+        result, resp, err = self._sdk.zia.locations.update_location(sub_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_sublocation(self, sub_id: str) -> None:
+        if self._govcloud:
+            self.zia_delete(f"/zia/api/v1/locations/{sub_id}")
+            return
+        result, resp, err = self._sdk.zia.locations.delete_location(sub_id)
+        _unwrap(result, resp, err)
+
+    # ------------------------------------------------------------------
     # Advanced URL Filter & Cloud App Settings (singleton)
     # ------------------------------------------------------------------
 

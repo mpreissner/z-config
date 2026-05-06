@@ -193,6 +193,48 @@ class RestorePoint(Base):
         return f"<RestorePoint product={self.product!r} name={self.name!r} resources={self.resource_count}>"
 
 
+class ZIATemplate(Base):
+    """A sanitised ZIA configuration snapshot suitable for application to any tenant.
+
+    Created from a RestorePoint by stripping tenant-specific resource types
+    (locations, VPN credentials, static IPs, GRE tunnels, PAC files, and all
+    reference-only types).  Templates are global — not tied to a single tenant.
+
+    source_tenant_id and source_snapshot_id are nullable provenance references:
+    they survive intact even if the source tenant or snapshot is later deleted
+    (at which point they become NULL via ON DELETE SET NULL).
+
+    snapshot stores the stripped resource blob in the same shape as
+    RestorePoint.snapshot["resources"]:
+        {"resource_type": [{"id": ..., "name": ..., "raw_config": {...}}, ...]}
+
+    stripped_types records which resource types were present in the source
+    snapshot but removed during template creation.
+    """
+
+    __tablename__ = "zia_templates"
+
+    id                 = Column(Integer, primary_key=True)
+    name               = Column(String(255), unique=True, nullable=False)
+    description        = Column(Text, nullable=True)
+    source_tenant_id   = Column(Integer, ForeignKey("tenant_configs.id", ondelete="SET NULL"),
+                                nullable=True)
+    source_snapshot_id = Column(Integer, ForeignKey("restore_points.id", ondelete="SET NULL"),
+                                nullable=True)
+    created_at         = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                                nullable=False)
+    resource_count     = Column(Integer, default=0, nullable=False)
+    stripped_types     = Column(JSON, nullable=False)   # list of resource_type strings
+    snapshot           = Column(JSON, nullable=False)   # {"resource_type": [{...}, ...]}
+
+    source_tenant   = relationship("TenantConfig", foreign_keys=[source_tenant_id])
+    source_snapshot = relationship("RestorePoint",  foreign_keys=[source_snapshot_id])
+
+    def __repr__(self) -> str:
+        return f"<ZIATemplate name={self.name!r} resources={self.resource_count}>"
+
+
 class ZIAResource(Base):
     """Snapshot of a ZIA resource fetched from the API.
 

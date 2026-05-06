@@ -6,6 +6,7 @@ import TenantsPage from "./pages/TenantsPage";
 import TenantWorkspacePage from "./pages/TenantWorkspacePage";
 import AuditPage from "./pages/AuditPage";
 import ScheduledTasksPage from "./pages/ScheduledTasksPage";
+import TemplatesPage from "./pages/TemplatesPage";
 import LoginPage from "./pages/LoginPage";
 import ChangePasswordPage from "./pages/ChangePasswordPage";
 import MfaEnrollModal from "./components/MfaEnrollModal";
@@ -56,6 +57,7 @@ export default function App() {
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/audit" element={<AuditPage />} />
                   <Route path="/scheduled-tasks" element={<ScheduledTasksPage />} />
+                  <Route path="/templates" element={<TemplatesPage />} />
                   {/* Tenant workspace routes */}
                   <Route path="/tenant/:id" element={<Navigate to="zia" replace />} />
                   <Route path="/tenant/:id/zia" element={<TenantWorkspacePage />} />

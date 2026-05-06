@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     libxslt-dev \
     libxmlsec1-dev \
+    libsqlcipher-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 

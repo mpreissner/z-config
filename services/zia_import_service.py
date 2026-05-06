@@ -83,6 +83,12 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("sandbox_rule",                  "list_sandbox_rules"),
     ResourceDef("cloud_app_instance",            "list_cloud_app_instances",
                 id_field="instance_id", name_field="instance_name"),
+    # Full Clone types — imported for DB storage and Full Clone push path.
+    # NOT in PUSH_ORDER or SKIP_TYPES; not touched by baseline push.
+    ResourceDef("static_ip",      "list_static_ips",      id_field="id"),
+    ResourceDef("vpn_credential", "list_vpn_credentials", id_field="id"),
+    ResourceDef("gre_tunnel",     "list_gre_tunnels",     id_field="id"),
+    ResourceDef("sublocation",    "list_sublocations",    id_field="id"),
 ]
 
 
@@ -316,6 +322,46 @@ class ZIAImportService:
             )
 
         return synced, updated
+
+    def run_clone_resources(
+        self,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> dict:
+        """Fetch Full Clone resource types live from the source client (read-only).
+
+        Returns an in-memory dict {"resource_type": [raw_config_dict, ...]} for
+        the five Full Clone types: location, sublocation, static_ip, vpn_credential,
+        gre_tunnel.  Does NOT write to the database — these are used transiently
+        during a clone operation.
+
+        Args:
+            progress_callback: Called after each type is fetched.
+                Signature: callback(resource_type: str, done: int, total: int)
+        """
+        _CLONE_TYPES = [
+            ("static_ip",      "list_static_ips"),
+            ("vpn_credential", "list_vpn_credentials"),
+            ("gre_tunnel",     "list_gre_tunnels"),
+            ("location",       "list_locations"),
+            ("sublocation",    "list_sublocations"),
+        ]
+        total = len(_CLONE_TYPES)
+        result: dict = {}
+
+        for idx, (rtype, method_name) in enumerate(_CLONE_TYPES, start=1):
+            try:
+                method = getattr(self.client, method_name)
+                records = method() or []
+                result[rtype] = [
+                    {"id": str(r.get("id", "")), "name": r.get("name", ""), "raw_config": r}
+                    for r in records if isinstance(r, dict)
+                ]
+            except Exception:
+                result[rtype] = []
+            if progress_callback:
+                progress_callback(rtype, idx, total)
+
+        return result
 
     def _mark_deleted(self, resource_types: Optional[List[str]], run_start: datetime) -> int:
         deleted = 0

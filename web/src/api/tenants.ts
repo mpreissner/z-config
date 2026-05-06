@@ -104,7 +104,7 @@ export interface ApplySnapshotWarning {
 export interface ApplySnapshotResult {
   status: string;
   snapshot_name: string;
-  mode: "wipe" | "delta";
+  mode: "wipe" | "delta" | "full_clone" | "full_clone_wipe";
   wiped: number;
   created: number;
   updated: number;
@@ -121,10 +121,15 @@ export const previewApplySnapshot = (
   targetTenantId: number,
   sourceTenantId: number,
   snapshotId: number,
+  fullClone = false,
 ): Promise<JobRef> =>
   apiFetch<JobRef>(`/api/v1/tenants/${targetTenantId}/snapshots/preview`, {
     method: "POST",
-    body: JSON.stringify({ source_tenant_id: sourceTenantId, snapshot_id: snapshotId }),
+    body: JSON.stringify({
+      source_tenant_id: sourceTenantId,
+      snapshot_id: snapshotId,
+      full_clone: fullClone,
+    }),
   });
 
 export const applySnapshot = (
@@ -132,8 +137,14 @@ export const applySnapshot = (
   sourceTenantId: number,
   snapshotId: number,
   wipeMode = false,
+  fullClone = false,
 ): Promise<JobRef> =>
   apiFetch<JobRef>(`/api/v1/tenants/${targetTenantId}/snapshots/apply`, {
     method: "POST",
-    body: JSON.stringify({ source_tenant_id: sourceTenantId, snapshot_id: snapshotId, wipe_mode: wipeMode }),
+    body: JSON.stringify({
+      source_tenant_id: sourceTenantId,
+      snapshot_id: snapshotId,
+      wipe_mode: wipeMode,
+      full_clone: fullClone,
+    }),
   });
