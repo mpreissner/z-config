@@ -508,6 +508,22 @@ def import_zcc(tenant_id: int, user: AuthUser = Depends(require_auth)):
     return {"job_id": job_id}
 
 
+@router.delete("/{tenant_id}/import/zcc/disabled-resources", status_code=200)
+def clear_zcc_disabled_resources(tenant_id: int, user: AuthUser = Depends(require_auth)):
+    if user.role != "admin":
+        check_tenant_access(tenant_id, user)
+    from db.database import get_session
+    from db.models import TenantConfig
+
+    with get_session() as session:
+        t = session.get(TenantConfig, tenant_id)
+        if not t:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        previously_disabled = list(t.zcc_disabled_resources or [])
+        t.zcc_disabled_resources = []
+    return {"cleared": previously_disabled}
+
+
 # ── Apply Snapshot ────────────────────────────────────────────────────────────
 
 class ApplySnapshotRequest(BaseModel):

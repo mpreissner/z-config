@@ -74,6 +74,9 @@ export const importZPA = (id: number): Promise<JobRef> =>
 export const importZCC = (id: number): Promise<JobRef> =>
   apiFetch<JobRef>(`/api/v1/tenants/${id}/import/zcc`, { method: "POST" });
 
+export const clearZCCDisabledResources = (id: number): Promise<{ cleared: string[] }> =>
+  apiFetch<{ cleared: string[] }>(`/api/v1/tenants/${id}/import/zcc/disabled-resources`, { method: "DELETE" });
+
 export interface SnapshotDiffItem {
   action: "create" | "update" | "delete";
   resource_type: string;
