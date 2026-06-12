@@ -194,44 +194,147 @@ def _get_scheduler():
 # CRUD
 # ---------------------------------------------------------------------------
 
+def _validate_task_fields(
+    task_type: str,
+    name: str,
+    source_tenant_id: int,
+    target_tenant_id: Optional[int],
+    target_tenant_ids: Optional[List[int]],
+    resource_groups: Optional[List[str]],
+    sync_deletes: bool,
+    sync_mode: str,
+    label_name: Optional[str],
+    label_resource_types: Optional[List[str]],
+    import_products: Optional[List[str]],
+) -> tuple:
+    """Validate task fields and return normalised (resource_groups, target_tenant_id, target_tenant_ids, import_products).
+
+    Raises ValueError on any validation failure.
+    """
+    if task_type not in ("sync", "import"):
+        raise ValueError("task_type must be 'sync' or 'import'.")
+    if not name or not name.strip():
+        raise ValueError("name must be non-empty.")
+
+    if task_type == "sync":
+        # import_products must be absent
+        if import_products:
+            raise ValueError("import_products must be absent for sync tasks.")
+
+        has_single = target_tenant_id is not None
+        has_multi = bool(target_tenant_ids)
+
+        if not has_single and not has_multi:
+            raise ValueError("Provide target_tenant_id (single) or target_tenant_ids (multi).")
+        if has_single and has_multi:
+            raise ValueError("Provide target_tenant_id or target_tenant_ids, not both.")
+
+        if has_multi:
+            # Deduplicate preserving order
+            seen_ids = set()
+            deduped = []
+            for tid in target_tenant_ids:
+                if tid not in seen_ids:
+                    seen_ids.add(tid)
+                    deduped.append(tid)
+            target_tenant_ids = deduped
+
+            for tid in target_tenant_ids:
+                if tid == source_tenant_id:
+                    raise ValueError("target_tenant_ids must not contain source_tenant_id.")
+
+            # Set target_tenant_id to first entry for FK integrity
+            target_tenant_id = target_tenant_ids[0]
+        else:
+            # Single target
+            if target_tenant_id == source_tenant_id:
+                raise ValueError("source_tenant_id and target_tenant_id must differ.")
+            target_tenant_ids = None
+
+        if sync_mode not in ("resource_type", "label"):
+            raise ValueError("sync_mode must be 'resource_type' or 'label'.")
+
+        if sync_mode == "resource_type":
+            if not resource_groups:
+                raise ValueError("resource_groups must be a non-empty list.")
+            for g in resource_groups:
+                if g not in RESOURCE_GROUP_MAP:
+                    raise ValueError(f"Unknown resource group: '{g}'")
+        elif sync_mode == "label":
+            if not label_name or not label_name.strip():
+                raise ValueError("label_name is required when sync_mode is 'label'.")
+            if label_resource_types is not None:
+                for rtype in label_resource_types:
+                    if rtype not in LABEL_SUPPORTED_RESOURCE_TYPES:
+                        raise ValueError(f"Unsupported label resource type: '{rtype}'")
+            resource_groups = resource_groups or []
+
+        return resource_groups, target_tenant_id, target_tenant_ids, None
+
+    else:  # task_type == "import"
+        if target_tenant_id is not None:
+            raise ValueError("target_tenant_id must be absent for import tasks.")
+        if target_tenant_ids:
+            raise ValueError("target_tenant_ids must be absent for import tasks.")
+        if resource_groups:
+            raise ValueError("resource_groups must be absent or empty for import tasks.")
+        if sync_mode not in (None, "resource_type"):
+            raise ValueError("sync_mode must be absent or 'resource_type' for import tasks.")
+        if label_name:
+            raise ValueError("label_name must be absent for import tasks.")
+        if sync_deletes:
+            raise ValueError("sync_deletes must be False for import tasks.")
+
+        if not import_products:
+            raise ValueError("import_products must be a non-empty list for import tasks.")
+
+        valid_products = {"ZIA", "ZPA", "ZCC"}
+        seen_products = set()
+        deduped_products = []
+        for p in import_products:
+            if p not in valid_products:
+                raise ValueError(f"Unknown product: '{p}'. Valid values: ZIA, ZPA, ZCC.")
+            if p not in seen_products:
+                seen_products.add(p)
+                deduped_products.append(p)
+        import_products = deduped_products
+
+        return [], None, None, import_products
+
+
 def create_task(
     name: str,
     source_tenant_id: int,
-    target_tenant_id: int,
-    resource_groups: List[str],
     schedule: str,
+    task_type: str = "sync",
+    target_tenant_id: Optional[int] = None,
+    target_tenant_ids: Optional[List[int]] = None,
+    resource_groups: Optional[List[str]] = None,
     sync_deletes: bool = False,
     enabled: bool = True,
     owner_email: Optional[str] = None,
     sync_mode: str = "resource_type",
     label_name: Optional[str] = None,
     label_resource_types: Optional[List[str]] = None,
+    import_products: Optional[List[str]] = None,
 ) -> ScheduledTask:
     """Create a new scheduled task and register it with the scheduler.
 
     Raises ValueError for validation errors.
     """
-    if source_tenant_id == target_tenant_id:
-        raise ValueError("source_tenant_id and target_tenant_id must differ.")
-
-    if sync_mode not in ("resource_type", "label"):
-        raise ValueError("sync_mode must be 'resource_type' or 'label'.")
-
-    if sync_mode == "resource_type":
-        if not resource_groups:
-            raise ValueError("resource_groups must be a non-empty list.")
-        for g in resource_groups:
-            if g not in RESOURCE_GROUP_MAP:
-                raise ValueError(f"Unknown resource group: '{g}'")
-    elif sync_mode == "label":
-        if not label_name or not label_name.strip():
-            raise ValueError("label_name is required when sync_mode is 'label'.")
-        if label_resource_types is not None:
-            for rtype in label_resource_types:
-                if rtype not in LABEL_SUPPORTED_RESOURCE_TYPES:
-                    raise ValueError(f"Unsupported label resource type: '{rtype}'")
-        # resource_groups may be [] in label mode; store as empty list
-        resource_groups = resource_groups or []
+    norm_groups, norm_target, norm_targets, norm_products = _validate_task_fields(
+        task_type=task_type,
+        name=name,
+        source_tenant_id=source_tenant_id,
+        target_tenant_id=target_tenant_id,
+        target_tenant_ids=target_tenant_ids,
+        resource_groups=resource_groups,
+        sync_deletes=sync_deletes,
+        sync_mode=sync_mode,
+        label_name=label_name,
+        label_resource_types=label_resource_types,
+        import_products=import_products,
+    )
 
     cron_expression = resolve_schedule(schedule)
 
@@ -239,8 +342,8 @@ def create_task(
         task = ScheduledTask(
             name=name,
             source_tenant_id=source_tenant_id,
-            target_tenant_id=target_tenant_id,
-            resource_groups=resource_groups,
+            target_tenant_id=norm_target,
+            resource_groups=norm_groups,
             cron_expression=cron_expression,
             sync_deletes=sync_deletes,
             enabled=enabled,
@@ -248,6 +351,9 @@ def create_task(
             sync_mode=sync_mode,
             label_name=label_name.strip() if label_name else None,
             label_resource_types=label_resource_types or None,
+            task_type=task_type,
+            target_tenant_ids=norm_targets,
+            import_products=norm_products,
         )
         session.add(task)
         session.flush()
@@ -285,7 +391,9 @@ def update_task(
     task_id: int,
     name: Optional[str] = None,
     source_tenant_id: Optional[int] = None,
+    task_type: Optional[str] = None,
     target_tenant_id: Optional[int] = None,
+    target_tenant_ids: Optional[List[int]] = None,
     resource_groups: Optional[List[str]] = None,
     schedule: Optional[str] = None,
     sync_deletes: Optional[bool] = None,
@@ -294,6 +402,7 @@ def update_task(
     sync_mode: Optional[str] = None,
     label_name: Optional[str] = None,
     label_resource_types: Optional[List[str]] = None,
+    import_products: Optional[List[str]] = None,
 ) -> Optional[ScheduledTask]:
     """Update an existing task. Only provided (non-None) fields are changed.
 
@@ -305,63 +414,81 @@ def update_task(
         if task is None:
             return None
 
-        new_source = source_tenant_id if source_tenant_id is not None else task.source_tenant_id
-        new_target = target_tenant_id if target_tenant_id is not None else task.target_tenant_id
-        if new_source == new_target:
-            raise ValueError("source_tenant_id and target_tenant_id must differ.")
+        # Compute effective merged values for full re-validation
+        eff_task_type   = task_type if task_type is not None else (task.task_type or "sync")
+        eff_name        = name if name is not None else task.name
+        eff_source      = source_tenant_id if source_tenant_id is not None else task.source_tenant_id
+        eff_target      = target_tenant_id if target_tenant_id is not None else task.target_tenant_id
+        eff_targets     = target_tenant_ids if target_tenant_ids is not None else (
+            list(task.target_tenant_ids) if task.target_tenant_ids else None
+        )
+        eff_groups      = resource_groups if resource_groups is not None else (
+            list(task.resource_groups) if task.resource_groups else []
+        )
+        eff_sync_deletes = sync_deletes if sync_deletes is not None else task.sync_deletes
+        eff_sync_mode   = sync_mode if sync_mode is not None else (task.sync_mode or "resource_type")
+        eff_label_name  = label_name if label_name is not None else task.label_name
+        eff_label_rtypes = label_resource_types if label_resource_types is not None else (
+            list(task.label_resource_types) if task.label_resource_types else None
+        )
+        eff_products    = import_products if import_products is not None else (
+            list(task.import_products) if task.import_products else None
+        )
 
-        effective_mode = sync_mode if sync_mode is not None else task.sync_mode
+        # When switching from import → sync, clear any stale import products
+        # and vice versa so validation doesn't trip on stale values.
+        if eff_task_type == "sync" and import_products is None:
+            eff_products = None
+        if eff_task_type == "import" and target_tenant_id is None and target_tenant_ids is None:
+            eff_target = None
+            eff_targets = None
 
-        if sync_mode is not None:
-            if sync_mode not in ("resource_type", "label"):
-                raise ValueError("sync_mode must be 'resource_type' or 'label'.")
+        norm_groups, norm_target, norm_targets, norm_products = _validate_task_fields(
+            task_type=eff_task_type,
+            name=eff_name,
+            source_tenant_id=eff_source,
+            target_tenant_id=eff_target,
+            target_tenant_ids=eff_targets,
+            resource_groups=eff_groups,
+            sync_deletes=eff_sync_deletes,
+            sync_mode=eff_sync_mode,
+            label_name=eff_label_name,
+            label_resource_types=eff_label_rtypes,
+            import_products=eff_products,
+        )
 
-        switching_to_resource_type = sync_mode == "resource_type" and task.sync_mode == "label"
-        switching_to_label = sync_mode == "label" and task.sync_mode == "resource_type"
-
-        if effective_mode == "resource_type":
-            if switching_to_resource_type and resource_groups is None:
-                raise ValueError(
-                    "resource_groups is required when switching sync_mode to 'resource_type'."
-                )
-            if resource_groups is not None:
-                if not resource_groups:
-                    raise ValueError("resource_groups must be a non-empty list.")
-                for g in resource_groups:
-                    if g not in RESOURCE_GROUP_MAP:
-                        raise ValueError(f"Unknown resource group: '{g}'")
-                task.resource_groups = resource_groups
-            if switching_to_resource_type:
-                task.label_name = None
-                task.label_resource_types = None
-        elif effective_mode == "label":
-            if switching_to_label:
-                task.resource_groups = []
-            elif resource_groups is not None:
-                task.resource_groups = []
-            if label_name is not None:
-                if not label_name.strip():
-                    raise ValueError("label_name cannot be empty when sync_mode is 'label'.")
-                task.label_name = label_name.strip()
-            if label_resource_types is not None:
-                for rtype in label_resource_types:
-                    if rtype not in LABEL_SUPPORTED_RESOURCE_TYPES:
-                        raise ValueError(f"Unsupported label resource type: '{rtype}'")
-                task.label_resource_types = label_resource_types or None
-
-        if sync_mode is not None:
-            task.sync_mode = sync_mode
+        # Apply all updates
+        task.task_type = eff_task_type
 
         if name is not None:
             task.name = name
         if source_tenant_id is not None:
             task.source_tenant_id = source_tenant_id
-        if target_tenant_id is not None:
-            task.target_tenant_id = target_tenant_id
+
+        task.target_tenant_id = norm_target
+        task.target_tenant_ids = norm_targets
+        task.import_products = norm_products
+
+        if eff_task_type == "sync":
+            task.resource_groups = norm_groups
+            task.sync_mode = eff_sync_mode
+            if eff_sync_mode == "label":
+                task.label_name = eff_label_name.strip() if eff_label_name else None
+                task.label_resource_types = eff_label_rtypes or None
+            else:
+                task.label_name = None
+                task.label_resource_types = None
+            task.sync_deletes = eff_sync_deletes
+        else:
+            # import task — sync fields are not meaningful
+            task.resource_groups = []
+            task.sync_mode = "resource_type"
+            task.label_name = None
+            task.label_resource_types = None
+            task.sync_deletes = False
+
         if schedule is not None:
             task.cron_expression = resolve_schedule(schedule)
-        if sync_deletes is not None:
-            task.sync_deletes = sync_deletes
         if enabled is not None:
             task.enabled = enabled
         if owner_email is not None:
@@ -493,22 +620,19 @@ def _job_id(task_id: int) -> str:
 def _register_job(task: ScheduledTask) -> None:
     """Add or replace the APScheduler job for a task."""
     from apscheduler.triggers.cron import CronTrigger
-    from services.scheduled_sync_engine import run_sync_task
+    from services.scheduled_sync_engine import run_task
 
     jid = _job_id(task.id)
     trigger = CronTrigger.from_crontab(task.cron_expression)
 
-    if _scheduler.get_job(jid):
-        _scheduler.reschedule_job(jid, trigger=trigger)
-    else:
-        _scheduler.add_job(
-            run_sync_task,
-            trigger=trigger,
-            id=jid,
-            args=[task.id],
-            replace_existing=True,
-            max_instances=1,
-        )
+    _scheduler.add_job(
+        run_task,
+        trigger=trigger,
+        id=jid,
+        args=[task.id],
+        replace_existing=True,
+        max_instances=1,
+    )
 
 
 def _remove_job(task_id: int) -> None:
@@ -576,5 +700,8 @@ def _copy_task(task: ScheduledTask) -> ScheduledTask:
         sync_mode=task.sync_mode,
         label_name=task.label_name,
         label_resource_types=list(task.label_resource_types) if task.label_resource_types else None,
+        task_type=task.task_type or "sync",
+        target_tenant_ids=list(task.target_tenant_ids) if task.target_tenant_ids else None,
+        import_products=list(task.import_products) if task.import_products else None,
     )
     return copy

@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.3.3] - 2026-06-12
+
+### Added
+
+- **Scheduled import tasks** — new `task_type = "import"` scheduled task runs ZIA, ZPA, and/or ZCC imports against a single tenant on a cron schedule. Supports multi-product selection; no diff, push, or activation is performed. Useful for keeping the local DB cache current without any mutation risk.
+- **One-to-many sync fan-out** — sync tasks now support `target_tenant_ids` (a list of target tenants) in addition to the existing single-target mode. Each target runs the full import→diff→push pipeline independently with its own ordering context. Run history records one row per target plus a parent rollup row with aggregated status and resource counts.
+- **Scheduled tasks web UI** — the web interface now fully supports v2 scheduled tasks. A task-type toggle (Sync / Import) appears at the top of the create form. Import tasks expose a product checkbox group (ZIA / ZPA / ZCC). Sync tasks retain the existing single-target mode and add a fan-out toggle with a chip-based multi-tenant picker. The Monitoring tab shows a Target column and expands fan-out parent rows to reveal per-target child run status inline.
+- **LP traffic split in the ZCC traffic profile visualizer** — when a Listening Proxy (LP) forwarding profile is detected, the SVG diagram renders a split-path layout: web traffic routes through the LP node to ZIA while non-web traffic bypasses LP and goes directly local. The LP node is highlighted in amber and the two outbound paths are labeled.
+- **PAC bypass parsing in the ZCC traffic profile visualizer** — the traffic profile visualizer now fetches and parses the tenant's active PAC file. Detected `DIRECT` rules are categorized as RFC 1918 ranges, domains, or other and surfaced in the Local/Direct node detail panel. The parsing uses heuristic pattern matching on the PAC source and covers common variable-assignment and `if`-condition forms.
+- **Traffic simulator in the ZCC traffic profile visualizer** — a destination + port input below the SVG diagram evaluates the active forwarding and bypass rules for a given address and returns an outcome (ZIA, ZPA Private, or Local/Direct) with a per-rule explanation list. Results update in real time as the network context (On/VPN/Off) is changed.
+
+### Changed
+
+- **ZCC traffic profile visualizer — detail tab strip** — Tunnel Routes, ZPA, and Port Bypasses tabs removed from the tab strip below the diagram. These detail panels are still reachable by clicking the corresponding node directly in the SVG diagram; the tab buttons were redundant given that the diagram itself drives panel selection.
+
+### Fixed
+
+- **PAC parser — RFC 1918 false positives** — the byte-range regex that identifies private address ranges now uses word boundaries (`\b`) to avoid matching numbers like `192` or `10` inside unrelated strings. The RFC 1918 normalization map was also hoisted out of the per-match loop.
+- **ZCC traffic profile visualizer — Local node active state** — the Local/Direct node was incorrectly highlighted as active whenever PAC bypasses existed, even under Z-Tunnel 2.0 where all traffic is tunneled. The `localActive` flag now depends only on process bypasses and tunnel exclude routes, not PAC bypass count.
+- **Scheduled tasks — edit form defaults** — `task_type` is now treated as optional on existing task records to maintain compatibility with pre-migration rows. The import product selection in edit mode correctly defaults to all three products when the stored value is absent rather than defaulting to an empty selection.
+
+---
+
 ## [3.3.2] - 2026-06-05
 
 ### Fixed

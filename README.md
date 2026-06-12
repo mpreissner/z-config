@@ -7,22 +7,16 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.3.2
+## What's New — v3.3.3
 
-> **v3.3.2 is the current release.** See the [changelog](CHANGELOG.md) for full details.
+> **v3.3.3 is the current release.** See the [changelog](CHANGELOG.md) for full details.
 
-- **ZPA import fix** — ZPA import now completes successfully with `zscaler-sdk-python` ≥ 1.9.25, which returns non-serializable `Version` objects for certain resource fields. These are now coerced to strings before DB storage.
-
-**v3.3.1** — Deploy script fix:
-
-- **Deploy script fix** — re-running `deploy.sh` or `deploy.ps1` on an existing installation no longer re-prompts for network binding or SSL. Both are skipped automatically when a prior setup is detected.
-
-**v3.3.0** — ZCC traffic profile visualizer, snapshot/restore, and update notifications:
-
-- **ZCC traffic profile visualizer** — interactive SVG pipeline diagram showing how a ZCC app profile routes traffic across On/VPN/Off network contexts, with conditional arrows for active destinations and an app-profile bypass line.
-- **ZCC snapshot and restore** — capture named restore points of the full ZCC configuration; diff and selectively restore with dry-run preview.
-- **ZPA app panel** — selecting the ZPA destination populates a private application table; collapses to 2nd-level domain summary for large deployments.
-- **Update notifications** — Admin → Settings → Updates adds a daily PyPI check with SMTP email alerts when a new version is available.
+- **Scheduled import tasks** — new Import task type runs ZIA/ZPA/ZCC imports on a cron schedule without any diff or push. Keeps the local DB cache current with no mutation risk.
+- **One-to-many sync fan-out** — sync tasks now support a list of target tenants. Each runs the full import→diff→push pipeline independently with its own run history row.
+- **Scheduled tasks web UI** — full v2 support in the browser: task-type toggle (Sync / Import), fan-out multi-tenant picker, import product checkboxes, and expandable per-target run history in the Monitoring tab.
+- **LP traffic split in the ZCC traffic profile visualizer** — Listening Proxy forwarding profiles now render a split-path diagram (web traffic → LP → ZIA; non-web → Local/Direct).
+- **PAC bypass parsing** — the traffic profile visualizer fetches and parses the active PAC file, surfacing `DIRECT` rules categorized as RFC 1918 ranges, domains, or other in the Local/Direct detail panel.
+- **Traffic simulator** — destination + port input evaluates the active forwarding and bypass rules and returns an outcome with a per-rule explanation list, updating live as network context changes.
 
 ---
 
@@ -114,7 +108,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven cross-tenant sync by resource type or label)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals

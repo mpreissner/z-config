@@ -285,6 +285,14 @@ def _migrate(engine) -> None:
             stripped_types     JSON NOT NULL,
             snapshot           JSON NOT NULL
         )""",
+        # Scheduled tasks v2 — task_type discriminator, multi-target sync, import tasks
+        "ALTER TABLE scheduled_tasks ADD COLUMN task_type VARCHAR(16) NOT NULL DEFAULT 'sync'",
+        # SQLite cannot DROP NOT NULL via ALTER; making nullable is a DB-level no-op
+        # for SQLite — the column stores NULL after this migration runs.
+        "ALTER TABLE scheduled_tasks ADD COLUMN target_tenant_ids JSON",
+        "ALTER TABLE scheduled_tasks ADD COLUMN import_products JSON",
+        "ALTER TABLE task_run_history ADD COLUMN parent_run_id INTEGER REFERENCES task_run_history(id) ON DELETE SET NULL",
+        "ALTER TABLE task_run_history ADD COLUMN target_tenant_id INTEGER",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

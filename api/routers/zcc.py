@@ -79,11 +79,21 @@ def _fetch_pac_bypasses(pac_url: str, timeout: int = 4) -> List[Dict]:
     # Strategy: find any JS variable assigned a regex literal that contains
     # RFC1918-like prefixes, then confirm that variable.test() is called near DIRECT.
     # e.g.: var privateIP = /^(0|10|127|192\.168|...)\.[0-9.]+$/;
+    _rfc_map = {
+        "10": "10.0.0.0/8",
+        "127": "127.0.0.0/8",
+        r"192\.168": "192.168.0.0/16",
+        r"172\.1[6789]": "172.16.0.0/12",
+        r"172\.2[0-9]": "172.16.0.0/12",
+        r"172\.3[01]": "172.16.0.0/12",
+        r"169\.254": "169.254.0.0/16",
+        r"192\.88\.99": "192.88.99.0/24",
+    }
     var_regex_re = re.compile(r"var\s+(\w+)\s*=\s*/([^/\n]{10,})/[gimy]*\s*;")
     for m in var_regex_re.finditer(content_nc):
         varname, regex_body = m.group(1), m.group(2)
         # Only consider regex literals that look like IP prefix filters
-        if not re.search(r"192|172|10|127|169", regex_body):
+        if not re.search(r"\b(192|172|10|127|169)\b", regex_body):
             continue
         # Confirm varname.test(...) appears near a DIRECT return
         test_re = re.compile(rf"\b{re.escape(varname)}\.test\s*\(")
@@ -92,16 +102,6 @@ def _fetch_pac_bypasses(pac_url: str, timeout: int = 4) -> List[Dict]:
             if "DIRECT" not in ctx:
                 continue
             # Extract alternation parts from the regex body to map to CIDRs
-            _rfc_map = {
-                "10": "10.0.0.0/8",
-                "127": "127.0.0.0/8",
-                r"192\.168": "192.168.0.0/16",
-                r"172\.1[6789]": "172.16.0.0/12",
-                r"172\.2[0-9]": "172.16.0.0/12",
-                r"172\.3[01]": "172.16.0.0/12",
-                r"169\.254": "169.254.0.0/16",
-                r"192\.88\.99": "192.88.99.0/24",
-            }
             found: List[str] = []
             cidr_seen_rfc: set = set()
             for pat, cidr in _rfc_map.items():

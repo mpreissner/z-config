@@ -12,6 +12,7 @@ import {
   fetchTaskRuns,
   fetchTaskRunDetail,
   ScheduledTask,
+  TaskRunHistory,
   CreateScheduledTaskRequest,
 } from "../api/scheduledTasks";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -59,6 +60,8 @@ const INTERVAL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "12h", label: "Every 12 hours" },
   { value: "24h", label: "Every 24 hours" },
 ];
+
+const IMPORT_PRODUCTS = ["ZIA", "ZPA", "ZCC"];
 
 function groupLabel(key: string): string {
   return RESOURCE_GROUPS.find((g) => g.key === key)?.label ?? key;
@@ -143,13 +146,34 @@ interface TaskFormModalProps {
 function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) {
   const { data: tenants } = useQuery({ queryKey: ["tenants"], queryFn: fetchTenants });
 
+  // Task type — read-only in edit mode
+  const [taskType, setTaskType] = useState<"sync" | "import">(
+    initial?.task_type ?? "sync"
+  );
+
   const [name, setName] = useState(initial?.name ?? "");
   const [sourceTenantId, setSourceTenantId] = useState<number | "">(
     initial?.source_tenant_id ?? ""
   );
+
+  // Derive initial target mode from initial data
+  const initTargetMode = (): "single" | "fanout" => {
+    if (initial?.target_tenant_ids && initial.target_tenant_ids.length > 0) return "fanout";
+    return "single";
+  };
+  const [targetMode, setTargetMode] = useState<"single" | "fanout">(initTargetMode());
+
+  // Single target
   const [targetTenantId, setTargetTenantId] = useState<number | "">(
     initial?.target_tenant_id ?? ""
   );
+
+  // Fan-out targets
+  const [selectedTargetIds, setSelectedTargetIds] = useState<number[]>(
+    initial?.target_tenant_ids ?? []
+  );
+  const [fanoutSelectValue, setFanoutSelectValue] = useState<string>("");
+
   const [selectedGroups, setSelectedGroups] = useState<string[]>(
     initial?.resource_groups ?? []
   );
@@ -166,6 +190,12 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
   const [selectedLabelTypes, setSelectedLabelTypes] = useState<string[]>(
     initial?.label_resource_types ?? LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => t.key)
   );
+
+  // Import products — empty by default on create, pre-populated in edit
+  const [selectedProducts, setSelectedProducts] = useState<string[]>(
+    mode === "edit" ? (initial?.import_products ?? ["ZIA", "ZPA", "ZCC"]) : []
+  );
+
   const [error, setError] = useState<string | null>(null);
 
   const queryClient = useQueryClient();
@@ -197,51 +227,108 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
     );
   }
 
+  function toggleProduct(p: string) {
+    setSelectedProducts((prev) =>
+      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+    );
+  }
+
+  function handleSourceChange(val: string) {
+    const newId = val ? Number(val) : "";
+    setSourceTenantId(newId);
+    // Remove new source from fan-out targets if present
+    if (newId !== "") {
+      setSelectedTargetIds((prev) => prev.filter((id) => id !== newId));
+    }
+  }
+
+  function addFanoutTarget(tenantId: number) {
+    setSelectedTargetIds((prev) =>
+      prev.includes(tenantId) ? prev : [...prev, tenantId]
+    );
+    setFanoutSelectValue("");
+  }
+
+  function removeFanoutTarget(tenantId: number) {
+    setSelectedTargetIds((prev) => prev.filter((id) => id !== tenantId));
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
 
     if (!name.trim()) { setError("Name is required."); return; }
     if (sourceTenantId === "") { setError("Source tenant is required."); return; }
-    if (targetTenantId === "") { setError("Target tenant is required."); return; }
-    if (sourceTenantId === targetTenantId) {
-      setError("Source and target tenants must be different.");
-      return;
-    }
-    if (syncMode === "resource_type" && selectedGroups.length === 0) {
-      setError("Select at least one resource group.");
-      return;
-    }
-    if (syncMode === "label" && !labelName.trim()) {
-      setError("Label name is required.");
-      return;
-    }
-    if (syncMode === "label" && selectedLabelTypes.length === 0) {
-      setError("Select at least one resource type for label sync.");
-      return;
-    }
 
     const schedule = scheduleType === "interval" ? intervalValue : cronValue.trim();
     if (!schedule) { setError("Schedule is required."); return; }
 
+    if (taskType === "import") {
+      if (selectedProducts.length === 0) {
+        setError("Select at least one product.");
+        return;
+      }
+    } else {
+      // sync validations
+      if (targetMode === "single") {
+        if (targetTenantId === "") { setError("Target tenant is required."); return; }
+        if (sourceTenantId === targetTenantId) {
+          setError("Source and target tenants must be different.");
+          return;
+        }
+      } else {
+        // fanout
+        if (selectedTargetIds.length === 0) {
+          setError("Select at least one target tenant.");
+          return;
+        }
+        if (selectedTargetIds.includes(sourceTenantId as number)) {
+          setError("Source tenant cannot also be a target.");
+          return;
+        }
+      }
+
+      if (syncMode === "resource_type" && selectedGroups.length === 0) {
+        setError("Select at least one resource group.");
+        return;
+      }
+      if (syncMode === "label" && !labelName.trim()) {
+        setError("Label name is required.");
+        return;
+      }
+      if (syncMode === "label" && selectedLabelTypes.length === 0) {
+        setError("Select at least one resource type for label sync.");
+        return;
+      }
+    }
+
     const data: CreateScheduledTaskRequest = {
+      task_type: taskType,
       name: name.trim(),
       source_tenant_id: sourceTenantId as number,
-      target_tenant_id: targetTenantId as number,
-      resource_groups: syncMode === "resource_type" ? selectedGroups : [],
       schedule,
-      sync_deletes: syncDeletes,
       enabled,
       owner_email: ownerEmail.trim() || null,
-      sync_mode: syncMode,
-      label_name: syncMode === "label" ? labelName.trim() : null,
-      label_resource_types:
-        syncMode === "label"
-          ? (selectedLabelTypes.length === LABEL_SUPPORTED_RESOURCE_TYPES.length
-              ? null
-              : selectedLabelTypes)
-          : null,
     };
+
+    if (taskType === "import") {
+      data.import_products = selectedProducts;
+    } else {
+      // sync
+      if (targetMode === "single") {
+        data.target_tenant_id = targetTenantId as number;
+      } else {
+        data.target_tenant_ids = selectedTargetIds;
+      }
+      data.resource_groups = syncMode === "resource_type" ? selectedGroups : [];
+      data.sync_deletes = syncDeletes;
+      data.sync_mode = syncMode;
+      data.label_name = syncMode === "label" ? labelName.trim() : null;
+      data.label_resource_types =
+        syncMode === "label"
+          ? (selectedLabelTypes.length === LABEL_SUPPORTED_RESOURCE_TYPES.length ? null : selectedLabelTypes)
+          : null;
+    }
 
     if (mode === "create") {
       createMut.mutate(data);
@@ -249,6 +336,9 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
       updateMut.mutate({ id: initial.id, data });
     }
   }
+
+  const tenantNameById: Record<number, string> = {};
+  (tenants ?? []).forEach((t) => { tenantNameById[t.id] = t.name; });
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-40 flex items-center justify-center p-4">
@@ -270,6 +360,40 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4 overflow-y-auto max-h-[70vh]">
           {error && <ErrorMessage message={error} />}
 
+          {/* Task Type */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Task Type</label>
+            <div className={`flex gap-6 ${mode === "edit" ? "cursor-not-allowed" : ""}`}>
+              <label className={`flex items-center gap-2 text-sm ${mode === "edit" ? "text-gray-400 cursor-not-allowed" : "cursor-pointer"}`}>
+                <input
+                  type="radio"
+                  name="taskType"
+                  value="sync"
+                  checked={taskType === "sync"}
+                  onChange={() => { if (mode === "create") setTaskType("sync"); }}
+                  disabled={mode === "edit"}
+                  className="text-zs-500"
+                />
+                <span>Sync</span>
+              </label>
+              <label className={`flex items-center gap-2 text-sm ${mode === "edit" ? "text-gray-400 cursor-not-allowed" : "cursor-pointer"}`}>
+                <input
+                  type="radio"
+                  name="taskType"
+                  value="import"
+                  checked={taskType === "import"}
+                  onChange={() => { if (mode === "create") setTaskType("import"); }}
+                  disabled={mode === "edit"}
+                  className="text-zs-500"
+                />
+                <span>Import</span>
+              </label>
+            </div>
+            {mode === "edit" && (
+              <p className="mt-1 text-xs text-gray-400">Task type cannot be changed after creation.</p>
+            )}
+          </div>
+
           {/* Name */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
@@ -282,163 +406,269 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
             />
           </div>
 
-          {/* Source / Target Tenant */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Source Tenant</label>
-              <select
-                value={sourceTenantId}
-                onChange={(e) => setSourceTenantId(e.target.value ? Number(e.target.value) : "")}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
-              >
-                <option value="">Select tenant...</option>
-                {(tenants ?? []).map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Target Tenant</label>
-              <select
-                value={targetTenantId}
-                onChange={(e) => setTargetTenantId(e.target.value ? Number(e.target.value) : "")}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
-              >
-                <option value="">Select tenant...</option>
-                {(tenants ?? []).map((t) => (
-                  <option key={t.id} value={t.id} disabled={t.id === sourceTenantId}>
-                    {t.name}{t.id === sourceTenantId ? " (same as source)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          {/* Sync Mode */}
+          {/* Source Tenant */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Sync Mode</label>
-            <div className="flex gap-6">
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input
-                  type="radio"
-                  name="syncMode"
-                  value="resource_type"
-                  checked={syncMode === "resource_type"}
-                  onChange={() => { setSyncMode("resource_type"); }}
-                  className="text-zs-500"
-                />
-                <span>By Resource Type</span>
-              </label>
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input
-                  type="radio"
-                  name="syncMode"
-                  value="label"
-                  checked={syncMode === "label"}
-                  onChange={() => { setSyncMode("label"); setSelectedGroups([]); }}
-                  className="text-zs-500"
-                />
-                <span>By Label</span>
-              </label>
-            </div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {taskType === "import" ? "Tenant" : "Source Tenant"}
+            </label>
+            <select
+              value={sourceTenantId}
+              onChange={(e) => handleSourceChange(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+            >
+              <option value="">Select tenant...</option>
+              {(tenants ?? []).map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
           </div>
 
-          {/* Resource Groups — resource_type mode only */}
-          {syncMode === "resource_type" && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Resource Groups</label>
-              <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
-                {RESOURCE_GROUPS.map((g) => (
-                  <label key={g.key} className="flex items-center gap-2 text-sm cursor-pointer">
+          {/* Target section — sync tasks only */}
+          {taskType === "sync" && (
+            <>
+              {/* Target Mode toggle */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Target Mode</label>
+                <div className="flex gap-6">
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
                     <input
-                      type="checkbox"
-                      checked={selectedGroups.includes(g.key)}
-                      onChange={() => toggleGroup(g.key)}
-                      className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                      type="radio"
+                      name="targetMode"
+                      value="single"
+                      checked={targetMode === "single"}
+                      onChange={() => setTargetMode("single")}
+                      className="text-zs-500"
                     />
-                    <span className="text-gray-700">{g.label}</span>
-                    {g.note && (
-                      <span
-                        className="relative group/tooltip"
-                        onClick={(e) => e.preventDefault()}
-                      >
-                        <span className="text-gray-400 text-xs cursor-help select-none">ⓘ</span>
-                        <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-56 rounded bg-gray-800 px-2 py-1.5 text-xs text-white opacity-0 group-hover/tooltip:opacity-100 transition-opacity z-50 whitespace-normal text-center shadow-lg">
-                          {g.note}
+                    <span>Single tenant</span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="targetMode"
+                      value="fanout"
+                      checked={targetMode === "fanout"}
+                      onChange={() => setTargetMode("fanout")}
+                      className="text-zs-500"
+                    />
+                    <span>Multiple tenants (fan-out)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Single target */}
+              {targetMode === "single" && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Target Tenant</label>
+                  <select
+                    value={targetTenantId}
+                    onChange={(e) => setTargetTenantId(e.target.value ? Number(e.target.value) : "")}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+                  >
+                    <option value="">Select tenant...</option>
+                    {(tenants ?? []).map((t) => (
+                      <option key={t.id} value={t.id} disabled={t.id === sourceTenantId}>
+                        {t.name}{t.id === sourceTenantId ? " (same as source)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Fan-out targets */}
+              {targetMode === "fanout" && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Target Tenants</label>
+                  <select
+                    value={fanoutSelectValue}
+                    onChange={(e) => {
+                      if (e.target.value) addFanoutTarget(Number(e.target.value));
+                    }}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+                  >
+                    <option value="">Add target tenant...</option>
+                    {(tenants ?? [])
+                      .filter((t) => t.id !== sourceTenantId)
+                      .map((t) => (
+                        <option
+                          key={t.id}
+                          value={t.id}
+                          disabled={selectedTargetIds.includes(t.id)}
+                        >
+                          {t.name}
+                        </option>
+                      ))}
+                  </select>
+                  {selectedTargetIds.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {selectedTargetIds.map((id) => (
+                        <span
+                          key={id}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full"
+                        >
+                          {tenantNameById[id] ?? String(id)}
+                          <button
+                            type="button"
+                            onClick={() => removeFanoutTarget(id)}
+                            className="text-blue-600 hover:text-blue-800 leading-none"
+                          >
+                            &times;
+                          </button>
                         </span>
-                      </span>
-                    )}
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-          {/* Label mode panel */}
-          {syncMode === "label" && (
-            <div className="space-y-4">
-              {/* Label name input */}
+              {/* Sync Mode */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Label Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={labelName}
-                  onChange={(e) => setLabelName(e.target.value)}
-                  placeholder="e.g. test123"
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
-                />
-                <p className="mt-1 text-xs text-gray-500">
-                  Case-sensitive. Only resources with this label will be synced.
-                </p>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Sync Mode</label>
+                <div className="flex gap-6">
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="syncMode"
+                      value="resource_type"
+                      checked={syncMode === "resource_type"}
+                      onChange={() => { setSyncMode("resource_type"); }}
+                      className="text-zs-500"
+                    />
+                    <span>By Resource Type</span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="syncMode"
+                      value="label"
+                      checked={syncMode === "label"}
+                      onChange={() => { setSyncMode("label"); setSelectedGroups([]); }}
+                      className="text-zs-500"
+                    />
+                    <span>By Label</span>
+                  </label>
+                </div>
               </div>
 
-              {/* Label resource type multi-select */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-medium text-gray-700">
-                    Resource Types to Sync
-                  </label>
-                  <div className="flex gap-3 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedLabelTypes(LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => t.key))}
-                      className="text-zs-600 hover:underline"
-                    >
-                      Select all
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedLabelTypes([])}
-                      className="text-gray-500 hover:underline"
-                    >
-                      Clear
-                    </button>
+              {/* Resource Groups — resource_type mode only */}
+              {syncMode === "resource_type" && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Resource Groups</label>
+                  <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
+                    {RESOURCE_GROUPS.map((g) => (
+                      <label key={g.key} className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedGroups.includes(g.key)}
+                          onChange={() => toggleGroup(g.key)}
+                          className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                        />
+                        <span className="text-gray-700">{g.label}</span>
+                        {g.note && (
+                          <span
+                            className="relative group/tooltip"
+                            onClick={(e) => e.preventDefault()}
+                          >
+                            <span className="text-gray-400 text-xs cursor-help select-none">ⓘ</span>
+                            <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-56 rounded bg-gray-800 px-2 py-1.5 text-xs text-white opacity-0 group-hover/tooltip:opacity-100 transition-opacity z-50 whitespace-normal text-center shadow-lg">
+                              {g.note}
+                            </span>
+                          </span>
+                        )}
+                      </label>
+                    ))}
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
-                  {LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => (
-                    <label key={t.key} className="flex items-center gap-2 text-sm cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={selectedLabelTypes.includes(t.key)}
-                        onChange={() =>
-                          setSelectedLabelTypes((prev) =>
-                            prev.includes(t.key)
-                              ? prev.filter((k) => k !== t.key)
-                              : [...prev, t.key]
-                          )
-                        }
-                        className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
-                      />
-                      <span className="text-gray-700">{t.label}</span>
+              )}
+
+              {/* Label mode panel */}
+              {syncMode === "label" && (
+                <div className="space-y-4">
+                  {/* Label name input */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Label Name <span className="text-red-500">*</span>
                     </label>
-                  ))}
+                    <input
+                      type="text"
+                      value={labelName}
+                      onChange={(e) => setLabelName(e.target.value)}
+                      placeholder="e.g. test123"
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      Case-sensitive. Only resources with this label will be synced.
+                    </p>
+                  </div>
+
+                  {/* Label resource type multi-select */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-sm font-medium text-gray-700">
+                        Resource Types to Sync
+                      </label>
+                      <div className="flex gap-3 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedLabelTypes(LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => t.key))}
+                          className="text-zs-600 hover:underline"
+                        >
+                          Select all
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedLabelTypes([])}
+                          className="text-gray-500 hover:underline"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 border border-gray-200 rounded-md p-3 bg-gray-50">
+                      {LABEL_SUPPORTED_RESOURCE_TYPES.map((t) => (
+                        <label key={t.key} className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedLabelTypes.includes(t.key)}
+                            onChange={() =>
+                              setSelectedLabelTypes((prev) =>
+                                prev.includes(t.key)
+                                  ? prev.filter((k) => k !== t.key)
+                                  : [...prev, t.key]
+                              )
+                            }
+                            className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                          />
+                          <span className="text-gray-700">{t.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Uncheck to exclude specific rule types from this sync. All are synced by default.
+                    </p>
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-gray-500">
-                  Uncheck to exclude specific rule types from this sync. All are synced by default.
-                </p>
+              )}
+            </>
+          )}
+
+          {/* Import Products — import tasks only */}
+          {taskType === "import" && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Import Products <span className="text-red-500">*</span>
+              </label>
+              <div className="flex gap-6">
+                {IMPORT_PRODUCTS.map((p) => (
+                  <label key={p} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedProducts.includes(p)}
+                      onChange={() => toggleProduct(p)}
+                      className="rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                    />
+                    <span className="text-gray-700">{p}</span>
+                  </label>
+                ))}
               </div>
             </div>
           )}
@@ -488,24 +718,26 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
             </div>
           </div>
 
-          {/* Sync Deletes */}
-          <div>
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={syncDeletes}
-                onChange={(e) => setSyncDeletes(e.target.checked)}
-                className="mt-0.5 rounded border-gray-300 text-zs-500 focus:ring-zs-500"
-              />
-              <div>
-                <span className="text-sm font-medium text-gray-700">Sync Deletes</span>
-                <p className="text-xs text-amber-600 mt-0.5">
-                  Warning: removes resources from target that are absent from source. This is
-                  irreversible once the target is activated.
-                </p>
-              </div>
-            </label>
-          </div>
+          {/* Sync Deletes — sync tasks only */}
+          {taskType === "sync" && (
+            <div>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={syncDeletes}
+                  onChange={(e) => setSyncDeletes(e.target.checked)}
+                  className="mt-0.5 rounded border-gray-300 text-zs-500 focus:ring-zs-500"
+                />
+                <div>
+                  <span className="text-sm font-medium text-gray-700">Sync Deletes</span>
+                  <p className="text-xs text-amber-600 mt-0.5">
+                    Warning: removes resources from target that are absent from source. This is
+                    irreversible once the target is activated.
+                  </p>
+                </div>
+              </label>
+            </div>
+          )}
 
           {/* Enabled */}
           <div>
@@ -563,10 +795,11 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
 interface RunDetailPanelProps {
   taskId: number;
   runId: number;
+  tenantNameById: Record<number, string>;
   onClose: () => void;
 }
 
-function RunDetailPanel({ taskId, runId, onClose }: RunDetailPanelProps) {
+function RunDetailPanel({ taskId, runId, tenantNameById, onClose }: RunDetailPanelProps) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["scheduled-task-run-detail", taskId, runId],
     queryFn: () => fetchTaskRunDetail(taskId, runId),
@@ -588,7 +821,7 @@ function RunDetailPanel({ taskId, runId, onClose }: RunDetailPanelProps) {
           {error && <ErrorMessage message="Failed to load run detail." />}
           {data && (
             <>
-              <div className="grid grid-cols-3 gap-4 mb-4 text-sm">
+              <div className="grid grid-cols-4 gap-4 mb-4 text-sm">
                 <div>
                   <p className="text-gray-500">Started</p>
                   <p className="font-medium">{formatTimestamp(data.started_at)}</p>
@@ -600,6 +833,14 @@ function RunDetailPanel({ taskId, runId, onClose }: RunDetailPanelProps) {
                 <div>
                   <p className="text-gray-500">Status</p>
                   <RunStatusBadge status={data.status} />
+                </div>
+                <div>
+                  <p className="text-gray-500">Target</p>
+                  <p className="font-medium">
+                    {data.target_tenant_id != null
+                      ? (tenantNameById[data.target_tenant_id] ?? String(data.target_tenant_id))
+                      : "—"}
+                  </p>
                 </div>
                 <div>
                   <p className="text-gray-500">Resources Synced</p>
@@ -696,6 +937,50 @@ function TaskListTab({ onOpenMonitoring }: TaskListTabProps) {
     },
   });
 
+  function renderTargetCell(task: ScheduledTask) {
+    const effectiveType = task.task_type ?? "sync";
+    if (effectiveType === "import") {
+      return <span className="text-gray-400 text-xs italic">—</span>;
+    }
+    if (task.target_tenant_ids && task.target_tenant_ids.length > 1) {
+      return <span className="text-gray-700 text-xs">{task.target_tenant_ids.length} tenants</span>;
+    }
+    return <span>{task.target_tenant_name ?? ""}</span>;
+  }
+
+  function renderScopeCell(task: ScheduledTask) {
+    const effectiveType = task.task_type ?? "sync";
+    if (effectiveType === "import") {
+      return (
+        <span className="text-xs">
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 text-xs font-medium mr-1">
+            Import
+          </span>
+          {task.import_products?.join(", ") ?? ""}
+        </span>
+      );
+    }
+    return (
+      <span className="text-xs">
+        {task.sync_mode === "label" ? (
+          <>
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-xs font-medium mr-1">
+              Label
+            </span>
+            {task.label_name}
+            {task.label_resource_types && (
+              <span className="text-gray-400 ml-1">
+                ({task.label_resource_types.length} types)
+              </span>
+            )}
+          </>
+        ) : (
+          task.resource_groups.map((g) => groupLabel(g)).join(", ")
+        )}
+      </span>
+    );
+  }
+
   return (
     <div>
       {triggerMsg && (
@@ -762,26 +1047,8 @@ function TaskListTab({ onOpenMonitoring }: TaskListTabProps) {
                 <tr key={task.id} className="hover:bg-gray-50">
                   <td className="py-3 px-3 font-medium text-gray-900">{task.name}</td>
                   <td className="py-3 px-3 text-gray-600">{task.source_tenant_name}</td>
-                  <td className="py-3 px-3 text-gray-600">{task.target_tenant_name}</td>
-                  <td className="py-3 px-3 text-gray-600 max-w-xs">
-                    <span className="text-xs">
-                      {task.sync_mode === "label" ? (
-                        <>
-                          <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-xs font-medium mr-1">
-                            Label
-                          </span>
-                          {task.label_name}
-                          {task.label_resource_types && (
-                            <span className="text-gray-400 ml-1">
-                              ({task.label_resource_types.length} types)
-                            </span>
-                          )}
-                        </>
-                      ) : (
-                        task.resource_groups.map((g) => groupLabel(g)).join(", ")
-                      )}
-                    </span>
-                  </td>
+                  <td className="py-3 px-3 text-gray-600">{renderTargetCell(task)}</td>
+                  <td className="py-3 px-3 text-gray-600 max-w-xs">{renderScopeCell(task)}</td>
                   <td className="py-3 px-3 text-gray-600 whitespace-nowrap">
                     {humanCron(task.cron_expression)}
                   </td>
@@ -917,6 +1184,7 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
   const { data: tasks } = useQuery({ queryKey: ["scheduled-tasks"], queryFn: fetchScheduledTasks });
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(initialTaskId ?? null);
   const [detailRun, setDetailRun] = useState<{ taskId: number; runId: number } | null>(null);
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<number>>(new Set());
 
   const { data: runs, isLoading, refetch, isFetching } = useQuery({
     queryKey: ["scheduled-task-runs", selectedTaskId],
@@ -924,6 +1192,143 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
     enabled: selectedTaskId !== null,
     refetchInterval: selectedTaskId !== null ? 30_000 : false,
   });
+
+  // Derive the selected task object for name lookups
+  const selectedTask = (tasks ?? []).find((t) => t.id === selectedTaskId) ?? null;
+
+  // Build tenant name lookup from the selected task's fan-out data
+  const tenantNameById: Record<number, string> = {};
+  if (selectedTask?.target_tenant_ids && selectedTask?.target_tenant_names) {
+    selectedTask.target_tenant_ids.forEach((id, i) => {
+      tenantNameById[id] = selectedTask.target_tenant_names![i] ?? String(id);
+    });
+  }
+  // Also handle single-target case
+  if (selectedTask?.target_tenant_id && selectedTask?.target_tenant_name) {
+    tenantNameById[selectedTask.target_tenant_id] = selectedTask.target_tenant_name;
+  }
+
+  // Group runs into parents and children
+  const parentRuns: TaskRunHistory[] = [];
+  const childrenByParentId: Record<number, TaskRunHistory[]> = {};
+
+  (runs ?? []).forEach((r) => {
+    if (r.is_child && r.parent_run_id != null) {
+      if (!childrenByParentId[r.parent_run_id]) childrenByParentId[r.parent_run_id] = [];
+      childrenByParentId[r.parent_run_id].push(r);
+    } else {
+      parentRuns.push(r);
+    }
+  });
+
+  function toggleExpanded(runId: number) {
+    setExpandedRunIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+  }
+
+  const effectiveTaskType = selectedTask?.task_type ?? "sync";
+
+  function renderRunRows(): React.ReactNode[] {
+    const rows: React.ReactNode[] = [];
+    parentRuns.forEach((run) => {
+      const children = childrenByParentId[run.id] ?? [];
+      const hasChildren = children.length > 0;
+      const isExpanded = expandedRunIds.has(run.id);
+
+      // Determine target column for parent
+      let targetDisplay: React.ReactNode = "—";
+      if (effectiveTaskType !== "import") {
+        if (hasChildren) {
+          targetDisplay = <span className="text-gray-500 text-xs">(all targets)</span>;
+        } else if (run.target_tenant_id != null) {
+          targetDisplay = tenantNameById[run.target_tenant_id] ?? String(run.target_tenant_id);
+        }
+      }
+
+      rows.push(
+        <tr key={`run-${run.id}`} className="hover:bg-gray-50">
+          <td className="py-3 px-3 text-gray-700">
+            <div className="flex items-center gap-1">
+              {hasChildren && (
+                <button
+                  type="button"
+                  onClick={() => toggleExpanded(run.id)}
+                  className="p-0.5 rounded text-gray-400 hover:text-gray-600"
+                  title={isExpanded ? "Collapse" : "Expand"}
+                >
+                  <svg
+                    className={`h-3 w-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+              )}
+              {formatTimestamp(run.started_at)}
+            </div>
+          </td>
+          <td className="py-3 px-3 text-gray-600">{formatDuration(run.duration_seconds)}</td>
+          <td className="py-3 px-3">
+            <RunStatusBadge status={run.status} />
+          </td>
+          <td className="py-3 px-3 text-gray-600 text-sm">{targetDisplay}</td>
+          <td className="py-3 px-3 text-gray-700">{run.resources_synced}</td>
+          <td className="py-3 px-3">
+            {run.error_count > 0 ? (
+              <button
+                onClick={() => setDetailRun({ taskId: selectedTaskId!, runId: run.id })}
+                className="text-red-600 hover:text-red-800 hover:underline text-sm font-medium"
+              >
+                {run.error_count} {run.error_count === 1 ? "error" : "errors"}
+              </button>
+            ) : (
+              <span className="text-gray-400 text-sm">None</span>
+            )}
+          </td>
+        </tr>
+      );
+
+      // Child rows when expanded
+      if (isExpanded && hasChildren) {
+        children.forEach((child) => {
+          const childTarget = child.target_tenant_id != null
+            ? (tenantNameById[child.target_tenant_id] ?? String(child.target_tenant_id))
+            : "—";
+          rows.push(
+            <tr key={`run-child-${child.id}`} className="bg-gray-50 border-l-2 border-blue-200">
+              <td className="py-2 px-3 pl-8 text-gray-600 text-xs">{formatTimestamp(child.started_at)}</td>
+              <td className="py-2 px-3 text-gray-600 text-xs">{formatDuration(child.duration_seconds)}</td>
+              <td className="py-2 px-3">
+                <RunStatusBadge status={child.status} />
+              </td>
+              <td className="py-2 px-3 text-gray-600 text-xs">{childTarget}</td>
+              <td className="py-2 px-3 text-gray-600 text-xs">{child.resources_synced}</td>
+              <td className="py-2 px-3">
+                {child.error_count > 0 ? (
+                  <button
+                    onClick={() => setDetailRun({ taskId: selectedTaskId!, runId: child.id })}
+                    className="text-red-600 hover:text-red-800 hover:underline text-xs font-medium"
+                  >
+                    {child.error_count} {child.error_count === 1 ? "error" : "errors"}
+                  </button>
+                ) : (
+                  <span className="text-gray-400 text-xs">None</span>
+                )}
+              </td>
+            </tr>
+          );
+        });
+      }
+    });
+    return rows;
+  }
 
   return (
     <div>
@@ -951,12 +1356,17 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
         <label className="block text-sm font-medium text-gray-700 mb-1">Select Task</label>
         <select
           value={selectedTaskId ?? ""}
-          onChange={(e) => setSelectedTaskId(e.target.value ? Number(e.target.value) : null)}
+          onChange={(e) => {
+            setSelectedTaskId(e.target.value ? Number(e.target.value) : null);
+            setExpandedRunIds(new Set());
+          }}
           className="w-full max-w-md border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
         >
           <option value="">Choose a task...</option>
           {(tasks ?? []).map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
+            <option key={t.id} value={t.id}>
+              {t.name} ({(t.task_type ?? "sync") === "import" ? "Import" : "Sync"})
+            </option>
           ))}
         </select>
       </div>
@@ -972,7 +1382,7 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
           <table className="min-w-full divide-y divide-gray-300 text-sm">
             <thead className="bg-gray-50">
               <tr>
-                {["Started", "Duration", "Status", "Resources Synced", "Errors"].map((h) => (
+                {["Started", "Duration", "Status", "Target", "Resources Synced", "Errors"].map((h) => (
                   <th
                     key={h}
                     className="py-3 px-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide"
@@ -983,37 +1393,14 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 bg-white">
-              {runs.length === 0 && (
+              {parentRuns.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-8 text-center text-gray-500">
+                  <td colSpan={6} className="py-8 text-center text-gray-500">
                     No run history for this task.
                   </td>
                 </tr>
               )}
-              {runs.map((run) => (
-                <tr key={run.id} className="hover:bg-gray-50">
-                  <td className="py-3 px-3 text-gray-700">{formatTimestamp(run.started_at)}</td>
-                  <td className="py-3 px-3 text-gray-600">{formatDuration(run.duration_seconds)}</td>
-                  <td className="py-3 px-3">
-                    <RunStatusBadge status={run.status} />
-                  </td>
-                  <td className="py-3 px-3 text-gray-700">{run.resources_synced}</td>
-                  <td className="py-3 px-3">
-                    {run.error_count > 0 ? (
-                      <button
-                        onClick={() =>
-                          setDetailRun({ taskId: selectedTaskId, runId: run.id })
-                        }
-                        className="text-red-600 hover:text-red-800 hover:underline text-sm font-medium"
-                      >
-                        {run.error_count} {run.error_count === 1 ? "error" : "errors"}
-                      </button>
-                    ) : (
-                      <span className="text-gray-400 text-sm">None</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {renderRunRows()}
             </tbody>
           </table>
         </div>
@@ -1023,6 +1410,7 @@ function MonitoringTab({ initialTaskId }: MonitoringTabProps) {
         <RunDetailPanel
           taskId={detailRun.taskId}
           runId={detailRun.runId}
+          tenantNameById={tenantNameById}
           onClose={() => setDetailRun(null)}
         />
       )}

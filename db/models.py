@@ -447,12 +447,15 @@ class UserTenantEntitlement(Base):
 
 
 class ScheduledTask(Base):
-    """A recurring cross-tenant ZIA config sync job.
+    """A recurring cross-tenant ZIA config sync or import job.
 
     resource_groups is a list of group key strings that expand to the
     constituent resource_type values synced by the engine.
     cron_expression is always stored as a 5-field cron string regardless of
     whether the user entered a preset interval or a custom expression.
+
+    task_type discriminates between "sync" (cross-tenant ZIA diff/push) and
+    "import" (pull one or more products into the local DB cache).
     """
 
     __tablename__ = "scheduled_tasks"
@@ -460,7 +463,7 @@ class ScheduledTask(Base):
     id               = Column(Integer, primary_key=True)
     name             = Column(String(255), nullable=False, unique=True)
     source_tenant_id = Column(Integer, ForeignKey("tenant_configs.id"), nullable=False)
-    target_tenant_id = Column(Integer, ForeignKey("tenant_configs.id"), nullable=False)
+    target_tenant_id = Column(Integer, ForeignKey("tenant_configs.id"), nullable=True)
     resource_groups      = Column(JSON, nullable=False)
     sync_mode            = Column(String(16),  nullable=False, default="resource_type")
     label_name           = Column(String(255), nullable=True)
@@ -472,6 +475,10 @@ class ScheduledTask(Base):
     created_at       = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at       = Column(DateTime, default=datetime.utcnow,
                              onupdate=datetime.utcnow, nullable=False)
+    # v2 columns
+    task_type         = Column(String(16),  nullable=False, default="sync")
+    target_tenant_ids = Column(JSON, nullable=True)
+    import_products   = Column(JSON, nullable=True)
 
     source_tenant = relationship("TenantConfig", foreign_keys=[source_tenant_id])
     target_tenant = relationship("TenantConfig", foreign_keys=[target_tenant_id])
@@ -498,8 +505,15 @@ class TaskRunHistory(Base):
     errors_json      = Column(JSON, nullable=True)
     # errors_json: list of {"resource_type": str, "resource_name": str,
     #                        "operation": str, "error": str}
+    # v2 columns — fan-out and import support
+    parent_run_id    = Column(Integer, ForeignKey("task_run_history.id",
+                              ondelete="SET NULL"), nullable=True)
+    target_tenant_id = Column(Integer, nullable=True)
 
-    task = relationship("ScheduledTask", back_populates="runs")
+    task     = relationship("ScheduledTask", back_populates="runs")
+    parent   = relationship("TaskRunHistory", remote_side=[id],
+                            foreign_keys=[parent_run_id])
+    children = relationship("TaskRunHistory", foreign_keys=[parent_run_id])
 
     def __repr__(self) -> str:
         return f"<TaskRunHistory task_id={self.task_id} status={self.status!r}>"

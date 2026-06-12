@@ -160,13 +160,290 @@ class _DiffRecord:
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public entry point — dispatches by task_type
 # ---------------------------------------------------------------------------
 
-def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
-    """Execute one full import→diff→push cycle for a scheduled task.
+def run_task(task_id: int) -> Optional[TaskRunHistory]:
+    """Dispatch to the correct engine path based on task_type.
 
-    Called by APScheduler in a background thread.  Returns the completed
+    Called by APScheduler. Returns the completed TaskRunHistory (parent row
+    for fan-out sync, single row for single-target sync and import).
+    """
+    with get_session() as session:
+        task = session.get(ScheduledTask, task_id)
+        if task is None or not task.enabled:
+            return None
+        task_type = task.task_type or "sync"
+        target_tenant_ids = list(task.target_tenant_ids) if task.target_tenant_ids else None
+
+    if task_type == "import":
+        return _run_import_task(task_id)
+    elif target_tenant_ids and len(target_tenant_ids) > 1:
+        return _run_fanout_sync_task(task_id, target_tenant_ids)
+    else:
+        return _run_single_sync_task(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Import task
+# ---------------------------------------------------------------------------
+
+def _run_import_task(task_id: int) -> Optional[TaskRunHistory]:
+    """Run scheduled import for one or more products against the source tenant.
+
+    No diff, no push, no activation — only pulls remote state into local DB.
+    """
+    # 1. Load task
+    with get_session() as session:
+        task = session.get(ScheduledTask, task_id)
+        if task is None or not task.enabled:
+            return None
+        t_id = task.id
+        t_name = task.name
+        t_source = task.source_tenant_id
+        t_products = list(task.import_products) if task.import_products else []
+
+    # 2. Create "running" run record — target_tenant_id is NULL for import tasks
+    run_started = datetime.utcnow()
+    run_id: int
+    with get_session() as session:
+        run = TaskRunHistory(
+            task_id=t_id,
+            started_at=run_started,
+            status="running",
+            resources_synced=0,
+            target_tenant_id=None,
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    errors: List[Dict[str, str]] = []
+    pending_audit: List[Dict] = []
+    total_synced = 0
+    products_succeeded = 0
+    products_attempted = 0
+
+    # 3. Run each product import in order
+    for product in t_products:
+        products_attempted += 1
+        product_error: Optional[str] = None
+        product_synced = 0
+        try:
+            client = _build_client(t_source, product)
+
+            if product == "ZIA":
+                from services.zia_import_service import ZIAImportService
+                sync_log = ZIAImportService(client, tenant_id=t_source).run()
+            elif product == "ZPA":
+                from services.zpa_import_service import ZPAImportService
+                sync_log = ZPAImportService(client, tenant_id=t_source).run()
+            elif product == "ZCC":
+                from services.zcc_import_service import ZCCImportService
+                sync_log = ZCCImportService(client, tenant_id=t_source).run()
+            else:
+                raise ValueError(f"Unknown product: '{product}'")
+
+            product_synced = sync_log.resources_synced if sync_log else 0
+            total_synced += product_synced
+            products_succeeded += 1
+
+        except Exception as exc:
+            product_error = str(exc)
+            errors.append({
+                "resource_type": "_import",
+                "resource_name": product,
+                "operation": "import",
+                "error": product_error,
+            })
+
+        # 4. Collect audit entry for this product
+        pending_audit.append(dict(
+            tenant_id=t_source,
+            product=product,
+            operation="scheduled_import",
+            action="IMPORT",
+            status="FAILURE" if product_error else "SUCCESS",
+            resource_type="_import",
+            resource_name=product,
+            details={"task_id": t_id, "task_name": t_name},
+        ))
+
+    # 5. Write all audit entries after all sessions close
+    from services import audit_service
+    for entry in pending_audit:
+        audit_service.log(**entry)
+
+    # 6. Update run record
+    finished_at = datetime.utcnow()
+    if not errors:
+        status = "success"
+    elif products_succeeded > 0:
+        status = "partial"
+    else:
+        status = "failed"
+
+    with get_session() as session:
+        run = session.get(TaskRunHistory, run_id)
+        if run is not None:
+            run.finished_at = finished_at
+            run.status = status
+            run.resources_synced = total_synced
+            run.errors_json = errors if errors else None
+
+    return run
+
+
+# ---------------------------------------------------------------------------
+# Fan-out sync task
+# ---------------------------------------------------------------------------
+
+def _run_fanout_sync_task(task_id: int, target_tenant_ids: List[int]) -> Optional[TaskRunHistory]:
+    """Fan out a sync run to multiple target tenants.
+
+    Creates a parent TaskRunHistory row and one child row per target.
+    All targets run regardless of earlier failures (fail-open).
+    """
+    # 1. Load task
+    with get_session() as session:
+        task = session.get(ScheduledTask, task_id)
+        if task is None or not task.enabled:
+            return None
+        t_id = task.id
+        t_name = task.name
+        t_source = task.source_tenant_id
+        t_groups = list(task.resource_groups) if task.resource_groups else []
+        t_sync_deletes = task.sync_deletes
+        t_sync_mode = task.sync_mode or "resource_type"
+        t_label_name = task.label_name
+        t_label_resource_types = list(task.label_resource_types) if task.label_resource_types else None
+
+    # 2. Create parent run record
+    run_started = datetime.utcnow()
+    parent_run_id: int
+    with get_session() as session:
+        parent_run = TaskRunHistory(
+            task_id=t_id,
+            started_at=run_started,
+            status="running",
+            resources_synced=0,
+            parent_run_id=None,
+            target_tenant_id=None,
+        )
+        session.add(parent_run)
+        session.flush()
+        parent_run_id = parent_run.id
+
+    # Accumulators across all targets
+    all_pending_audit: List[Dict] = []
+    child_results: List[tuple] = []  # (child_status, child_synced)
+
+    # 3. Run pipeline for each target
+    for target_id in target_tenant_ids:
+        # 3a. Create child run record
+        child_run_id: int
+        with get_session() as session:
+            child_run = TaskRunHistory(
+                task_id=t_id,
+                started_at=datetime.utcnow(),
+                status="running",
+                resources_synced=0,
+                parent_run_id=parent_run_id,
+                target_tenant_id=target_id,
+            )
+            session.add(child_run)
+            session.flush()
+            child_run_id = child_run.id
+
+        # 3b. Load source/target metadata for this pair
+        from db.models import TenantConfig
+        t_source_zia_id: Optional[str] = None
+        t_license_warning: Optional[str] = None
+        with get_session() as session:
+            src_tenant = session.get(TenantConfig, t_source)
+            tgt_tenant = session.get(TenantConfig, target_id)
+            t_source_zia_id = (
+                str(src_tenant.zia_tenant_id)
+                if src_tenant and src_tenant.zia_tenant_id
+                else None
+            )
+            t_license_warning = _compare_subscriptions(
+                src_tenant.zia_subscriptions if src_tenant else None,
+                tgt_tenant.zia_subscriptions if tgt_tenant else None,
+            )
+
+        # 3c. Run pipeline
+        child_synced, child_errors, child_audit = _execute_sync_pipeline(
+            task_id=t_id,
+            t_name=t_name,
+            t_source=t_source,
+            t_target=target_id,
+            t_groups=t_groups,
+            t_sync_deletes=t_sync_deletes,
+            t_sync_mode=t_sync_mode,
+            t_label_name=t_label_name,
+            t_label_resource_types=t_label_resource_types,
+            t_source_zia_id=t_source_zia_id,
+            t_license_warning=t_license_warning,
+        )
+        all_pending_audit.extend(child_audit)
+
+        # 3d. Compute child status and update child row
+        if not child_errors:
+            child_status = "success"
+        elif child_synced > 0:
+            child_status = "partial"
+        else:
+            child_status = "failed"
+
+        child_results.append((child_status, child_synced))
+
+        with get_session() as session:
+            child = session.get(TaskRunHistory, child_run_id)
+            if child is not None:
+                child.finished_at = datetime.utcnow()
+                child.status = child_status
+                child.resources_synced = child_synced
+                child.errors_json = child_errors if child_errors else None
+
+    # 4. Write all collected audit entries after all child sessions close
+    from services import audit_service
+    for entry in all_pending_audit:
+        audit_service.log(**entry)
+
+    # 5. Compute parent rollup
+    finished_at = datetime.utcnow()
+    total_synced = sum(s for st, s in child_results if st != "failed")
+
+    all_success = all(st == "success" for st, _ in child_results)
+    all_failed  = all(st == "failed"  for st, _ in child_results)
+
+    if all_success:
+        parent_status = "success"
+    elif all_failed:
+        parent_status = "failed"
+    else:
+        parent_status = "partial"
+
+    with get_session() as session:
+        parent = session.get(TaskRunHistory, parent_run_id)
+        if parent is not None:
+            parent.finished_at = finished_at
+            parent.status = parent_status
+            parent.resources_synced = total_synced
+            parent.errors_json = None  # errors are on child rows
+
+    return parent
+
+
+# ---------------------------------------------------------------------------
+# Single-target sync task (renamed from run_sync_task)
+# ---------------------------------------------------------------------------
+
+def _run_single_sync_task(task_id: int) -> Optional[TaskRunHistory]:
+    """Execute one full import→diff→push cycle for a single-target scheduled task.
+
+    Called by run_task for single-target sync. Returns the completed
     TaskRunHistory, or None if the task is not found or not enabled.
     """
     # 1. Load task — quick read, session closed immediately
@@ -179,7 +456,7 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         t_name = task.name
         t_source = task.source_tenant_id
         t_target = task.target_tenant_id
-        t_groups = list(task.resource_groups)
+        t_groups = list(task.resource_groups) if task.resource_groups else []
         t_sync_deletes = task.sync_deletes
         t_sync_mode = task.sync_mode or "resource_type"
         t_label_name = task.label_name
@@ -215,6 +492,68 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         session.flush()
         run_id = run.id
 
+    # 3–10. Run the full sync pipeline
+    synced, errors, pending_audit = _execute_sync_pipeline(
+        task_id=t_id,
+        t_name=t_name,
+        t_source=t_source,
+        t_target=t_target,
+        t_groups=t_groups,
+        t_sync_deletes=t_sync_deletes,
+        t_sync_mode=t_sync_mode,
+        t_label_name=t_label_name,
+        t_label_resource_types=t_label_resource_types,
+        t_source_zia_id=t_source_zia_id,
+        t_license_warning=t_license_warning,
+    )
+
+    # 11. Write audit entries — all sessions from import/push are already closed
+    from services import audit_service
+    for entry in pending_audit:
+        audit_service.log(**entry)
+
+    # 12. Update run record
+    finished_at = datetime.utcnow()
+    if not errors:
+        status = "success"
+    elif synced > 0:
+        status = "partial"
+    else:
+        status = "failed"
+
+    with get_session() as session:
+        run = session.get(TaskRunHistory, run_id)
+        if run is not None:
+            run.finished_at = finished_at
+            run.status = status
+            run.resources_synced = synced
+            run.errors_json = errors if errors else None
+
+    return run
+
+
+# ---------------------------------------------------------------------------
+# Shared sync pipeline (extracted from former run_sync_task body)
+# ---------------------------------------------------------------------------
+
+def _execute_sync_pipeline(
+    task_id: int,
+    t_name: str,
+    t_source: int,
+    t_target: int,
+    t_groups: List[str],
+    t_sync_deletes: bool,
+    t_sync_mode: str,
+    t_label_name: Optional[str],
+    t_label_resource_types: Optional[List[str]],
+    t_source_zia_id: Optional[str],
+    t_license_warning: Optional[str],
+) -> tuple:
+    """Run the full sync pipeline for one (source, target) pair.
+
+    Returns (resources_synced, errors, pending_audit).
+    Never raises — all exceptions are caught and appended to errors.
+    """
     # 3. Expand resource groups to concrete resource_type strings
     if t_sync_mode == "label":
         from services.scheduled_task_service import LABEL_SUPPORTED_RESOURCE_TYPES
@@ -233,6 +572,8 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
         })
     synced = 0
     pending_audit: List[Dict] = []
+    # Fresh order_tracker per pipeline call — not shared across fan-out targets
+    order_tracker: Dict[str, int] = {}
 
     try:
         # 4. Build clients (sessions closed before clients are used)
@@ -274,11 +615,6 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
 
         phase1.sort(key=_create_sort_key)
 
-        # Shared tracker: seeded from the pre-run DB snapshot on first use per
-        # resource type, then incremented for each clamped append so successive
-        # creates in the same run never collide on the same position.
-        order_tracker: Dict[str, int] = {}
-
         def _apply_batch(batch):
             nonlocal synced
             for rec in batch:
@@ -294,7 +630,7 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
                         resource_type=rec.resource_type,
                         resource_name=rec.name,
                         details={
-                            "task_id": t_id,
+                            "task_id": task_id,
                             "task_name": t_name,
                             "source_tenant_id": t_source,
                         },
@@ -315,7 +651,7 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
                         resource_type=rec.resource_type,
                         resource_name=rec.name,
                         details={
-                            "task_id": t_id,
+                            "task_id": task_id,
                             "task_name": t_name,
                             "source_tenant_id": t_source,
                         },
@@ -339,8 +675,6 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
 
         # 10. Re-import target for the affected resource types so the DB reflects
         # the actual post-push state (real API-assigned order values, etc.).
-        # This makes the next run's diff and _next_order accurate without any
-        # in-memory offset tricks.
         try:
             ZIAImportService(target_client, tenant_id=t_target).run(
                 resource_types=resource_types
@@ -361,34 +695,54 @@ def run_sync_task(task_id: int) -> Optional[TaskRunHistory]:
             "error": str(exc),
         })
 
-    # 11. Write audit entries — all sessions from import/push are already closed
-    from services import audit_service
-    for entry in pending_audit:
-        audit_service.log(**entry)
-
-    # 12. Update run record
-    finished_at = datetime.utcnow()
-    if not errors:
-        status = "success"
-    elif synced > 0:
-        status = "partial"
-    else:
-        status = "failed"
-
-    with get_session() as session:
-        run = session.get(TaskRunHistory, run_id)
-        if run is not None:
-            run.finished_at = finished_at
-            run.status = status
-            run.resources_synced = synced
-            run.errors_json = errors if errors else None
-
-    return run
+    return synced, errors, pending_audit
 
 
 # ---------------------------------------------------------------------------
 # Client construction
 # ---------------------------------------------------------------------------
+
+def _build_client(tenant_id: int, product: str):
+    """Load tenant from DB and return the appropriate product client.
+
+    client_secret is never logged or stored.
+    Session is closed before the client is returned.
+    """
+    from db.models import TenantConfig
+    from lib.auth import ZscalerAuth
+    from services.config_service import decrypt_secret
+
+    with get_session() as session:
+        t = session.query(TenantConfig).filter_by(id=tenant_id, is_active=True).first()
+        if t is None:
+            raise ValueError(f"Tenant {tenant_id} not found or inactive.")
+        zidentity = t.zidentity_base_url
+        client_id = t.client_id
+        secret = decrypt_secret(t.client_secret_enc)
+        oneapi = t.oneapi_base_url
+        govcloud = t.govcloud
+        zpa_customer_id = t.zpa_customer_id
+        zpa_tenant_cloud = t.zpa_tenant_cloud
+        zia_cloud = t.zia_cloud
+        zia_tenant_id = t.zia_tenant_id
+
+    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
+
+    if product == "ZIA":
+        from lib.zia_client import ZIAClient
+        return ZIAClient(auth, oneapi)
+    elif product == "ZPA":
+        if not zpa_customer_id:
+            raise ValueError("ZPA requires zpa_customer_id")
+        from lib.zpa_client import ZPAClient
+        govcloud_cloud = zpa_tenant_cloud if govcloud else None
+        return ZPAClient(auth, zpa_customer_id, oneapi, govcloud_cloud=govcloud_cloud)
+    elif product == "ZCC":
+        from lib.zcc_client import ZCCClient
+        return ZCCClient(auth, oneapi, zia_cloud=zia_cloud, zia_tenant_id=zia_tenant_id)
+    else:
+        raise ValueError(f"Unknown product: '{product}'")
+
 
 def _build_zia_client(tenant_id: int):
     """Load tenant from DB, decrypt secret, return a ZIAClient.

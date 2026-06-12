@@ -5,8 +5,8 @@ export interface ScheduledTask {
   name: string;
   source_tenant_id: number;
   source_tenant_name: string;
-  target_tenant_id: number;
-  target_tenant_name: string;
+  target_tenant_id: number | null;
+  target_tenant_name: string | null;
   resource_groups: string[];
   cron_expression: string;
   sync_deletes: boolean;
@@ -20,6 +20,10 @@ export interface ScheduledTask {
   sync_mode: "resource_type" | "label";
   label_name: string | null;
   label_resource_types: string[] | null;
+  task_type?: "sync" | "import";
+  target_tenant_ids: number[] | null;
+  target_tenant_names: string[] | null;
+  import_products: string[] | null;
 }
 
 export interface TaskRunHistory {
@@ -31,6 +35,10 @@ export interface TaskRunHistory {
   status: string;
   resources_synced: number;
   error_count: number;
+  parent_run_id: number | null;
+  target_tenant_id: number | null;
+  is_parent: boolean;
+  is_child: boolean;
 }
 
 export interface TaskRunHistoryDetail extends TaskRunHistory {
@@ -43,17 +51,24 @@ export interface TaskRunHistoryDetail extends TaskRunHistory {
 }
 
 export interface CreateScheduledTaskRequest {
+  task_type: "sync" | "import";
   name: string;
   source_tenant_id: number;
-  target_tenant_id: number;
-  resource_groups: string[];
   schedule: string;
-  sync_deletes?: boolean;
   enabled?: boolean;
   owner_email?: string | null;
+
+  // Sync only — include one of the two target fields, not both
+  target_tenant_id?: number;
+  target_tenant_ids?: number[];
+  resource_groups?: string[];
+  sync_deletes?: boolean;
   sync_mode?: "resource_type" | "label";
   label_name?: string | null;
   label_resource_types?: string[] | null;
+
+  // Import only
+  import_products?: string[];
 }
 
 export const fetchScheduledTasks = (): Promise<ScheduledTask[]> =>
