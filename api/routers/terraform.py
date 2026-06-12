@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
-from api.auth import AuthUser, require_auth
+from api.dependencies import AuthUser, require_auth
 from db.database import get_session
 from db.models import TenantConfig
 
