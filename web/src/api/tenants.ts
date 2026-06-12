@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, getAuthHeaders } from "./client";
 
 export interface Tenant {
   id: number;
@@ -76,6 +76,21 @@ export const importZCC = (id: number): Promise<JobRef> =>
 
 export const clearZCCDisabledResources = (id: number): Promise<{ cleared: string[] }> =>
   apiFetch<{ cleared: string[] }>(`/api/v1/tenants/${id}/import/zcc/disabled-resources`, { method: "DELETE" });
+
+export async function downloadTerraform(tenantId: number, product: "zia" | "zpa", tenantName: string): Promise<void> {
+  const res = await fetch(`/api/v1/tenants/${tenantId}/terraform/${product}`, {
+    headers: getAuthHeaders(),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error("Export failed");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${tenantName.replace(/\s+/g, "_")}_${product}.tf`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export interface SnapshotDiffItem {
   action: "create" | "update" | "delete";

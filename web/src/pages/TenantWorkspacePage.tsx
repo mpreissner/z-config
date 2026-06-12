@@ -9,6 +9,7 @@ import {
   importZPA,
   importZCC,
   clearZCCDisabledResources,
+  downloadTerraform,
   previewApplySnapshot,
   applySnapshot,
   Tenant,
@@ -6229,6 +6230,52 @@ function SectionGroup({
 
 type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid";
 
+function TerraformExportPanel({ tenant, product }: { tenant: Tenant; product: "zia" | "zpa" }) {
+  const [pending, setPending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function handleExport() {
+    setErr(null);
+    setPending(true);
+    try {
+      await downloadTerraform(tenant.id, product, tenant.name);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 p-1">
+      <p className="text-sm text-gray-600">
+        Generate a <code className="text-xs bg-gray-100 px-1 rounded">.tf</code> file from your
+        imported {product.toUpperCase()} configuration using the{" "}
+        <a
+          href="https://registry.terraform.io/providers/zscaler/zscaler/latest"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-zs-600 hover:underline"
+        >
+          Zscaler Terraform provider
+        </a>
+        . Cross-references between resources are flagged as comments for manual wiring.
+      </p>
+      {err && <p className="text-xs text-red-600">{err}</p>}
+      <button
+        onClick={handleExport}
+        disabled={pending}
+        className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+      >
+        {pending ? "Generating…" : `Export ${product.toUpperCase()} as Terraform`}
+      </button>
+      <p className="text-xs text-gray-400">
+        Requires a completed import. Run import first if your data is stale.
+      </p>
+    </div>
+  );
+}
+
 function ZiaTab({ tenant }: { tenant: Tenant }) {
   const [groups, setGroups] = useState<Record<string, boolean>>({ activation: true });
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -6343,6 +6390,11 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
       {/* Clone Config */}
       <SectionGroup title="Clone Config from Another Tenant" isOpen={!!groups.applySnapshot} onToggle={() => toggleGroup("applySnapshot")}>
         <CloneConfigPanel tenant={tenant} />
+      </SectionGroup>
+
+      {/* Terraform Export */}
+      <SectionGroup title="Terraform Export" isOpen={!!groups.terraform} onToggle={() => toggleGroup("terraform")}>
+        <TerraformExportPanel tenant={tenant} product="zia" />
       </SectionGroup>
     </div>
   );
@@ -6708,6 +6760,11 @@ function ZpaTab({ tenant }: { tenant: Tenant }) {
         <Accordion title="Snapshots" isOpen={!!open.snapshots} onToggle={() => toggle("snapshots")}>
           <ZpaSnapshotsSection tenant={tenant} isOpen={!!open.snapshots} />
         </Accordion>
+      </SectionGroup>
+
+      {/* Terraform Export */}
+      <SectionGroup title="Terraform Export" isOpen={!!groups.terraform} onToggle={() => toggleGroup("terraform")}>
+        <TerraformExportPanel tenant={tenant} product="zpa" />
       </SectionGroup>
     </div>
   );
