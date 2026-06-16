@@ -105,15 +105,23 @@ export const simulateTraffic = (
   port: number,
   protocol: string,
   nwApplication?: string,
+  appServiceGroup?: string,
 ): Promise<SimulationResult> =>
   apiFetch<SimulationResult>(`/api/v1/tenants/${tenantId}/simulate`, {
     method: "POST",
-    body: JSON.stringify({ destination, port, protocol, nw_application: nwApplication || null }),
+    body: JSON.stringify({
+      destination, port, protocol,
+      nw_application: nwApplication || null,
+      app_service_group: appServiceGroup || null,
+    }),
     headers: { "Content-Type": "application/json" },
   });
 
 export const fetchSimApplications = (tenantId: number): Promise<string[]> =>
   apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/applications`);
+
+export const fetchSimAppServiceGroups = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/app-service-groups`);
 
 export async function downloadTerraform(tenantId: number, product: "zia" | "zpa", tenantName: string): Promise<void> {
   const res = await fetch(`/api/v1/tenants/${tenantId}/terraform/${product}`, {
