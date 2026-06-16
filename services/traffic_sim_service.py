@@ -285,13 +285,17 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
         if not dest_matched:
             return False
 
-    # ── Application-layer constraint (e.g. QUIC) ─────────────────────────
+    # ── Application-layer constraint (nw_applications or app_service_groups) ─
     rule_nw_apps: List[str] = cfg.get("nw_applications", [])
-    has_only_app_constraint = bool(rule_nw_apps) and not cfg.get("nw_services") and not cfg.get("nw_service_groups")
-    if has_only_app_constraint:
-        if nw_application and nw_application.upper() in [a.upper() for a in rule_nw_apps]:
-            return True   # explicit app match — skip port checks
-        return False      # can't evaluate app-layer offline without user input
+    rule_app_svc_groups: List[Dict] = cfg.get("app_service_groups", [])
+    has_port_constraint = bool(cfg.get("nw_services") or cfg.get("nw_service_groups"))
+    has_app_constraint = bool(rule_nw_apps or rule_app_svc_groups)
+
+    if has_app_constraint and not has_port_constraint:
+        # Rule matches only on application identity — can't evaluate offline without explicit app input
+        if nw_application and rule_nw_apps and nw_application.upper() in [a.upper() for a in rule_nw_apps]:
+            return True
+        return False
 
     # ── Port / service check ──────────────────────────────────────────────
     rule_services: List[Dict] = cfg.get("nw_services", [])
@@ -375,7 +379,7 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str, nw_a
     app_rules = [
         (r.raw_config or {}).get("name", "?")
         for r in enabled
-        if (r.raw_config or {}).get("nw_applications")
+        if ((r.raw_config or {}).get("nw_applications") or (r.raw_config or {}).get("app_service_groups"))
         and not (r.raw_config or {}).get("nw_services")
         and not (r.raw_config or {}).get("nw_service_groups")
     ]
