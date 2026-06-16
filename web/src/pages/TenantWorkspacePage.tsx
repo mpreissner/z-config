@@ -1,4 +1,4 @@
-import { useState, useEffect, ReactNode, Fragment } from "react";
+import React, { useState, useEffect, ReactNode, Fragment } from "react";
 import { formatDateTime, formatDate } from "../utils/time";
 import { Link, useParams, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -11,8 +11,8 @@ import {
   clearZCCDisabledResources,
   downloadTerraform,
   simulateTraffic,
-  SimulationResult,
-  PolicyCheck,
+  type SimulationResult,
+  type PolicyCheck,
   previewApplySnapshot,
   applySnapshot,
   Tenant,
