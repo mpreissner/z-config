@@ -107,11 +107,15 @@ def _port_in_ranges(port: int, ranges: List[Dict]) -> bool:
 
 
 def _port_in_list(port: int, port_list: List[Dict]) -> bool:
-    """port_list is a list of {start, end} dicts (ZIA network service format)."""
+    """port_list is a list of {start, end} dicts (ZIA network service format).
+    ZIA stores single-port ranges as {start: N, end: None} so we must treat None end as == start.
+    """
     for r in port_list:
         try:
-            start = int(r.get("start", r.get("s", 0)))
-            end = int(r.get("end", r.get("e", start)))
+            start_val = r.get("start") if r.get("start") is not None else r.get("s")
+            end_val = r.get("end") if r.get("end") is not None else r.get("e")
+            start = int(start_val or 0)
+            end = int(end_val) if end_val is not None else start
             if start <= port <= end:
                 return True
         except (TypeError, ValueError):
