@@ -284,6 +284,12 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
         if not dest_matched:
             return False
 
+    # ── Application-layer constraint (e.g. QUIC) — cannot evaluate offline ──
+    nw_apps = cfg.get("nw_applications", [])
+    if nw_apps and not cfg.get("nw_services") and not cfg.get("nw_service_groups"):
+        # Rule matches only on application identity, not port/protocol — skip offline
+        return False
+
     # ── Port / service check ──────────────────────────────────────────────
     rule_services: List[Dict] = cfg.get("nw_services", [])
     rule_svc_groups: List[Dict] = cfg.get("nw_service_groups", [])
@@ -361,6 +367,21 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str) -> P
 
     if not check.matched:
         check.reason = "No firewall rule matched — traffic will hit the default rule"
+
+    # Flag any app-based rules that were skipped
+    app_rules = [
+        (r.raw_config or {}).get("name", "?")
+        for r in enabled
+        if (r.raw_config or {}).get("nw_applications")
+        and not (r.raw_config or {}).get("nw_services")
+        and not (r.raw_config or {}).get("nw_service_groups")
+    ]
+    if app_rules:
+        check.caveats.append(
+            "Rules using application-layer matching cannot be evaluated offline and were skipped: "
+            + ", ".join(f'"{n}"' for n in app_rules[:5])
+            + (f" +{len(app_rules)-5} more" if len(app_rules) > 5 else "")
+        )
 
     if not _is_ip(dest):
         check.caveats.append("Destination is a hostname; firewall IP matching may not apply if ZIA resolves DNS differently")
