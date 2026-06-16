@@ -252,7 +252,8 @@ def _svc_matches_port(svc_cfg: Dict, port: int, protocol: str) -> bool:
 def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
                      ip_groups: Dict[int, List[str]],
                      nw_services: Dict[int, Dict],
-                     nw_svc_groups: Dict[int, List[int]] = None) -> bool:
+                     nw_svc_groups: Dict[int, List[int]] = None,
+                     nw_application: Optional[str] = None) -> bool:
     """Evaluate one firewall rule against the given traffic parameters.
 
     Returns True if ALL specified constraints match (AND semantics within a rule).
@@ -284,11 +285,13 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
         if not dest_matched:
             return False
 
-    # ── Application-layer constraint (e.g. QUIC) — cannot evaluate offline ──
-    nw_apps = cfg.get("nw_applications", [])
-    if nw_apps and not cfg.get("nw_services") and not cfg.get("nw_service_groups"):
-        # Rule matches only on application identity, not port/protocol — skip offline
-        return False
+    # ── Application-layer constraint (e.g. QUIC) ─────────────────────────
+    rule_nw_apps: List[str] = cfg.get("nw_applications", [])
+    has_only_app_constraint = bool(rule_nw_apps) and not cfg.get("nw_services") and not cfg.get("nw_service_groups")
+    if has_only_app_constraint:
+        if nw_application and nw_application.upper() in [a.upper() for a in rule_nw_apps]:
+            return True   # explicit app match — skip port checks
+        return False      # can't evaluate app-layer offline without user input
 
     # ── Port / service check ──────────────────────────────────────────────
     rule_services: List[Dict] = cfg.get("nw_services", [])
@@ -330,7 +333,7 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
     return True
 
 
-def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str) -> PolicyCheck:
+def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str, nw_application: Optional[str] = None) -> PolicyCheck:
     check = PolicyCheck(engine="ZIA Firewall")
 
     with get_session() as s:
@@ -358,7 +361,7 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str) -> P
             check.action = cfg.get("action", "ALLOW")
             check.reason = f'Matched default firewall rule "{check.rule_name}" (catch-all)'
             break
-        if _fw_rule_matches(cfg, dest, port, protocol, ip_groups, nw_services, nw_svc_groups):
+        if _fw_rule_matches(cfg, dest, port, protocol, ip_groups, nw_services, nw_svc_groups, nw_application):
             check.matched = True
             check.rule_name = cfg.get("name", "Unknown Rule")
             check.action = cfg.get("action", "ALLOW")
@@ -562,10 +565,10 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
 _BLOCK_ACTIONS = {"BLOCK", "BLOCK_DROP", "BLOCK_ICMP", "BLOCK_RESET", "BLOCK_BYPASS"}
 
 
-def simulate(tenant_id: int, destination: str, port: int, protocol: str) -> SimulationResult:
+def simulate(tenant_id: int, destination: str, port: int, protocol: str, nw_application: Optional[str] = None) -> SimulationResult:
     dest = destination.strip()
     zpa = _eval_zpa(tenant_id, dest, port, protocol)
-    zia_fw = _eval_zia_firewall(tenant_id, dest, port, protocol)
+    zia_fw = _eval_zia_firewall(tenant_id, dest, port, protocol, nw_application)
     zia_dns = _eval_zia_dns(tenant_id, dest, port, protocol)
     zia_url = _eval_zia_url(tenant_id, dest, port, protocol)
 

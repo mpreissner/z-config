@@ -11,6 +11,7 @@ import {
   clearZCCDisabledResources,
   downloadTerraform,
   simulateTraffic,
+  fetchSimApplications,
   type SimulationResult,
   type PolicyCheck,
   previewApplySnapshot,
@@ -6295,11 +6296,17 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const [dest, setDest] = useState("");
   const [port, setPort] = useState("443");
   const [protocol, setProtocol] = useState("HTTPS");
+  const [nwApp, setNwApp] = useState("");
   const [result, setResult] = useState<SimulationResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const { data: appOptions = [] } = useQuery({
+    queryKey: ["sim-applications", tenant.id],
+    queryFn: () => fetchSimApplications(tenant.id),
+  });
+
   const mut = useMutation({
-    mutationFn: () => simulateTraffic(tenant.id, dest.trim(), parseInt(port) || 443, protocol),
+    mutationFn: () => simulateTraffic(tenant.id, dest.trim(), parseInt(port) || 443, protocol, nwApp.trim() || undefined),
     onSuccess: (data) => { setResult(data); setErr(null); },
     onError: (e: Error) => setErr(e.message),
   });
@@ -6364,6 +6371,25 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
               className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
             />
           </div>
+        </div>
+        <div className="sm:max-w-xs">
+          <label className="block text-xs font-medium text-gray-700 mb-1">
+            Network Application <span className="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <input
+            list="nw-app-options"
+            type="text"
+            value={nwApp}
+            onChange={e => setNwApp(e.target.value)}
+            placeholder="e.g. QUIC, HTTP2"
+            className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+          />
+          <datalist id="nw-app-options">
+            {appOptions.map(a => <option key={a} value={a} />)}
+          </datalist>
+          <p className="mt-1 text-xs text-gray-400">
+            Specify to match app-layer firewall rules (e.g. BLOCK_QUIC). Leave blank to skip app-layer rules.
+          </p>
         </div>
         {err && <p className="text-xs text-red-600">{err}</p>}
         <button
