@@ -213,6 +213,19 @@ def _resolve_network_services(tenant_id: int, s) -> Dict[int, Dict]:
     return result
 
 
+def _resolve_network_service_groups(tenant_id: int, s) -> Dict[int, List[int]]:
+    """Return {group_id: [service_id, ...]} for all network service groups."""
+    rows = s.query(ZIAResource).filter_by(tenant_id=tenant_id, resource_type="network_svc_group", is_deleted=False).all()
+    result: Dict[int, List[int]] = {}
+    for row in rows:
+        cfg = row.raw_config or {}
+        gid = cfg.get("id")
+        if gid is not None:
+            svc_ids = [int(svc["id"]) for svc in cfg.get("services", []) if svc.get("id") is not None]
+            result[int(gid)] = svc_ids
+    return result
+
+
 def _svc_matches_port(svc_cfg: Dict, port: int, protocol: str) -> bool:
     """True if a network service config matches the given port + protocol."""
     proto = protocol.upper()
@@ -238,7 +251,8 @@ def _svc_matches_port(svc_cfg: Dict, port: int, protocol: str) -> bool:
 
 def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
                      ip_groups: Dict[int, List[str]],
-                     nw_services: Dict[int, Dict]) -> bool:
+                     nw_services: Dict[int, Dict],
+                     nw_svc_groups: Dict[int, List[int]] = None) -> bool:
     """Evaluate one firewall rule against the given traffic parameters.
 
     Returns True if ALL specified constraints match (AND semantics within a rule).
@@ -277,9 +291,9 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
 
     if has_svc_constraint:
         svc_matched = False
+        # Check individual services
         for svc_ref in rule_services:
             svc_id = svc_ref.get("id")
-            # Use embedded port data if available, else resolve from DB
             embedded_tcp = svc_ref.get("dest_tcp_ports", [])
             embedded_udp = svc_ref.get("dest_udp_ports", [])
             if embedded_tcp or embedded_udp:
@@ -291,6 +305,19 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
             if _svc_matches_port(svc_cfg, port, protocol):
                 svc_matched = True
                 break
+        # Check service groups (expand group → individual services)
+        if not svc_matched and rule_svc_groups and nw_svc_groups is not None:
+            for grp_ref in rule_svc_groups:
+                gid = grp_ref.get("id")
+                if gid is None:
+                    continue
+                for svc_id in nw_svc_groups.get(int(gid), []):
+                    if svc_id in nw_services:
+                        if _svc_matches_port(nw_services[svc_id], port, protocol):
+                            svc_matched = True
+                            break
+                if svc_matched:
+                    break
         if not svc_matched:
             return False
 
@@ -308,6 +335,7 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str) -> P
         )
         ip_groups = _resolve_ip_dest_groups(tenant_id, s)
         nw_services = _resolve_network_services(tenant_id, s)
+        nw_svc_groups = _resolve_network_service_groups(tenant_id, s)
 
     enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
     enabled.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
@@ -321,7 +349,7 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str) -> P
             check.action = cfg.get("action", "ALLOW")
             check.reason = f'Matched default firewall rule "{check.rule_name}" (catch-all)'
             break
-        if _fw_rule_matches(cfg, dest, port, protocol, ip_groups, nw_services):
+        if _fw_rule_matches(cfg, dest, port, protocol, ip_groups, nw_services, nw_svc_groups):
             check.matched = True
             check.rule_name = cfg.get("name", "Unknown Rule")
             check.action = cfg.get("action", "ALLOW")
