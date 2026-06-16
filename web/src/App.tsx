@@ -65,6 +65,7 @@ export default function App() {
                   <Route path="/tenant/:id/zdx" element={<TenantWorkspacePage />} />
                   <Route path="/tenant/:id/zcc" element={<TenantWorkspacePage />} />
                   <Route path="/tenant/:id/zid" element={<TenantWorkspacePage />} />
+                  <Route path="/tenant/:id/sim" element={<TenantWorkspacePage />} />
                   {/* Legacy redirects */}
                   <Route path="/zia/:tenant" element={<Navigate to="/tenants" replace />} />
                   <Route path="/zpa/:tenant" element={<Navigate to="/tenants" replace />} />
