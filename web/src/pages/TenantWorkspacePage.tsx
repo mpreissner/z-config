@@ -13,6 +13,10 @@ import {
   simulateTraffic,
   fetchSimApplications,
   fetchSimAppServiceGroups,
+  fetchSimUsers,
+  fetchSimDepartments,
+  fetchSimGroups,
+  fetchSimLocations,
   type SimulationResult,
   type PolicyCheck,
   previewApplySnapshot,
@@ -6299,21 +6303,33 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const [protocol, setProtocol] = useState("HTTPS");
   const [nwApp, setNwApp] = useState("");
   const [appSvcGroup, setAppSvcGroup] = useState("");
+  const [srcIp, setSrcIp] = useState("");
+  const [userName, setUserName] = useState("");
+  const [deptName, setDeptName] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const [locationName, setLocationName] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [result, setResult] = useState<SimulationResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const { data: appOptions = [] } = useQuery({
-    queryKey: ["sim-applications", tenant.id],
-    queryFn: () => fetchSimApplications(tenant.id),
-  });
-
-  const { data: appSvcGroupOptions = [] } = useQuery({
-    queryKey: ["sim-app-service-groups", tenant.id],
-    queryFn: () => fetchSimAppServiceGroups(tenant.id),
-  });
+  const { data: appOptions = [] } = useQuery({ queryKey: ["sim-applications", tenant.id], queryFn: () => fetchSimApplications(tenant.id) });
+  const { data: appSvcGroupOptions = [] } = useQuery({ queryKey: ["sim-app-service-groups", tenant.id], queryFn: () => fetchSimAppServiceGroups(tenant.id) });
+  const { data: userOptions = [] } = useQuery({ queryKey: ["sim-users", tenant.id], queryFn: () => fetchSimUsers(tenant.id) });
+  const { data: deptOptions = [] } = useQuery({ queryKey: ["sim-depts", tenant.id], queryFn: () => fetchSimDepartments(tenant.id) });
+  const { data: groupOptions = [] } = useQuery({ queryKey: ["sim-groups", tenant.id], queryFn: () => fetchSimGroups(tenant.id) });
+  const { data: locationOptions = [] } = useQuery({ queryKey: ["sim-locations", tenant.id], queryFn: () => fetchSimLocations(tenant.id) });
 
   const mut = useMutation({
-    mutationFn: () => simulateTraffic(tenant.id, dest.trim(), parseInt(port) || 443, protocol, nwApp.trim() || undefined, appSvcGroup.trim() || undefined),
+    mutationFn: () => simulateTraffic(tenant.id, {
+      destination: dest.trim(), port: parseInt(port) || 443, protocol,
+      nwApplication: nwApp.trim() || undefined,
+      appServiceGroup: appSvcGroup.trim() || undefined,
+      srcIp: srcIp.trim() || undefined,
+      userName: userName.trim() || undefined,
+      deptName: deptName.trim() || undefined,
+      groupName: groupName.trim() || undefined,
+      locationName: locationName.trim() || undefined,
+    }),
     onSuccess: (data) => { setResult(data); setErr(null); },
     onError: (e: Error) => setErr(e.message),
   });
@@ -6379,42 +6395,88 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
             />
           </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Network Application <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            <input
-              list="nw-app-options"
-              type="text"
-              value={nwApp}
-              onChange={e => setNwApp(e.target.value)}
-              placeholder="e.g. QUIC, HTTP2"
-              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
-            />
-            <datalist id="nw-app-options">
-              {appOptions.map(a => <option key={a} value={a} />)}
-            </datalist>
-            <p className="mt-1 text-xs text-gray-400">Match app-layer rules (e.g. BLOCK_QUIC)</p>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              App Service Group <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            <input
-              list="app-svc-group-options"
-              type="text"
-              value={appSvcGroup}
-              onChange={e => setAppSvcGroup(e.target.value)}
-              placeholder="e.g. OFFICE365, ZOOM"
-              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
-            />
-            <datalist id="app-svc-group-options">
-              {appSvcGroupOptions.map(g => <option key={g} value={g} />)}
-            </datalist>
-            <p className="mt-1 text-xs text-gray-400">Match service group rules (e.g. Office365, UCaaS)</p>
-          </div>
+        {/* Advanced Options toggle */}
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(v => !v)}
+            className="text-xs text-zs-600 hover:text-zs-700 font-medium flex items-center gap-1"
+          >
+            <svg className={`h-3 w-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            Advanced Options
+          </button>
         </div>
+
+        {showAdvanced && (
+          <div className="space-y-3 pt-1 border-t border-gray-100">
+            {/* Row 1: app-layer */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Network Application</label>
+                <input list="nw-app-options" type="text" value={nwApp} onChange={e => setNwApp(e.target.value)}
+                  placeholder="e.g. QUIC, HTTP2"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="nw-app-options">{appOptions.map(a => <option key={a} value={a} />)}</datalist>
+                <p className="mt-0.5 text-xs text-gray-400">Matches nw_applications rules (e.g. BLOCK_QUIC)</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">App Service Group</label>
+                <input list="app-svc-group-options" type="text" value={appSvcGroup} onChange={e => setAppSvcGroup(e.target.value)}
+                  placeholder="e.g. OFFICE365, ZOOM"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="app-svc-group-options">{appSvcGroupOptions.map(g => <option key={g} value={g} />)}</datalist>
+                <p className="mt-0.5 text-xs text-gray-400">Matches app_service_groups rules (e.g. Office365, UCaaS)</p>
+              </div>
+            </div>
+            {/* Row 2: source */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Source IP</label>
+                <input type="text" value={srcIp} onChange={e => setSrcIp(e.target.value)}
+                  placeholder="e.g. 10.0.0.5"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates src_ip_groups constraints</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Location</label>
+                <input list="location-options" type="text" value={locationName} onChange={e => setLocationName(e.target.value)}
+                  placeholder="e.g. HQ, Branch-NYC"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="location-options">{locationOptions.map(l => <option key={l} value={l} />)}</datalist>
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates location-scoped rules</p>
+              </div>
+            </div>
+            {/* Row 3: identity */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">User</label>
+                <input list="user-options" type="text" value={userName} onChange={e => setUserName(e.target.value)}
+                  placeholder="username or email"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="user-options">{userOptions.map(u => <option key={u} value={u} />)}</datalist>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
+                <input list="dept-options" type="text" value={deptName} onChange={e => setDeptName(e.target.value)}
+                  placeholder="department name"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="dept-options">{deptOptions.map(d => <option key={d} value={d} />)}</datalist>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Group</label>
+                <input list="group-options" type="text" value={groupName} onChange={e => setGroupName(e.target.value)}
+                  placeholder="group name"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="group-options">{groupOptions.map(g => <option key={g} value={g} />)}</datalist>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400">
+              Identity and location fields narrow scoped rules. If left blank, scoped rules are evaluated permissively (worst-case assumption).
+            </p>
+          </div>
+        )}
         {err && <p className="text-xs text-red-600">{err}</p>}
         <button
           type="submit"

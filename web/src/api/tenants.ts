@@ -99,20 +99,33 @@ export interface SimulationResult {
   verdict_label: string;
 }
 
-export const simulateTraffic = (
-  tenantId: number,
-  destination: string,
-  port: number,
-  protocol: string,
-  nwApplication?: string,
-  appServiceGroup?: string,
-): Promise<SimulationResult> =>
+export interface SimulateParams {
+  destination: string;
+  port: number;
+  protocol: string;
+  nwApplication?: string;
+  appServiceGroup?: string;
+  srcIp?: string;
+  userName?: string;
+  deptName?: string;
+  groupName?: string;
+  locationName?: string;
+}
+
+export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<SimulationResult> =>
   apiFetch<SimulationResult>(`/api/v1/tenants/${tenantId}/simulate`, {
     method: "POST",
     body: JSON.stringify({
-      destination, port, protocol,
-      nw_application: nwApplication || null,
-      app_service_group: appServiceGroup || null,
+      destination: p.destination,
+      port: p.port,
+      protocol: p.protocol,
+      nw_application: p.nwApplication || null,
+      app_service_group: p.appServiceGroup || null,
+      src_ip: p.srcIp || null,
+      user_name: p.userName || null,
+      dept_name: p.deptName || null,
+      group_name: p.groupName || null,
+      location_name: p.locationName || null,
     }),
     headers: { "Content-Type": "application/json" },
   });
@@ -122,6 +135,18 @@ export const fetchSimApplications = (tenantId: number): Promise<string[]> =>
 
 export const fetchSimAppServiceGroups = (tenantId: number): Promise<string[]> =>
   apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/app-service-groups`);
+
+export const fetchSimUsers = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/users`);
+
+export const fetchSimDepartments = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/departments`);
+
+export const fetchSimGroups = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/groups`);
+
+export const fetchSimLocations = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/locations`);
 
 export async function downloadTerraform(tenantId: number, product: "zia" | "zpa", tenantName: string): Promise<void> {
   const res = await fetch(`/api/v1/tenants/${tenantId}/terraform/${product}`, {

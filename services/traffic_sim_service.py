@@ -230,6 +230,42 @@ def _resolve_network_service_groups(tenant_id: int, s) -> Dict[int, List[int]]:
     return result
 
 
+def _resolve_src_ip_groups(tenant_id: int, s) -> Dict[int, List[str]]:
+    """Return {group_id: [address, ...]} for all IP source groups."""
+    rows = s.query(ZIAResource).filter_by(tenant_id=tenant_id, resource_type="ip_source_group", is_deleted=False).all()
+    result: Dict[int, List[str]] = {}
+    for row in rows:
+        cfg = row.raw_config or {}
+        gid = cfg.get("id")
+        if gid is not None:
+            addresses = cfg.get("ip_addresses", cfg.get("ipAddresses", []))
+            result[int(gid)] = list(addresses)
+    return result
+
+
+def _resolve_nw_application_groups(tenant_id: int, s) -> Dict[int, List[str]]:
+    """Return {group_id: [app_name, ...]} for all network application groups."""
+    rows = s.query(ZIAResource).filter_by(tenant_id=tenant_id, resource_type="nw_application_group", is_deleted=False).all()
+    result: Dict[int, List[str]] = {}
+    for row in rows:
+        cfg = row.raw_config or {}
+        gid = cfg.get("id")
+        if gid is not None:
+            apps = [str(a) for a in cfg.get("nw_applications", []) if a]
+            result[int(gid)] = apps
+    return result
+
+
+def _name_in_list(name: str, ref_list: List[Dict]) -> bool:
+    """True if name matches any {id, name} ref in a list (case-insensitive)."""
+    name_upper = name.upper()
+    return any(
+        (ref.get("name") or "").upper() == name_upper
+        for ref in ref_list
+        if isinstance(ref, dict)
+    )
+
+
 def _svc_matches_port(svc_cfg: Dict, port: int, protocol: str) -> bool:
     """True if a network service config matches the given port + protocol."""
     proto = protocol.upper()
@@ -253,56 +289,94 @@ def _svc_matches_port(svc_cfg: Dict, port: int, protocol: str) -> bool:
     return False
 
 
-def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
-                     ip_groups: Dict[int, List[str]],
-                     nw_services: Dict[int, Dict],
-                     nw_svc_groups: Dict[int, List[int]] = None,
-                     nw_application: Optional[str] = None,
-                     app_service_group: Optional[str] = None) -> bool:
-    """Evaluate one firewall rule against the given traffic parameters.
-
-    Returns True if ALL specified constraints match (AND semantics within a rule).
-    Empty constraint list = wildcard (matches everything).
+def _fw_rule_matches(
+    cfg: Dict, dest: str, port: int, protocol: str,
+    ip_dest_groups: Dict[int, List[str]],
+    nw_services: Dict[int, Dict],
+    nw_svc_groups: Dict[int, List[int]] = None,
+    nw_application: Optional[str] = None,
+    app_service_group: Optional[str] = None,
+    src_ip: Optional[str] = None,
+    ip_src_groups: Dict[int, List[str]] = None,
+    nw_app_groups: Dict[int, List[str]] = None,
+    user_name: Optional[str] = None,
+    dept_name: Optional[str] = None,
+    group_name: Optional[str] = None,
+    location_name: Optional[str] = None,
+) -> bool:
+    """Evaluate one firewall rule. Returns True if ALL constraints match (AND semantics).
+    Empty constraint list = wildcard. Constraints that can't be evaluated offline are
+    skipped (treated as matching) unless explicit input is provided.
     """
     if cfg.get("state", "ENABLED") != "ENABLED":
         return False
 
     dest_is_ip = _is_ip(dest)
-    hostname = _strip_url(dest)
 
-    # ── Destination IP check ──────────────────────────────────────────────
+    # ── Destination IP / category check ──────────────────────────────────
     dest_addrs: List[str] = cfg.get("dest_addresses", [])
-    dest_ip_groups: List[Dict] = cfg.get("dest_ip_groups", [])
+    dest_ip_grp_refs: List[Dict] = cfg.get("dest_ip_groups", [])
     dest_ip_cats: List[str] = cfg.get("dest_ip_categories", [])
+    dest_countries: List[str] = cfg.get("dest_countries", [])
 
-    has_dest_constraint = bool(dest_addrs or dest_ip_groups or dest_ip_cats)
-    if has_dest_constraint:
+    has_resolvable_dest = bool(dest_addrs or dest_ip_grp_refs)
+    has_unresolvable_dest = bool(dest_ip_cats or dest_countries)
+
+    if has_resolvable_dest:
         dest_matched = False
         if dest_addrs and dest_is_ip:
             dest_matched = _ip_matches_any(dest, dest_addrs)
-        if not dest_matched and dest_ip_groups and dest_is_ip:
-            for grp in dest_ip_groups:
+        if not dest_matched and dest_ip_grp_refs and dest_is_ip:
+            for grp in dest_ip_grp_refs:
                 gid = grp.get("id")
-                if gid and int(gid) in ip_groups:
-                    if _ip_matches_any(dest, ip_groups[int(gid)]):
+                if gid and int(gid) in ip_dest_groups:
+                    if _ip_matches_any(dest, ip_dest_groups[int(gid)]):
                         dest_matched = True
                         break
         if not dest_matched:
             return False
+    elif has_unresolvable_dest:
+        # Predefined IP category or country-based — can't resolve offline
+        return False
 
-    # ── Application-layer constraint (nw_applications or app_service_groups) ─
+    # ── Source IP check ───────────────────────────────────────────────────
+    src_ip_grp_refs: List[Dict] = cfg.get("src_ip_groups", [])
+    if src_ip_grp_refs and src_ip and ip_src_groups is not None:
+        src_matched = False
+        for grp in src_ip_grp_refs:
+            gid = grp.get("id")
+            if gid and int(gid) in ip_src_groups:
+                if _ip_matches_any(src_ip, ip_src_groups[int(gid)]):
+                    src_matched = True
+                    break
+        if not src_matched:
+            return False
+    # If src_ip_groups present but no src_ip provided → assume match (permissive)
+
+    # ── Application-layer constraint ──────────────────────────────────────
     rule_nw_apps: List[str] = cfg.get("nw_applications", [])
-    rule_app_svc_groups: List[Dict] = cfg.get("app_service_groups", [])
-    has_port_constraint = bool(cfg.get("nw_services") or cfg.get("nw_service_groups"))
-    has_app_constraint = bool(rule_nw_apps or rule_app_svc_groups)
+    rule_nw_app_grps: List[Dict] = cfg.get("nw_application_groups", [])
+    rule_app_svc_grps: List[Dict] = cfg.get("app_service_groups", [])
+    has_port_svc = bool(cfg.get("nw_services") or cfg.get("nw_service_groups"))
+    has_app_constraint = bool(rule_nw_apps or rule_nw_app_grps or rule_app_svc_grps)
 
-    if has_app_constraint and not has_port_constraint:
-        # Rule matches only on application identity — can't evaluate offline without explicit input
-        if nw_application and rule_nw_apps:
-            if nw_application.upper() in [a.upper() for a in rule_nw_apps]:
+    if has_app_constraint and not has_port_svc:
+        # Expand nw_application_groups → individual app names
+        expanded_apps = list(rule_nw_apps)
+        if nw_app_groups is not None:
+            for grp_ref in rule_nw_app_grps:
+                gid = grp_ref.get("id")
+                if gid is not None:
+                    expanded_apps.extend(nw_app_groups.get(int(gid), []))
+
+        if nw_application and expanded_apps:
+            if nw_application.upper() in [a.upper() for a in expanded_apps]:
                 return True
-        if app_service_group and rule_app_svc_groups:
-            grp_names = [g.get("name", "").upper() if isinstance(g, dict) else str(g).upper() for g in rule_app_svc_groups]
+        if app_service_group and rule_app_svc_grps:
+            grp_names = [
+                (g.get("name") or "").upper() if isinstance(g, dict) else str(g).upper()
+                for g in rule_app_svc_grps
+            ]
             if app_service_group.upper() in grp_names:
                 return True
         return False
@@ -314,7 +388,6 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
 
     if has_svc_constraint:
         svc_matched = False
-        # Check individual services
         for svc_ref in rule_services:
             svc_id = svc_ref.get("id")
             embedded_tcp = svc_ref.get("dest_tcp_ports", [])
@@ -328,7 +401,6 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
             if _svc_matches_port(svc_cfg, port, protocol):
                 svc_matched = True
                 break
-        # Check service groups (expand group → individual services)
         if not svc_matched and rule_svc_groups and nw_svc_groups is not None:
             for grp_ref in rule_svc_groups:
                 gid = grp_ref.get("id")
@@ -344,10 +416,39 @@ def _fw_rule_matches(cfg: Dict, dest: str, port: int, protocol: str,
         if not svc_matched:
             return False
 
+    # ── Identity / location constraints (scoped rules) ────────────────────
+    rule_users: List[Dict] = cfg.get("users", [])
+    rule_depts: List[Dict] = cfg.get("departments", [])
+    rule_groups: List[Dict] = cfg.get("groups", [])
+    rule_locs: List[Dict] = cfg.get("locations", [])
+
+    if rule_users and user_name:
+        if not _name_in_list(user_name, rule_users):
+            return False
+    if rule_depts and dept_name:
+        if not _name_in_list(dept_name, rule_depts):
+            return False
+    if rule_groups and group_name:
+        if not _name_in_list(group_name, rule_groups):
+            return False
+    if rule_locs and location_name:
+        if not _name_in_list(location_name, rule_locs):
+            return False
+    # If scoped but no input provided → assume match (permissive)
+
     return True
 
 
-def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str, nw_application: Optional[str] = None, app_service_group: Optional[str] = None) -> PolicyCheck:
+def _eval_zia_firewall(
+    tenant_id: int, dest: str, port: int, protocol: str,
+    nw_application: Optional[str] = None,
+    app_service_group: Optional[str] = None,
+    src_ip: Optional[str] = None,
+    user_name: Optional[str] = None,
+    dept_name: Optional[str] = None,
+    group_name: Optional[str] = None,
+    location_name: Optional[str] = None,
+) -> PolicyCheck:
     check = PolicyCheck(engine="ZIA Firewall")
 
     with get_session() as s:
@@ -356,12 +457,13 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str, nw_a
             .filter_by(tenant_id=tenant_id, resource_type="firewall_rule", is_deleted=False)
             .all()
         )
-        ip_groups = _resolve_ip_dest_groups(tenant_id, s)
+        ip_dest_groups = _resolve_ip_dest_groups(tenant_id, s)
+        ip_src_groups = _resolve_src_ip_groups(tenant_id, s)
         nw_services = _resolve_network_services(tenant_id, s)
         nw_svc_groups = _resolve_network_service_groups(tenant_id, s)
+        nw_app_groups = _resolve_nw_application_groups(tenant_id, s)
 
     enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
-    # Default rule has order -1 in ZIA (sentinel for "bottom of list") — always evaluate last
     non_default = [r for r in enabled if not (r.raw_config or {}).get("default_rule")]
     default_rules = [r for r in enabled if (r.raw_config or {}).get("default_rule")]
     non_default.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
@@ -375,7 +477,13 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str, nw_a
             check.action = cfg.get("action", "ALLOW")
             check.reason = f'Matched default firewall rule "{check.rule_name}" (catch-all)'
             break
-        if _fw_rule_matches(cfg, dest, port, protocol, ip_groups, nw_services, nw_svc_groups, nw_application, app_service_group):
+        if _fw_rule_matches(
+            cfg, dest, port, protocol,
+            ip_dest_groups, nw_services, nw_svc_groups,
+            nw_application, app_service_group,
+            src_ip, ip_src_groups, nw_app_groups,
+            user_name, dept_name, group_name, location_name,
+        ):
             check.matched = True
             check.rule_name = cfg.get("name", "Unknown Rule")
             check.action = cfg.get("action", "ALLOW")
@@ -385,23 +493,52 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str, nw_a
     if not check.matched:
         check.reason = "No firewall rule matched — traffic will hit the default rule"
 
-    # Flag any app-based rules that were skipped
-    app_rules = [
+    # ── Caveats ──────────────────────────────────────────────────────────
+    app_only_rules = [
         (r.raw_config or {}).get("name", "?")
-        for r in enabled
-        if ((r.raw_config or {}).get("nw_applications") or (r.raw_config or {}).get("app_service_groups"))
+        for r in non_default
+        if ((r.raw_config or {}).get("nw_applications") or (r.raw_config or {}).get("app_service_groups")
+            or (r.raw_config or {}).get("nw_application_groups"))
         and not (r.raw_config or {}).get("nw_services")
         and not (r.raw_config or {}).get("nw_service_groups")
     ]
-    if app_rules:
+    if app_only_rules:
         check.caveats.append(
-            "Rules using application-layer matching cannot be evaluated offline and were skipped: "
-            + ", ".join(f'"{n}"' for n in app_rules[:5])
-            + (f" +{len(app_rules)-5} more" if len(app_rules) > 5 else "")
+            "Rules using application-layer matching were skipped (specify Network Application or App Service Group to evaluate): "
+            + ", ".join(f'"{n}"' for n in app_only_rules[:5])
+            + (f" +{len(app_only_rules)-5} more" if len(app_only_rules) > 5 else "")
+        )
+
+    ip_cat_rules = [
+        (r.raw_config or {}).get("name", "?")
+        for r in non_default
+        if (r.raw_config or {}).get("dest_ip_categories") or (r.raw_config or {}).get("dest_countries")
+        and not (r.raw_config or {}).get("dest_addresses")
+        and not (r.raw_config or {}).get("dest_ip_groups")
+    ]
+    if ip_cat_rules:
+        check.caveats.append(
+            "Rules using predefined IP categories or country constraints cannot be evaluated offline and were skipped: "
+            + ", ".join(f'"{n}"' for n in ip_cat_rules[:5])
+            + (f" +{len(ip_cat_rules)-5} more" if len(ip_cat_rules) > 5 else "")
+        )
+
+    scoped_rules = [
+        (r.raw_config or {}).get("name", "?")
+        for r in non_default
+        if any((r.raw_config or {}).get(f) for f in ("users", "departments", "groups", "locations"))
+    ]
+    if scoped_rules and not any([user_name, dept_name, group_name, location_name]):
+        check.caveats.append(
+            "Rules scoped to users/departments/groups/locations were evaluated permissively (specify identity context for precise results): "
+            + ", ".join(f'"{n}"' for n in scoped_rules[:5])
+            + (f" +{len(scoped_rules)-5} more" if len(scoped_rules) > 5 else "")
         )
 
     if not _is_ip(dest):
-        check.caveats.append("Destination is a hostname; firewall IP matching may not apply if ZIA resolves DNS differently")
+        check.caveats.append(
+            "Destination is a hostname; firewall IP matching may not apply if ZIA resolves DNS differently"
+        )
 
     return check
 
@@ -579,10 +716,23 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
 _BLOCK_ACTIONS = {"BLOCK", "BLOCK_DROP", "BLOCK_ICMP", "BLOCK_RESET", "BLOCK_BYPASS"}
 
 
-def simulate(tenant_id: int, destination: str, port: int, protocol: str, nw_application: Optional[str] = None, app_service_group: Optional[str] = None) -> SimulationResult:
+def simulate(
+    tenant_id: int, destination: str, port: int, protocol: str,
+    nw_application: Optional[str] = None,
+    app_service_group: Optional[str] = None,
+    src_ip: Optional[str] = None,
+    user_name: Optional[str] = None,
+    dept_name: Optional[str] = None,
+    group_name: Optional[str] = None,
+    location_name: Optional[str] = None,
+) -> SimulationResult:
     dest = destination.strip()
     zpa = _eval_zpa(tenant_id, dest, port, protocol)
-    zia_fw = _eval_zia_firewall(tenant_id, dest, port, protocol, nw_application, app_service_group)
+    zia_fw = _eval_zia_firewall(
+        tenant_id, dest, port, protocol,
+        nw_application, app_service_group,
+        src_ip, user_name, dept_name, group_name, location_name,
+    )
     zia_dns = _eval_zia_dns(tenant_id, dest, port, protocol)
     zia_url = _eval_zia_url(tenant_id, dest, port, protocol)
 
