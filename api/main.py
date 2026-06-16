@@ -44,6 +44,7 @@ from api.routers import scheduled_tasks as scheduled_tasks_router
 from api.routers import templates as templates_router
 from api.routers import ssl as ssl_router
 from api.routers import terraform as terraform_router
+from api.routers import simulator as simulator_router
 from api.auth_utils import decode_token
 from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
@@ -207,6 +208,7 @@ app.include_router(jobs_router.router)
 app.include_router(scheduled_tasks_router.router)
 app.include_router(templates_router.router)
 app.include_router(terraform_router.router)
+app.include_router(simulator_router.router)
 
 
 @app.get("/health", tags=["System"])

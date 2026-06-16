@@ -10,6 +10,9 @@ import {
   importZCC,
   clearZCCDisabledResources,
   downloadTerraform,
+  simulateTraffic,
+  SimulationResult,
+  PolicyCheck,
   previewApplySnapshot,
   applySnapshot,
   Tenant,
@@ -6228,7 +6231,180 @@ function SectionGroup({
 
 // ── Tab panels ────────────────────────────────────────────────────────────────
 
-type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid";
+type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid" | "sim";
+
+// ── Traffic Simulator tab ─────────────────────────────────────────────────────
+
+const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
+
+const VERDICT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  ZPA:                { bg: "bg-blue-50",  text: "text-blue-800",  label: "ZPA" },
+  ZIA_ALLOW:          { bg: "bg-green-50", text: "text-green-800", label: "ZIA Allow" },
+  ZIA_BLOCK_FIREWALL: { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_DNS:      { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_URL:      { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  INTERNET:           { bg: "bg-gray-50",  text: "text-gray-700",  label: "Internet" },
+};
+
+function PolicyCheckCard({ check }: { check: PolicyCheck }) {
+  const actionColor =
+    check.action && ["BLOCK", "BLOCK_DROP", "BLOCK_ICMP", "BLOCK_RESET", "BLOCK_BYPASS"].includes(check.action.toUpperCase())
+      ? "text-red-700 bg-red-50"
+      : check.action === "ALLOW"
+      ? "text-green-700 bg-green-50"
+      : "text-gray-700 bg-gray-100";
+
+  return (
+    <div className={`rounded-lg border p-4 space-y-2 ${check.matched ? "border-gray-300 bg-white" : "border-gray-200 bg-gray-50"}`}>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <span className="text-sm font-medium text-gray-800">{check.engine}</span>
+        <div className="flex items-center gap-2">
+          {check.matched ? (
+            <>
+              {check.action && (
+                <span className={`text-xs font-semibold px-2 py-0.5 rounded ${actionColor}`}>
+                  {check.action}
+                </span>
+              )}
+              <span className="text-xs bg-gray-200 text-gray-700 px-2 py-0.5 rounded">Matched</span>
+            </>
+          ) : (
+            <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">No match</span>
+          )}
+        </div>
+      </div>
+      <p className="text-xs text-gray-600">{check.reason}</p>
+      {check.rule_name && (
+        <p className="text-xs text-gray-500">Rule: <span className="font-medium text-gray-700">{check.rule_name}</span></p>
+      )}
+      {check.category && (
+        <p className="text-xs text-gray-500">Category: <span className="font-medium text-gray-700">{check.category}</span></p>
+      )}
+      {check.caveats.length > 0 && (
+        <div className="mt-1 space-y-1">
+          {check.caveats.map((c, i) => (
+            <p key={i} className="text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded">⚠ {c}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SimulatorTab({ tenant }: { tenant: Tenant }) {
+  const [dest, setDest] = useState("");
+  const [port, setPort] = useState("443");
+  const [protocol, setProtocol] = useState("HTTPS");
+  const [result, setResult] = useState<SimulationResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const mut = useMutation({
+    mutationFn: () => simulateTraffic(tenant.id, dest.trim(), parseInt(port) || 443, protocol),
+    onSuccess: (data) => { setResult(data); setErr(null); },
+    onError: (e: Error) => setErr(e.message),
+  });
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!dest.trim()) return;
+    setResult(null);
+    mut.mutate();
+  }
+
+  // Auto-set port when protocol changes
+  function handleProtocol(p: string) {
+    setProtocol(p);
+    const defaults: Record<string, string> = { HTTPS: "443", HTTP: "80", DNS: "53", FTP: "21", SMTP: "25", SSH: "22" };
+    if (defaults[p]) setPort(defaults[p]);
+  }
+
+  const verdictStyle = result ? (VERDICT_STYLES[result.verdict] ?? VERDICT_STYLES.INTERNET) : null;
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <div>
+        <h2 className="text-base font-semibold text-gray-900">Traffic Simulator</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Evaluate how a connection would be handled against ZPA application segments and ZIA firewall,
+          DNS, and URL filtering policies — based on your last imported data.
+        </p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="sm:col-span-1">
+            <label className="block text-xs font-medium text-gray-700 mb-1">Destination</label>
+            <input
+              type="text"
+              value={dest}
+              onChange={e => setDest(e.target.value)}
+              placeholder="8.8.8.8 or example.com"
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Protocol</label>
+            <select
+              value={protocol}
+              onChange={e => handleProtocol(e.target.value)}
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+            >
+              {PROTOCOLS.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Port</label>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={port}
+              onChange={e => setPort(e.target.value)}
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+            />
+          </div>
+        </div>
+        {err && <p className="text-xs text-red-600">{err}</p>}
+        <button
+          type="submit"
+          disabled={mut.isPending || !dest.trim()}
+          className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+        >
+          {mut.isPending ? "Simulating…" : "Simulate"}
+        </button>
+      </form>
+
+      {result && (
+        <div className="space-y-4">
+          {/* Verdict banner */}
+          <div className={`rounded-xl border p-4 ${verdictStyle!.bg}`}>
+            <div className="flex items-center gap-3">
+              <span className={`text-sm font-bold px-3 py-1 rounded-full border ${verdictStyle!.text} border-current`}>
+                {verdictStyle!.label}
+              </span>
+              <span className={`text-sm font-medium ${verdictStyle!.text}`}>{result.verdict_label}</span>
+            </div>
+          </div>
+
+          {/* Step-by-step checks */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Policy Evaluation Chain</p>
+            <PolicyCheckCard check={result.zpa} />
+            <PolicyCheckCard check={result.zia_firewall} />
+            <PolicyCheckCard check={result.zia_dns} />
+            <PolicyCheckCard check={result.zia_url} />
+          </div>
+
+          <p className="text-xs text-gray-400">
+            Results are based on your last imported policy snapshot. Predefined URL categories,
+            user/group scoping, and time-based rules require a live ZIA lookup for full accuracy.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TerraformExportPanel({ tenant, product }: { tenant: Tenant; product: "zia" | "zpa" }) {
   const [pending, setPending] = useState(false);
@@ -8736,7 +8912,7 @@ export default function TenantWorkspacePage() {
 
   // Determine active tab from URL segment
   const pathSegment = location.pathname.split("/").pop() as TabId | undefined;
-  const activeTab: TabId = (["zia", "zpa", "zdx", "zcc", "zid"].includes(pathSegment ?? "") ? pathSegment : "zia") as TabId;
+  const activeTab: TabId = (["zia", "zpa", "zdx", "zcc", "zid", "sim"].includes(pathSegment ?? "") ? pathSegment : "zia") as TabId;
 
   const { data: tenant, isLoading, error } = useQuery({
     queryKey: ["tenant", Number(id)],
@@ -8782,6 +8958,7 @@ export default function TenantWorkspacePage() {
     { id: "zdx", label: "ZDX", show: true },
     { id: "zcc", label: "ZCC", show: true },
     { id: "zid", label: "ZID", show: true },
+    { id: "sim", label: "Simulator", show: true },
   ];
 
   // If trying to view ZPA tab but no ZPA, redirect to ZIA
@@ -8825,7 +9002,7 @@ export default function TenantWorkspacePage() {
             </span>
           )}
         </div>
-        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || activeTab === "zcc") && (
+        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || activeTab === "zcc") && activeTab !== "sim" && (
           <button
             onClick={() => setImportModal(importProduct)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white transition-colors"
@@ -8863,6 +9040,7 @@ export default function TenantWorkspacePage() {
       {activeTab === "zdx" && <ZdxTab key={tenant.id} tenant={tenant} />}
       {activeTab === "zcc" && <ZccTab key={tenant.id} tenant={tenant} />}
       {activeTab === "zid" && <ZidTab key={tenant.id} tenant={tenant} />}
+      {activeTab === "sim" && <SimulatorTab key={tenant.id} tenant={tenant} />}
 
       {importModal && (
         <ImportProductModal
