@@ -9002,7 +9002,7 @@ export default function TenantWorkspacePage() {
             </span>
           )}
         </div>
-        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || activeTab === "zcc") && activeTab !== "sim" && (
+        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || activeTab === "zcc") && (
           <button
             onClick={() => setImportModal(importProduct)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white transition-colors"
