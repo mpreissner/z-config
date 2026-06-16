@@ -338,12 +338,15 @@ def _eval_zia_firewall(tenant_id: int, dest: str, port: int, protocol: str) -> P
         nw_svc_groups = _resolve_network_service_groups(tenant_id, s)
 
     enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
-    enabled.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
+    # Default rule has order -1 in ZIA (sentinel for "bottom of list") — always evaluate last
+    non_default = [r for r in enabled if not (r.raw_config or {}).get("default_rule")]
+    default_rules = [r for r in enabled if (r.raw_config or {}).get("default_rule")]
+    non_default.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
+    ordered = non_default + default_rules
 
-    for rule in enabled:
+    for rule in ordered:
         cfg = rule.raw_config or {}
         if cfg.get("default_rule"):
-            # default catch-all — note it but keep going
             check.matched = True
             check.rule_name = cfg.get("name", "Default Firewall Rule")
             check.action = cfg.get("action", "ALLOW")
