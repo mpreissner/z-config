@@ -95,7 +95,10 @@ export interface SimulationResult {
   zia_firewall: PolicyCheck;
   zia_dns: PolicyCheck;
   zia_url: PolicyCheck;
-  verdict: "ZPA" | "ZIA_ALLOW" | "ZIA_BLOCK_FIREWALL" | "ZIA_BLOCK_DNS" | "ZIA_BLOCK_URL" | "INTERNET";
+  zia_ssl: PolicyCheck;
+  zia_cloud_app: PolicyCheck;
+  zia_exceptions: PolicyCheck;
+  verdict: "ZPA" | "ZIA_ALLOW" | "ZIA_BLOCK_FIREWALL" | "ZIA_BLOCK_DNS" | "ZIA_BLOCK_URL" | "ZIA_BLOCK_CLOUDAPP" | "INTERNET";
   verdict_label: string;
 }
 
@@ -105,6 +108,7 @@ export interface SimulateParams {
   protocol: string;
   nwApplication?: string;
   appServiceGroup?: string;
+  cloudApp?: string;
   srcIp?: string;
   userName?: string;
   deptName?: string;
@@ -121,6 +125,7 @@ export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<Si
       protocol: p.protocol,
       nw_application: p.nwApplication || null,
       app_service_group: p.appServiceGroup || null,
+      cloud_app: p.cloudApp || null,
       src_ip: p.srcIp || null,
       user_name: p.userName || null,
       dept_name: p.deptName || null,
@@ -132,6 +137,9 @@ export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<Si
 
 export const fetchSimApplications = (tenantId: number): Promise<string[]> =>
   apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/applications`);
+
+export const fetchSimCloudApps = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/cloud-apps`);
 
 export const fetchSimAppServiceGroups = (tenantId: number): Promise<string[]> =>
   apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/app-service-groups`);

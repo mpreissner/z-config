@@ -47,7 +47,10 @@ class SimulationResult:
     zia_firewall: PolicyCheck
     zia_dns: PolicyCheck
     zia_url: PolicyCheck
-    verdict: str          # ZPA | ZIA_ALLOW | ZIA_BLOCK_FIREWALL | ZIA_BLOCK_DNS | ZIA_BLOCK_URL | INTERNET
+    zia_ssl: PolicyCheck
+    zia_cloud_app: PolicyCheck
+    zia_exceptions: PolicyCheck
+    verdict: str          # ZPA | ZIA_ALLOW | ZIA_BLOCK_FIREWALL | ZIA_BLOCK_DNS | ZIA_BLOCK_URL | ZIA_BLOCK_CLOUDAPP | INTERNET
     verdict_label: str    # human-readable
 
 
@@ -502,7 +505,7 @@ def _eval_zia_firewall(
         and not (r.raw_config or {}).get("nw_services")
         and not (r.raw_config or {}).get("nw_service_groups")
     ]
-    if app_only_rules:
+    if app_only_rules and not nw_application and not app_service_group:
         check.caveats.append(
             "Rules using application-layer matching were skipped (specify Network Application or App Service Group to evaluate): "
             + ", ".join(f'"{n}"' for n in app_only_rules[:5])
@@ -559,9 +562,12 @@ def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
         ip_groups = _resolve_ip_dest_groups(tenant_id, s)
 
     enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
-    enabled.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
+    non_default_dns = [r for r in enabled if not (r.raw_config or {}).get("default_rule")]
+    default_dns = [r for r in enabled if (r.raw_config or {}).get("default_rule")]
+    non_default_dns.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
+    ordered_dns = non_default_dns + default_dns
 
-    for rule in enabled:
+    for rule in ordered_dns:
         cfg = rule.raw_config or {}
         if cfg.get("default_rule"):
             check.matched = True
@@ -710,6 +716,207 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
 
 
 # ---------------------------------------------------------------------------
+# ZIA SSL Inspection evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_ssl_inspection(
+    tenant_id: int, dest: str, protocol: str,
+    cloud_app: Optional[str] = None,
+    user_name: Optional[str] = None,
+    dept_name: Optional[str] = None,
+    group_name: Optional[str] = None,
+    location_name: Optional[str] = None,
+) -> PolicyCheck:
+    check = PolicyCheck(engine="ZIA SSL Inspection")
+
+    if protocol.upper() not in ("HTTPS", "SSL", "TLS", "HTTP"):
+        check.action = "N/A"
+        check.reason = f"SSL inspection does not apply to {protocol} traffic"
+        return check
+
+    hostname = _strip_url(dest)
+
+    with get_session() as s:
+        rules = s.query(ZIAResource).filter_by(
+            tenant_id=tenant_id, resource_type="ssl_inspection_rule", is_deleted=False
+        ).all()
+        url_categories = _resolve_url_categories(tenant_id, s)
+
+    enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
+    non_default = [r for r in enabled if not (r.raw_config or {}).get("default_rule")]
+    default_rules = [r for r in enabled if (r.raw_config or {}).get("default_rule")]
+    non_default.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
+    enabled = non_default + default_rules
+
+    predefined_skipped: List[str] = []
+
+    for rule in enabled:
+        cfg = rule.raw_config or {}
+        url_cats: List[str] = cfg.get("url_categories", [])
+        cloud_apps: List[str] = [str(a) for a in cfg.get("cloud_applications", []) if a]
+        users: List[Dict] = cfg.get("users", [])
+        depts: List[Dict] = cfg.get("departments", [])
+        groups: List[Dict] = cfg.get("groups", [])
+        locs: List[Dict] = cfg.get("locations", [])
+
+        # Evaluate url_categories — resolve custom ones, skip predefined
+        cat_matched = False
+        has_predefined = False
+        if url_cats:
+            for cat_id in url_cats:
+                cat_cfg = url_categories.get(str(cat_id))
+                if cat_cfg is None:
+                    has_predefined = True
+                    continue
+                if cat_cfg.get("custom_category"):
+                    if _url_in_category(hostname, cat_cfg):
+                        cat_matched = True
+                        break
+                else:
+                    has_predefined = True
+            if not cat_matched:
+                if has_predefined:
+                    predefined_skipped.append(cfg.get("name", "?"))
+                continue
+
+        # cloud_applications constraint (only evaluated when no url_cats matched)
+        if cloud_apps and not cat_matched:
+            if not cloud_app or cloud_app.upper() not in [a.upper() for a in cloud_apps]:
+                if not url_cats:
+                    predefined_skipped.append(cfg.get("name", "?"))
+                continue
+
+        # identity constraints (permissive if not provided)
+        if users and user_name and not _name_in_list(user_name, users):
+            continue
+        if depts and dept_name and not _name_in_list(dept_name, depts):
+            continue
+        if groups and group_name and not _name_in_list(group_name, groups):
+            continue
+        if locs and location_name and not _name_in_list(location_name, locs):
+            continue
+
+        action_cfg = cfg.get("action", {})
+        action_type = action_cfg.get("type", "DECRYPT") if isinstance(action_cfg, dict) else str(action_cfg)
+        check.matched = True
+        check.rule_name = cfg.get("name", "Unknown Rule")
+        check.action = action_type
+        check.reason = f'Matched SSL rule "{check.rule_name}" (order {cfg.get("order", "?")}) → {action_type}'
+        break
+
+    if not check.matched:
+        check.action = "DECRYPT"
+        check.reason = "No SSL bypass rule matched — traffic will be decrypted (default)"
+        if predefined_skipped:
+            check.caveats.append(
+                "Rules using predefined URL categories cannot be evaluated offline: "
+                + ", ".join(f'"{n}"' for n in predefined_skipped[:5])
+                + (f" +{len(predefined_skipped)-5} more" if len(predefined_skipped) > 5 else "")
+            )
+
+    return check
+
+
+# ---------------------------------------------------------------------------
+# ZIA Cloud App Control evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_cloud_app_control(
+    tenant_id: int,
+    cloud_app: Optional[str] = None,
+    user_name: Optional[str] = None,
+    dept_name: Optional[str] = None,
+    group_name: Optional[str] = None,
+    location_name: Optional[str] = None,
+) -> PolicyCheck:
+    check = PolicyCheck(engine="ZIA Cloud App Control")
+
+    if not cloud_app:
+        check.reason = "No cloud application specified — cloud app control not evaluated"
+        return check
+
+    with get_session() as s:
+        rules = s.query(ZIAResource).filter_by(
+            tenant_id=tenant_id, resource_type="cloud_app_control_rule", is_deleted=False
+        ).all()
+
+    enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
+    enabled.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
+
+    app_upper = cloud_app.upper()
+
+    for rule in enabled:
+        cfg = rule.raw_config or {}
+        applications = [str(a).upper() for a in cfg.get("applications", [])]
+        if not applications or app_upper not in applications:
+            continue
+
+        users: List[Dict] = cfg.get("users", [])
+        depts: List[Dict] = cfg.get("departments", [])
+        groups: List[Dict] = cfg.get("groups", [])
+        locs: List[Dict] = cfg.get("locations", [])
+
+        if users and user_name and not _name_in_list(user_name, users):
+            continue
+        if depts and dept_name and not _name_in_list(dept_name, depts):
+            continue
+        if groups and group_name and not _name_in_list(group_name, groups):
+            continue
+        if locs and location_name and not _name_in_list(location_name, locs):
+            continue
+
+        actions: List[str] = cfg.get("actions", [])
+        is_block = any("BLOCK" in str(a).upper() for a in actions)
+        action = "BLOCK" if is_block else "ALLOW"
+
+        check.matched = True
+        check.rule_name = cfg.get("name", "Unknown Rule")
+        check.action = action
+        check.reason = (
+            f'Matched cloud app control rule "{check.rule_name}" '
+            f'(type: {cfg.get("type", "?")}) → {action}'
+        )
+        break
+
+    if not check.matched:
+        check.reason = f'No cloud app control rule matched "{cloud_app}"'
+
+    return check
+
+
+# ---------------------------------------------------------------------------
+# ZIA Security Exceptions evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_security_exceptions(tenant_id: int, dest: str) -> PolicyCheck:
+    check = PolicyCheck(engine="ZIA Security Exceptions")
+    hostname = _strip_url(dest)
+
+    with get_session() as s:
+        rows = s.query(ZIAResource).filter_by(
+            tenant_id=tenant_id, resource_type="allowlist", is_deleted=False
+        ).all()
+
+    for row in rows:
+        cfg = row.raw_config or {}
+        for url in cfg.get("whitelist_urls", []):
+            if url and _hostname_matches(hostname, url.strip()):
+                check.matched = True
+                check.action = "ALLOW"
+                check.reason = "Destination is in security exceptions allowlist — bypasses URL filtering"
+                return check
+        for url in cfg.get("blacklist_urls", []):
+            if url and _hostname_matches(hostname, url.strip()):
+                check.matched = True
+                check.action = "BLOCK"
+                check.reason = "Destination is in security exceptions denylist"
+                return check
+
+    check.reason = "Destination is not in any security exception list"
+    return check
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -720,6 +927,7 @@ def simulate(
     tenant_id: int, destination: str, port: int, protocol: str,
     nw_application: Optional[str] = None,
     app_service_group: Optional[str] = None,
+    cloud_app: Optional[str] = None,
     src_ip: Optional[str] = None,
     user_name: Optional[str] = None,
     dept_name: Optional[str] = None,
@@ -735,6 +943,14 @@ def simulate(
     )
     zia_dns = _eval_zia_dns(tenant_id, dest, port, protocol)
     zia_url = _eval_zia_url(tenant_id, dest, port, protocol)
+    zia_ssl = _eval_ssl_inspection(
+        tenant_id, dest, protocol,
+        cloud_app, user_name, dept_name, group_name, location_name,
+    )
+    zia_cloud_app = _eval_cloud_app_control(
+        tenant_id, cloud_app, user_name, dept_name, group_name, location_name,
+    )
+    zia_exceptions = _eval_security_exceptions(tenant_id, dest)
 
     # Determine verdict
     if zpa.matched:
@@ -743,10 +959,13 @@ def simulate(
     elif zia_fw.matched and (zia_fw.action or "").upper() in _BLOCK_ACTIONS:
         verdict = "ZIA_BLOCK_FIREWALL"
         verdict_label = f'Blocked by ZIA Firewall → "{zia_fw.rule_name}"'
+    elif zia_cloud_app.matched and (zia_cloud_app.action or "").upper() in _BLOCK_ACTIONS:
+        verdict = "ZIA_BLOCK_CLOUDAPP"
+        verdict_label = f'Blocked by ZIA Cloud App Control → "{zia_cloud_app.rule_name}"'
     elif zia_dns.matched and (zia_dns.action or "").upper() in _BLOCK_ACTIONS:
         verdict = "ZIA_BLOCK_DNS"
         verdict_label = f'Blocked by ZIA DNS Filter → "{zia_dns.rule_name}"'
-    elif zia_url.matched and (zia_url.action or "").upper() in _BLOCK_ACTIONS:
+    elif zia_url.matched and (zia_url.action or "").upper() in _BLOCK_ACTIONS and not (zia_exceptions.matched and zia_exceptions.action == "ALLOW"):
         verdict = "ZIA_BLOCK_URL"
         verdict_label = f'Blocked by ZIA URL Filter → "{zia_url.rule_name}"'
     else:
@@ -761,6 +980,9 @@ def simulate(
         zia_firewall=zia_fw,
         zia_dns=zia_dns,
         zia_url=zia_url,
+        zia_ssl=zia_ssl,
+        zia_cloud_app=zia_cloud_app,
+        zia_exceptions=zia_exceptions,
         verdict=verdict,
         verdict_label=verdict_label,
     )

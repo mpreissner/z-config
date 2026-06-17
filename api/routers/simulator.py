@@ -18,6 +18,7 @@ class SimulateRequest(BaseModel):
     protocol: str = "HTTPS"
     nw_application: str | None = None
     app_service_group: str | None = None
+    cloud_app: str | None = None
     src_ip: str | None = None
     user_name: str | None = None
     dept_name: str | None = None
@@ -39,7 +40,7 @@ def simulate_traffic(tenant_id: int, req: SimulateRequest, user: AuthUser = Depe
     from services.traffic_sim_service import simulate
     result = simulate(
         tenant_id, req.destination, req.port, req.protocol,
-        req.nw_application, req.app_service_group,
+        req.nw_application, req.app_service_group, req.cloud_app,
         req.src_ip, req.user_name, req.dept_name, req.group_name, req.location_name,
     )
     return asdict(result)
@@ -106,6 +107,23 @@ def list_sim_groups(tenant_id: int, user: AuthUser = Depends(require_auth)):
 def list_sim_locations(tenant_id: int, user: AuthUser = Depends(require_auth)):
     _check_access(tenant_id, user)
     return _unique_names(tenant_id, "location", "name")
+
+
+@router.get("/{tenant_id}/simulate/cloud-apps")
+def list_sim_cloud_apps(tenant_id: int, user: AuthUser = Depends(require_auth)):
+    """Return unique cloud app IDs referenced by this tenant's cloud app control rules."""
+    _check_access(tenant_id, user)
+    from db.models import ZIAResource
+    with get_session() as s:
+        rules = s.query(ZIAResource).filter_by(
+            tenant_id=tenant_id, resource_type="cloud_app_control_rule", is_deleted=False
+        ).all()
+    apps: set[str] = set()
+    for r in rules:
+        for app in (r.raw_config or {}).get("applications", []):
+            if app:
+                apps.add(str(app))
+    return sorted(apps)
 
 
 @router.get("/{tenant_id}/simulate/app-service-groups")

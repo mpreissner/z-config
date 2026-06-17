@@ -12,6 +12,7 @@ import {
   downloadTerraform,
   simulateTraffic,
   fetchSimApplications,
+  fetchSimCloudApps,
   fetchSimAppServiceGroups,
   fetchSimUsers,
   fetchSimDepartments,
@@ -6246,9 +6247,10 @@ const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
 const VERDICT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   ZPA:                { bg: "bg-blue-50",  text: "text-blue-800",  label: "ZPA" },
   ZIA_ALLOW:          { bg: "bg-green-50", text: "text-green-800", label: "ZIA Allow" },
-  ZIA_BLOCK_FIREWALL: { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
-  ZIA_BLOCK_DNS:      { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
-  ZIA_BLOCK_URL:      { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_FIREWALL:  { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_CLOUDAPP:  { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_DNS:       { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_URL:       { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
   INTERNET:           { bg: "bg-gray-50",  text: "text-gray-700",  label: "Internet" },
 };
 
@@ -6303,6 +6305,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const [protocol, setProtocol] = useState("HTTPS");
   const [nwApp, setNwApp] = useState("");
   const [appSvcGroup, setAppSvcGroup] = useState("");
+  const [cloudApp, setCloudApp] = useState("");
   const [srcIp, setSrcIp] = useState("");
   const [userName, setUserName] = useState("");
   const [deptName, setDeptName] = useState("");
@@ -6314,6 +6317,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
 
   const { data: appOptions = [] } = useQuery({ queryKey: ["sim-applications", tenant.id], queryFn: () => fetchSimApplications(tenant.id) });
   const { data: appSvcGroupOptions = [] } = useQuery({ queryKey: ["sim-app-service-groups", tenant.id], queryFn: () => fetchSimAppServiceGroups(tenant.id) });
+  const { data: cloudAppOptions = [] } = useQuery({ queryKey: ["sim-cloud-apps", tenant.id], queryFn: () => fetchSimCloudApps(tenant.id) });
   const { data: userOptions = [] } = useQuery({ queryKey: ["sim-users", tenant.id], queryFn: () => fetchSimUsers(tenant.id) });
   const { data: deptOptions = [] } = useQuery({ queryKey: ["sim-depts", tenant.id], queryFn: () => fetchSimDepartments(tenant.id) });
   const { data: groupOptions = [] } = useQuery({ queryKey: ["sim-groups", tenant.id], queryFn: () => fetchSimGroups(tenant.id) });
@@ -6324,6 +6328,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
       destination: dest.trim(), port: parseInt(port) || 443, protocol,
       nwApplication: nwApp.trim() || undefined,
       appServiceGroup: appSvcGroup.trim() || undefined,
+      cloudApp: cloudApp.trim() || undefined,
       srcIp: srcIp.trim() || undefined,
       userName: userName.trim() || undefined,
       deptName: deptName.trim() || undefined,
@@ -6415,19 +6420,72 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Network Application</label>
-                <input list="nw-app-options" type="text" value={nwApp} onChange={e => setNwApp(e.target.value)}
-                  placeholder="e.g. QUIC, HTTP2"
-                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
-                <datalist id="nw-app-options">{appOptions.map(a => <option key={a} value={a} />)}</datalist>
+                {(() => {
+                  const popular = ["QUIC","HTTP","HTTP2","FTP","SFTP","SSH","DNS","SMTP","SMTPS","POP3","POP3S","IMAP","IMAPS","RDP","VNC","TELNET","LDAP","LDAPS","NTP","SNMP","SMB","MSSQL","MYSQL","ORACLE_DB","POSTGRESQL","KERBEROS","RADIUS","ZSCALER_PROXY_TRAFFIC"];
+                  const extra = appOptions.filter(a => !popular.includes(a));
+                  return (
+                    <select value={nwApp} onChange={e => setNwApp(e.target.value)}
+                      className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                      <option value="">(none)</option>
+                      <optgroup label="Common">
+                        {popular.map(a => <option key={a} value={a}>{a}</option>)}
+                      </optgroup>
+                      {extra.length > 0 && (
+                        <optgroup label="In Your Rules">
+                          {extra.map(a => <option key={a} value={a}>{a}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                  );
+                })()}
                 <p className="mt-0.5 text-xs text-gray-400">Matches nw_applications rules (e.g. BLOCK_QUIC)</p>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">App Service Group</label>
-                <input list="app-svc-group-options" type="text" value={appSvcGroup} onChange={e => setAppSvcGroup(e.target.value)}
-                  placeholder="e.g. OFFICE365, ZOOM"
-                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
-                <datalist id="app-svc-group-options">{appSvcGroupOptions.map(g => <option key={g} value={g} />)}</datalist>
+                {(() => {
+                  const popular = ["OFFICE365","GSUITE","ZOOM","WEBEX","SLACK","TEAMS","DROPBOX","BOX","SALESFORCE","SERVICENOW","WORKDAY","OKTA","GITHUB","JIRA","CONFLUENCE","SHAREPOINT","ONEDRIVE","AZURE","AWS","GCP","ZSCALER","UCAAS","CCAAS"];
+                  const extra = appSvcGroupOptions.filter(g => !popular.includes(g));
+                  return (
+                    <select value={appSvcGroup} onChange={e => setAppSvcGroup(e.target.value)}
+                      className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                      <option value="">(none)</option>
+                      <optgroup label="Common">
+                        {popular.map(g => <option key={g} value={g}>{g}</option>)}
+                      </optgroup>
+                      {extra.length > 0 && (
+                        <optgroup label="In Your Rules">
+                          {extra.map(g => <option key={g} value={g}>{g}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                  );
+                })()}
                 <p className="mt-0.5 text-xs text-gray-400">Matches app_service_groups rules (e.g. Office365, UCaaS)</p>
+              </div>
+            </div>
+            {/* Row 1b: cloud app */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Cloud Application</label>
+                {(() => {
+                  const popular = ["MSTEAM","SHAREPOINTONLINE","OTHER_OFFICE365","YAMMER","SWAY_ENTERPRISE","DYNAMICS","DELVE","POWERBI","MSPLANNER","GOOGLEDRIVE","GMAIL","GDOCS","GSHEETS","GSLIDES","DROPBOX","BOX","SLACK","ZOOM","WEBEX","SALESFORCE","SERVICENOW","WORKDAY","GITHUB","JIRA","CONFLUENCE","OKTA","AWS","AZURE","GCP"];
+                  const extra = cloudAppOptions.filter(a => !popular.includes(a));
+                  return (
+                    <select value={cloudApp} onChange={e => setCloudApp(e.target.value)}
+                      className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                      <option value="">(none)</option>
+                      <optgroup label="Common">
+                        {popular.map(a => <option key={a} value={a}>{a}</option>)}
+                      </optgroup>
+                      {extra.length > 0 && (
+                        <optgroup label="In Your Rules">
+                          {extra.map(a => <option key={a} value={a}>{a}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                  );
+                })()}
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates Cloud App Control and SSL inspection rules</p>
               </div>
             </div>
             {/* Row 2: source */}
@@ -6441,10 +6499,11 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Location</label>
-                <input list="location-options" type="text" value={locationName} onChange={e => setLocationName(e.target.value)}
-                  placeholder="e.g. HQ, Branch-NYC"
-                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
-                <datalist id="location-options">{locationOptions.map(l => <option key={l} value={l} />)}</datalist>
+                <select value={locationName} onChange={e => setLocationName(e.target.value)}
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                  <option value="">(none)</option>
+                  {locationOptions.map(l => <option key={l} value={l}>{l}</option>)}
+                </select>
                 <p className="mt-0.5 text-xs text-gray-400">Evaluates location-scoped rules</p>
               </div>
             </div>
@@ -6504,8 +6563,11 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Policy Evaluation Chain</p>
             <PolicyCheckCard check={result.zpa} />
             <PolicyCheckCard check={result.zia_firewall} />
+            <PolicyCheckCard check={result.zia_cloud_app} />
             <PolicyCheckCard check={result.zia_dns} />
             <PolicyCheckCard check={result.zia_url} />
+            <PolicyCheckCard check={result.zia_exceptions} />
+            <PolicyCheckCard check={result.zia_ssl} />
           </div>
 
           <p className="text-xs text-gray-400">
