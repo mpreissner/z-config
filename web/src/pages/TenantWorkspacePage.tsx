@@ -6259,11 +6259,11 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
     return ziaBlocked ? "#ef4444" : "#22c55e";
   }
 
-  // ZIA engines for detail box
+  // ZIA engines for detail box — in evaluation order
   const ziaEngines = [
     { key: "zia_firewall",   label: "Firewall"  },
-    { key: "zia_cloud_app",  label: "Cloud App" },
     { key: "zia_dns",        label: "DNS"        },
+    { key: "zia_cloud_app",  label: "Cloud App" },
     { key: "zia_url",        label: "URL Filter" },
     { key: "zia_exceptions", label: "Exceptions" },
     { key: "zia_ssl",        label: "SSL"        },
@@ -6277,8 +6277,8 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
     return "#22c55e";
   }
 
-  // Layout constants — bGap large enough so ZIA detail doesn't overlap row above
-  const bH = 40, bGap = 38;
+  // Layout constants
+  const bH = 48, bGap = 60;
   const bYs  = [10, 10+bH+bGap, 10+2*(bH+bGap)];
   const bCYs = bYs.map(y => y + bH/2);
   const uCY  = bCYs[1];
@@ -6292,8 +6292,8 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
   const bX=184, bW=88;
   const detX=284;
 
-  // ZIA detail box height (6 engines × 16px + padding)
-  const ziaDetH = 6*16+18;
+  // ZIA detail box height (6 engines × 20px + padding)
+  const ziaDetH = 6*20+22;
   const ziaDetY = bCYs[2] - ziaDetH/2;
   const detSmH  = bH;
   const detW    = 148;
@@ -6310,7 +6310,7 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
 
   return (
     <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white overflow-hidden select-none">
-      <svg viewBox={`0 0 ${svgW} ${svgH}`} xmlns="http://www.w3.org/2000/svg" style={{ display: "block", width: "100%", maxHeight: "500px" }}>
+      <svg viewBox={`0 0 ${svgW} ${svgH}`} xmlns="http://www.w3.org/2000/svg" style={{ display: "block", width: "100%", maxHeight: "650px" }}>
         <defs>
           <marker id="fd-gry" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
           <marker id="fd-ora" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
@@ -6331,11 +6331,14 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
         <text x={uX+32} y={uY+17} fontSize="8.5" fontWeight="700" fill="white">User</text>
         <text x={uX+32} y={uY+29} fontSize="7" fill="#9ca3af">Traffic</text>
         {/* Arrow: User → Route Decision */}
-        <line x1={uX+uW} y1={uCY} x2={rdX} y2={uCY} stroke="#6b7280" strokeWidth="1.5" markerEnd="url(#fd-dk)"/>
+        <line x1={uX+uW} y1={uCY} x2={rdX} y2={uCY}
+          stroke={active ? branchColor(active) : "#6b7280"} strokeWidth={active ? 2 : 1.5}
+          markerEnd={active ? (active==="bypass"?"url(#fd-ora)":active==="zpa"?"url(#fd-ind)":active==="zia"&&ziaBlocked?"url(#fd-red)":"url(#fd-grn)") : "url(#fd-dk)"}/>
 
         {/* ── Route Decision box ── */}
         <g filter="url(#fd-shd)">
-          <rect x={rdX} y={rdY} width={rdW} height={rdH} rx="8" fill="white" stroke="#e5e7eb" strokeWidth="1.5"/>
+          <rect x={rdX} y={rdY} width={rdW} height={rdH} rx="8" fill="white"
+            stroke={active ? branchColor(active) : "#e5e7eb"} strokeWidth={active ? 2 : 1.5}/>
         </g>
         <text x={rdX+8} y={rdY+13} fontSize="7.5" fontWeight="700" fill="#374151">ZCC Policy</text>
         <line x1={rdX+6} y1={rdY+18} x2={rdX+rdW-6} y2={rdY+18} stroke="#f3f4f6" strokeWidth="1"/>
@@ -6356,7 +6359,8 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
           );
         })}
         {/* Arrow: Route Decision → trunk */}
-        <line x1={rdX+rdW} y1={rdCY} x2={trunkX} y2={rdCY} stroke="#6b7280" strokeWidth="1.5"/>
+        <line x1={rdX+rdW} y1={rdCY} x2={trunkX} y2={rdCY}
+          stroke={active ? branchColor(active) : "#6b7280"} strokeWidth={active ? 2 : 1.5}/>
 
         {/* ── Vertical trunk ── */}
         <line x1={trunkX} y1={bCYs[0]} x2={trunkX} y2={bCYs[2]} stroke="#e5e7eb" strokeWidth="2"/>
@@ -6365,7 +6369,8 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
           const c = branchColor(active);
           return <line x1={trunkX} y1={rdCY} x2={trunkX} y2={bCYs[idx]} stroke={c} strokeWidth="2"/>;
         })()}
-        <circle cx={trunkX} cy={rdCY} r="3.5" fill="white" stroke="#9ca3af" strokeWidth="1.5"/>
+        <circle cx={trunkX} cy={rdCY} r="3.5" fill="white"
+          stroke={active ? branchColor(active) : "#9ca3af"} strokeWidth="1.5"/>
 
         {/* ── Branch boxes ── */}
         {([
@@ -6448,7 +6453,7 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
                 {on ? (ziaBlocked ? "Blocked" : "ZIA Allow") : "ZIA Policy"}
               </text>
               {ziaEngines.map((e, ei) => {
-                const ey = ziaDetY + 22 + ei * 16;
+                const ey = ziaDetY + 22 + ei * 20;
                 const dc = engineDotColor(e.key);
                 const matched = result ? !!(result as unknown as Record<string,PolicyCheck>)[e.key]?.matched : false;
                 return (
@@ -6471,8 +6476,8 @@ function SimulatorFlowDetail({ result }: { result: SimulationResult }) {
     { key: "zcc_bypass",    label: "ZCC Bypass" },
     { key: "zpa",           label: "ZPA" },
     { key: "zia_firewall",  label: "Firewall" },
-    { key: "zia_cloud_app", label: "Cloud App" },
     { key: "zia_dns",       label: "DNS Filter" },
+    { key: "zia_cloud_app", label: "Cloud App" },
     { key: "zia_url",       label: "URL Filter" },
     { key: "zia_exceptions",label: "Exceptions" },
     { key: "zia_ssl",       label: "SSL" },
@@ -6635,8 +6640,8 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
       {/* ── Left: form + verdict + policy chain ── */}
       <div className="space-y-4" style={{ width: "35%" }}>
       <form onSubmit={handleSubmit} className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="sm:col-span-1">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="col-span-2 sm:col-span-1">
             <label className="block text-xs font-medium text-gray-700 mb-1">Destination</label>
             <input
               type="text"
@@ -6667,6 +6672,14 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
               onChange={e => setPort(e.target.value)}
               className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
             />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">ZCC App Profile</label>
+            <select value={zccProfile} onChange={e => setZccProfile(e.target.value)}
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+              <option value="">(all profiles)</option>
+              {zccProfileOptions.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
           </div>
         </div>
         {/* Advanced Options toggle */}
@@ -6756,15 +6769,6 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
                 })()}
                 <p className="mt-0.5 text-xs text-gray-400">Evaluates Cloud App Control and SSL inspection rules</p>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">ZCC Web Policy</label>
-                <select value={zccProfile} onChange={e => setZccProfile(e.target.value)}
-                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
-                  <option value="">(all profiles)</option>
-                  {zccProfileOptions.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <p className="mt-0.5 text-xs text-gray-400">Evaluates ZCC bypass criteria for this profile</p>
-              </div>
             </div>
             {/* Row 2: source */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -6839,8 +6843,8 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
             <PolicyCheckCard check={result.zcc_bypass} />
             <PolicyCheckCard check={result.zpa} />
             <PolicyCheckCard check={result.zia_firewall} />
-            <PolicyCheckCard check={result.zia_cloud_app} />
             <PolicyCheckCard check={result.zia_dns} />
+            <PolicyCheckCard check={result.zia_cloud_app} />
             <PolicyCheckCard check={result.zia_url} />
             <PolicyCheckCard check={result.zia_exceptions} />
             <PolicyCheckCard check={result.zia_ssl} />
