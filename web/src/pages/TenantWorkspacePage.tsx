@@ -6246,72 +6246,262 @@ type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid" | "sim";
 const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
 
 function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
-  type NodeState = "idle" | "matched" | "blocked" | "bypassed" | "skipped";
+  const active = result
+    ? result.verdict === "ZCC_BYPASS" ? "bypass"
+      : result.verdict === "ZPA" ? "zpa"
+      : "zia"
+    : null;
+  const ziaBlocked = result ? result.verdict.includes("BLOCK") : false;
 
-  function nodeState(engine: string): NodeState {
-    if (!result) return "idle";
-    const check = (result as unknown as Record<string, PolicyCheck>)[engine];
-    if (!check) return "idle";
-    const action = (check.action || "").toUpperCase();
-    if (!check.matched) return "skipped";
-    if (action === "BYPASS") return "bypassed";
-    if (["BLOCK","BLOCK_DROP","BLOCK_ICMP","BLOCK_RESET"].some(a => action.includes(a))) return "blocked";
-    return "matched";
+  function branchColor(id: string) {
+    if (id === "bypass") return "#f97316";
+    if (id === "zpa")    return "#6366f1";
+    return ziaBlocked ? "#ef4444" : "#22c55e";
   }
 
-  const colors: Record<NodeState, string> = {
-    idle:     "bg-gray-100 border-gray-300 text-gray-500",
-    matched:  "bg-green-50 border-green-400 text-green-800",
-    blocked:  "bg-red-50 border-red-400 text-red-800 font-semibold",
-    bypassed: "bg-orange-50 border-orange-400 text-orange-800",
-    skipped:  "bg-gray-50 border-gray-200 text-gray-400",
-  };
-
-  const nodes: { label: string; engine: string; sub?: string }[] = [
-    { label: "ZCC Bypass", engine: "zcc_bypass", sub: "Tunnel exclusions" },
-    { label: "ZPA", engine: "zpa", sub: "App segments" },
-    { label: "ZIA Firewall", engine: "zia_firewall", sub: "FW rules" },
-    { label: "ZIA Cloud App", engine: "zia_cloud_app", sub: "App control" },
-    { label: "ZIA DNS Filter", engine: "zia_dns", sub: "DNS rules" },
-    { label: "ZIA URL Filter", engine: "zia_url", sub: "URL categories" },
-    { label: "Security Exceptions", engine: "zia_exceptions", sub: "Allowlist" },
-    { label: "SSL Inspection", engine: "zia_ssl", sub: "Decrypt/bypass" },
+  // ZIA engines for detail box
+  const ziaEngines = [
+    { key: "zia_firewall",   label: "Firewall"  },
+    { key: "zia_cloud_app",  label: "Cloud App" },
+    { key: "zia_dns",        label: "DNS"        },
+    { key: "zia_url",        label: "URL Filter" },
+    { key: "zia_exceptions", label: "Exceptions" },
+    { key: "zia_ssl",        label: "SSL"        },
   ];
+  function engineDotColor(key: string): string {
+    if (!result) return "#e5e7eb";
+    const c = (result as unknown as Record<string, PolicyCheck>)[key];
+    if (!c?.matched) return "#e5e7eb";
+    const a = (c.action || "").toUpperCase();
+    if (["BLOCK","BLOCK_DROP","BLOCK_ICMP","BLOCK_RESET"].some(x => a.includes(x))) return "#ef4444";
+    return "#22c55e";
+  }
 
-  const verdictColors: Record<string, string> = {
-    ZCC_BYPASS: "bg-orange-100 border-orange-400 text-orange-800",
-    ZPA: "bg-blue-100 border-blue-400 text-blue-800",
-    ZIA_ALLOW: "bg-green-100 border-green-400 text-green-800",
-    ZIA_BLOCK_FIREWALL: "bg-red-100 border-red-400 text-red-800",
-    ZIA_BLOCK_CLOUDAPP: "bg-red-100 border-red-400 text-red-800",
-    ZIA_BLOCK_DNS: "bg-red-100 border-red-400 text-red-800",
-    ZIA_BLOCK_URL: "bg-red-100 border-red-400 text-red-800",
-    INTERNET: "bg-green-100 border-green-400 text-green-800",
-  };
+  // Layout constants — bGap large enough so ZIA detail doesn't overlap row above
+  const bH = 40, bGap = 38;
+  const bYs  = [10, 10+bH+bGap, 10+2*(bH+bGap)];
+  const bCYs = bYs.map(y => y + bH/2);
+  const uCY  = bCYs[1];
+
+  // Column X positions
+  const uX=6,   uW=64, uH=44;
+  const rdX=82, rdW=82;
+  const rdY=bYs[0], rdH=bYs[2]+bH-bYs[0];
+  const rdCY=rdY+rdH/2;
+  const trunkX=172;
+  const bX=184, bW=88;
+  const detX=284;
+
+  // ZIA detail box height (6 engines × 16px + padding)
+  const ziaDetH = 6*16+18;
+  const ziaDetY = bCYs[2] - ziaDetH/2;
+  const detSmH  = bH;
+  const detW    = 148;
+
+  const svgH = Math.max(bYs[2]+bH, ziaDetY+ziaDetH) + 16;
+  const svgW  = detX + detW + 8;
+
+  const uY = uCY - uH/2;
+
+  // ZCC bypass detail text
+  const bypassRule = result?.zcc_bypass?.matched ? (result.zcc_bypass.rule_name || "Bypass rule matched") : null;
+  // ZPA detail text
+  const zpaSegment = result?.zpa?.matched ? (result.zpa.rule_name || "App segment matched") : null;
 
   return (
-    <div className="flex flex-col items-center gap-0 text-xs">
-      {/* Start node */}
-      <div className="px-3 py-1.5 rounded-md border bg-gray-800 text-white text-center w-full text-xs font-medium">
-        User Traffic
-      </div>
-      {nodes.map((node) => {
-        const state = nodeState(node.engine);
+    <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white overflow-hidden select-none">
+      <svg viewBox={`0 0 ${svgW} ${svgH}`} xmlns="http://www.w3.org/2000/svg" style={{ display: "block", width: "100%", maxHeight: "500px" }}>
+        <defs>
+          <marker id="fd-gry" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
+          <marker id="fd-ora" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
+          <marker id="fd-ind" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#6366f1"/></marker>
+          <marker id="fd-grn" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#22c55e"/></marker>
+          <marker id="fd-red" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#ef4444"/></marker>
+          <marker id="fd-dk"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#6b7280"/></marker>
+          <filter id="fd-shd"><feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.08"/></filter>
+          <clipPath id="fd-det-clip"><rect x={detX+5} y="0" width={detW-10} height={svgH}/></clipPath>
+        </defs>
+
+        {/* ── User box ── */}
+        <g filter="url(#fd-shd)">
+          <rect x={uX} y={uY} width={uW} height={uH} rx="8" fill="#1f2937" stroke="#374151" strokeWidth="1.5"/>
+        </g>
+        <rect x={uX+7} y={uY+8} width={16} height={11} rx="2" fill="none" stroke="#9ca3af" strokeWidth="1.2"/>
+        <line x1={uX+4} y1={uY+19} x2={uX+27} y2={uY+19} stroke="#9ca3af" strokeWidth="1.2"/>
+        <text x={uX+32} y={uY+17} fontSize="8.5" fontWeight="700" fill="white">User</text>
+        <text x={uX+32} y={uY+29} fontSize="7" fill="#9ca3af">Traffic</text>
+        {/* Arrow: User → Route Decision */}
+        <line x1={uX+uW} y1={uCY} x2={rdX} y2={uCY} stroke="#6b7280" strokeWidth="1.5" markerEnd="url(#fd-dk)"/>
+
+        {/* ── Route Decision box ── */}
+        <g filter="url(#fd-shd)">
+          <rect x={rdX} y={rdY} width={rdW} height={rdH} rx="8" fill="white" stroke="#e5e7eb" strokeWidth="1.5"/>
+        </g>
+        <text x={rdX+8} y={rdY+13} fontSize="7.5" fontWeight="700" fill="#374151">ZCC Policy</text>
+        <line x1={rdX+6} y1={rdY+18} x2={rdX+rdW-6} y2={rdY+18} stroke="#f3f4f6" strokeWidth="1"/>
+        {/* criteria rows */}
+        {([
+          { dot:"#f97316", label:"Bypass rule?", dest:"→ Bypass" },
+          { dot:"#6366f1", label:"App segment?", dest:"→ ZPA"    },
+          { dot:"#6b7280", label:"Default",      dest:"→ ZIA"    },
+        ]).map((row, i) => {
+          const ry = rdY + 28 + i * (rdH - 28) / 3;
+          const isActive = active === (["bypass","zpa","zia"][i]);
+          return (
+            <g key={i}>
+              <circle cx={rdX+10} cy={ry+5} r="4" fill={isActive ? row.dot : "#e5e7eb"}/>
+              <text x={rdX+18} y={ry+9} fontSize="6.5" fill={isActive?"#374151":"#9ca3af"}>{row.label}</text>
+              <text x={rdX+18} y={ry+19} fontSize="6" fontWeight="600" fill={isActive?row.dot:"#d1d5db"}>{row.dest}</text>
+            </g>
+          );
+        })}
+        {/* Arrow: Route Decision → trunk */}
+        <line x1={rdX+rdW} y1={rdCY} x2={trunkX} y2={rdCY} stroke="#6b7280" strokeWidth="1.5"/>
+
+        {/* ── Vertical trunk ── */}
+        <line x1={trunkX} y1={bCYs[0]} x2={trunkX} y2={bCYs[2]} stroke="#e5e7eb" strokeWidth="2"/>
+        {active && (() => {
+          const idx = ["bypass","zpa","zia"].indexOf(active);
+          const c = branchColor(active);
+          return <line x1={trunkX} y1={rdCY} x2={trunkX} y2={bCYs[idx]} stroke={c} strokeWidth="2"/>;
+        })()}
+        <circle cx={trunkX} cy={rdCY} r="3.5" fill="white" stroke="#9ca3af" strokeWidth="1.5"/>
+
+        {/* ── Branch boxes ── */}
+        {([
+          { id:"bypass", label:"ZCC Bypass", sub:"Tunnel exclusion", ab:"ZCC", color:"#f97316", fill:"#fff7ed", txt:"#9a3412" },
+          { id:"zpa",    label:"ZPA",        sub:"App segments",     ab:"ZPA", color:"#6366f1", fill:"#eef2ff", txt:"#3730a3" },
+          { id:"zia",    label:"ZIA",        sub:"Internet gateway", ab:"ZIA", color:"#374151", fill:"#f9fafb", txt:"#111827" },
+        ] as const).map((b, i) => {
+          const by=bYs[i], cy=bCYs[i], on=active===b.id;
+          const lc=on?branchColor(b.id):"#d1d5db";
+          const mk=on?(b.id==="bypass"?"url(#fd-ora)":b.id==="zpa"?"url(#fd-ind)":"url(#fd-dk)"):"url(#fd-gry)";
+          return (
+            <g key={b.id}>
+              <line x1={trunkX} y1={cy} x2={bX} y2={cy} stroke={lc} strokeWidth={on?2:1.5} markerEnd={mk}/>
+              <g filter="url(#fd-shd)">
+                <rect x={bX} y={by} width={bW} height={bH} rx="7"
+                  fill={on?b.fill:"white"} stroke={on?b.color:"#e5e7eb"} strokeWidth={on?2:1}/>
+              </g>
+              {on && <rect x={bX} y={by} width="4" height={bH} rx="2" fill={b.color}/>}
+              <circle cx={bX+18} cy={cy} r="11" fill={on?b.color:"#f3f4f6"}/>
+              <text x={bX+18} y={cy+4} fontSize="6" fontWeight="800" fill={on?"white":"#9ca3af"} textAnchor="middle">{b.ab}</text>
+              <text x={bX+35} y={by+15} fontSize="8.5" fontWeight="600" fill={on?b.txt:"#374151"}>{b.label}</text>
+              <text x={bX+35} y={by+27} fontSize="7" fill={on?b.txt:"#9ca3af"}>{b.sub}</text>
+            </g>
+          );
+        })}
+
+        {/* ── Detail: ZCC Bypass → bypass rule ── */}
+        {(() => {
+          const by=bYs[0], cy=bCYs[0], on=active==="bypass";
+          const color="#f97316", fill=on?"#fff7ed":"white", stroke=on?color:"#e5e7eb";
+          return (
+            <g>
+              <line x1={bX+bW} y1={cy} x2={detX} y2={cy} stroke={on?color:"#d1d5db"} strokeWidth={on?2:1.5} markerEnd={on?"url(#fd-ora)":"url(#fd-gry)"}/>
+              <g filter="url(#fd-shd)">
+                <rect x={detX} y={by} width={detW} height={detSmH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
+              </g>
+              {on && <rect x={detX} y={by} width="4" height={detSmH} rx="2" fill={color}/>}
+              <text x={detX+10} y={by+14} fontSize="8" fontWeight="700" fill={on?"#9a3412":"#6b7280"}>Direct</text>
+              <text x={detX+10} y={by+27} fontSize="7" fill={on?"#c2410c":"#9ca3af"} clipPath="url(#fd-det-clip)">
+                {on && bypassRule ? bypassRule : "No bypass rule matched"}
+              </text>
+            </g>
+          );
+        })()}
+
+        {/* ── Detail: ZPA → app segment ── */}
+        {(() => {
+          const by=bYs[1], cy=bCYs[1], on=active==="zpa";
+          const color="#6366f1", fill=on?"#eef2ff":"white", stroke=on?color:"#e5e7eb";
+          return (
+            <g>
+              <line x1={bX+bW} y1={cy} x2={detX} y2={cy} stroke={on?color:"#d1d5db"} strokeWidth={on?2:1.5} markerEnd={on?"url(#fd-ind)":"url(#fd-gry)"}/>
+              <g filter="url(#fd-shd)">
+                <rect x={detX} y={by} width={detW} height={detSmH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
+              </g>
+              {on && <rect x={detX} y={by} width="4" height={detSmH} rx="2" fill={color}/>}
+              <text x={detX+10} y={by+14} fontSize="8" fontWeight="700" fill={on?"#3730a3":"#6b7280"}>App Segment</text>
+              <text x={detX+10} y={by+27} fontSize="7" fill={on?"#4338ca":"#9ca3af"} clipPath="url(#fd-det-clip)">
+                {on && zpaSegment ? zpaSegment : "No segment matched"}
+              </text>
+            </g>
+          );
+        })()}
+
+        {/* ── Detail: ZIA → engine dots ── */}
+        {(() => {
+          const cy=bCYs[2], on=active==="zia";
+          const color=ziaBlocked?"#ef4444":"#22c55e";
+          const fill=on?(ziaBlocked?"#fef2f2":"#f0fdf4"):"white";
+          const stroke=on?color:"#e5e7eb";
+          const mk=on?(ziaBlocked?"url(#fd-red)":"url(#fd-grn)"):"url(#fd-gry)";
+          return (
+            <g>
+              <line x1={bX+bW} y1={cy} x2={detX} y2={cy} stroke={on?color:"#d1d5db"} strokeWidth={on?2:1.5} markerEnd={mk}/>
+              <g filter="url(#fd-shd)">
+                <rect x={detX} y={ziaDetY} width={detW} height={ziaDetH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
+              </g>
+              {on && <rect x={detX} y={ziaDetY} width="4" height={ziaDetH} rx="2" fill={color}/>}
+              <text x={detX+10} y={ziaDetY+12} fontSize="8" fontWeight="700" fill={on?(ziaBlocked?"#991b1b":"#166534"):"#6b7280"}>
+                {on ? (ziaBlocked ? "Blocked" : "ZIA Allow") : "ZIA Policy"}
+              </text>
+              {ziaEngines.map((e, ei) => {
+                const ey = ziaDetY + 22 + ei * 16;
+                const dc = engineDotColor(e.key);
+                const matched = result ? !!(result as unknown as Record<string,PolicyCheck>)[e.key]?.matched : false;
+                return (
+                  <g key={e.key}>
+                    <circle cx={detX+14} cy={ey+4} r="4" fill={dc}/>
+                    <text x={detX+22} y={ey+8} fontSize="7.5" fill={matched?(on?color:"#374151"):"#9ca3af"}>{e.label}</text>
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })()}
+      </svg>
+    </div>
+  );
+}
+
+function SimulatorFlowDetail({ result }: { result: SimulationResult }) {
+  const engines: { key: keyof SimulationResult; label: string }[] = [
+    { key: "zcc_bypass",    label: "ZCC Bypass" },
+    { key: "zpa",           label: "ZPA" },
+    { key: "zia_firewall",  label: "Firewall" },
+    { key: "zia_cloud_app", label: "Cloud App" },
+    { key: "zia_dns",       label: "DNS Filter" },
+    { key: "zia_url",       label: "URL Filter" },
+    { key: "zia_exceptions",label: "Exceptions" },
+    { key: "zia_ssl",       label: "SSL" },
+  ];
+
+  const matched = engines.filter(e => {
+    const c = result[e.key] as PolicyCheck;
+    return c?.matched;
+  });
+
+  if (!matched.length) return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      {matched.map(({ key, label }) => {
+        const c = result[key] as PolicyCheck;
+        const actionColor = c.action && ["BLOCK","BLOCK_DROP","BLOCK_ICMP","BLOCK_RESET"].some(a => (c.action||"").toUpperCase().includes(a))
+          ? "text-red-700" : c.action === "BYPASS" ? "text-orange-700" : "text-green-700";
         return (
-          <div key={node.engine} className="flex flex-col items-center w-full">
-            <div className="w-px h-3 bg-gray-300" />
-            <div className={`w-full px-2 py-1.5 rounded border text-center ${colors[state]}`}>
-              <div className="font-medium">{node.label}</div>
-              {node.sub && <div className="text-[10px] opacity-70">{node.sub}</div>}
+          <div key={key} className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[10px]">
+            <div className="flex items-center justify-between gap-1">
+              <span className="font-semibold text-gray-700">{label}</span>
+              {c.action && <span className={`font-bold ${actionColor}`}>{c.action}</span>}
             </div>
+            {c.rule_name && <p className="text-gray-500 truncate" title={c.rule_name}>{c.rule_name}</p>}
+            {c.category && <p className="text-gray-400 truncate" title={c.category}>{c.category}</p>}
           </div>
         );
       })}
-      {/* Verdict */}
-      <div className="w-px h-3 bg-gray-300" />
-      <div className={`w-full px-2 py-1.5 rounded border text-center font-semibold ${result ? (verdictColors[result.verdict] ?? "bg-green-100 border-green-400 text-green-800") : "bg-gray-100 border-gray-300 text-gray-500"}`}>
-        {result ? result.verdict.replace(/_/g, " ") : "Verdict"}
-      </div>
     </div>
   );
 }
@@ -6432,8 +6622,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const verdictStyle = result ? (VERDICT_STYLES[result.verdict] ?? VERDICT_STYLES.INTERNET) : null;
 
   return (
-    <div className="flex gap-6 items-start">
-    <div className="space-y-6 flex-1 min-w-0">
+    <div className="space-y-4">
       <div>
         <h2 className="text-base font-semibold text-gray-900">Traffic Simulator</h2>
         <p className="mt-1 text-sm text-gray-500">
@@ -6442,6 +6631,9 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
         </p>
       </div>
 
+      <div className="flex gap-6 items-start">
+      {/* ── Left: form + verdict + policy chain ── */}
+      <div className="space-y-4" style={{ width: "35%" }}>
       <form onSubmit={handleSubmit} className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="sm:col-span-1">
@@ -6633,19 +6825,16 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
       </form>
 
       {result && (
-        <div className="space-y-4">
-          {/* Verdict banner */}
-          <div className={`rounded-xl border p-4 ${verdictStyle!.bg}`}>
-            <div className="flex items-center gap-3">
-              <span className={`text-sm font-bold px-3 py-1 rounded-full border ${verdictStyle!.text} border-current`}>
+        <div className="space-y-3">
+          <div className={`rounded-xl border p-3 ${verdictStyle!.bg}`}>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${verdictStyle!.text} border-current`}>
                 {verdictStyle!.label}
               </span>
-              <span className={`text-sm font-medium ${verdictStyle!.text}`}>{result.verdict_label}</span>
+              <span className={`text-xs font-medium ${verdictStyle!.text}`}>{result.verdict_label}</span>
             </div>
           </div>
-
-          {/* Step-by-step checks */}
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Policy Evaluation Chain</p>
             <PolicyCheckCard check={result.zcc_bypass} />
             <PolicyCheckCard check={result.zpa} />
@@ -6656,20 +6845,20 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
             <PolicyCheckCard check={result.zia_exceptions} />
             <PolicyCheckCard check={result.zia_ssl} />
           </div>
-
           <p className="text-xs text-gray-400">
             Results are based on your last imported policy snapshot. Predefined URL categories,
             user/group scoping, and time-based rules require a live ZIA lookup for full accuracy.
           </p>
         </div>
       )}
-    </div>
+      </div>
 
-    {/* Flow diagram side panel */}
-    <div className="hidden lg:block w-56 flex-shrink-0 sticky top-4">
-      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Policy Flow</p>
-      <SimulatorFlowDiagram result={result} />
-    </div>
+      {/* ── Right: diagram ── */}
+      <div className="space-y-3" style={{ width: "65%" }}>
+        <SimulatorFlowDiagram result={result} />
+        {result && <SimulatorFlowDetail result={result} />}
+      </div>
+      </div>
     </div>
   );
 }
