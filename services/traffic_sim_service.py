@@ -19,8 +19,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import ast
+
 from db.database import get_session
-from db.models import ZIAResource, ZPAResource
+from db.models import ZCCResource, ZIAResource, ZPAResource
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +45,7 @@ class SimulationResult:
     destination: str
     port: int
     protocol: str
+    zcc_bypass: PolicyCheck
     zpa: PolicyCheck
     zia_firewall: PolicyCheck
     zia_dns: PolicyCheck
@@ -50,7 +53,7 @@ class SimulationResult:
     zia_ssl: PolicyCheck
     zia_cloud_app: PolicyCheck
     zia_exceptions: PolicyCheck
-    verdict: str          # ZPA | ZIA_ALLOW | ZIA_BLOCK_FIREWALL | ZIA_BLOCK_DNS | ZIA_BLOCK_URL | ZIA_BLOCK_CLOUDAPP | INTERNET
+    verdict: str          # ZCC_BYPASS | ZPA | ZIA_ALLOW | ZIA_BLOCK_FIREWALL | ZIA_BLOCK_DNS | ZIA_BLOCK_URL | ZIA_BLOCK_CLOUDAPP | INTERNET
     verdict_label: str    # human-readable
 
 
@@ -919,6 +922,102 @@ def _eval_security_exceptions(tenant_id: int, dest: str) -> PolicyCheck:
 
 
 # ---------------------------------------------------------------------------
+# ZCC Bypass evaluation
+# ---------------------------------------------------------------------------
+
+def _eval_zcc_bypass(
+    tenant_id: int, dest: str, port: int, protocol: str,
+    zcc_profile: Optional[str] = None,
+) -> PolicyCheck:
+    check = PolicyCheck(engine="ZCC Bypass")
+    dest_is_ip = _is_ip(dest)
+
+    with get_session() as s:
+        policies = s.query(ZCCResource).filter_by(
+            tenant_id=tenant_id, resource_type="web_policy", is_deleted=False
+        ).all()
+        app_services = s.query(ZCCResource).filter_by(
+            tenant_id=tenant_id, resource_type="web_app_service", is_deleted=False
+        ).all()
+
+    if zcc_profile:
+        filtered = [r for r in policies if (r.raw_config or {}).get("name") == zcc_profile]
+        if filtered:
+            policies = filtered
+
+    for policy in policies:
+        cfg = policy.raw_config or {}
+        policy_name = cfg.get("name", "Unknown Policy")
+        ext = cfg.get("policyExtension") or {}
+
+        # IP/CIDR packet tunnel exclusions
+        exclude_list = str(ext.get("packetTunnelExcludeList") or "")
+        if exclude_list and dest_is_ip:
+            for cidr in [c.strip() for c in exclude_list.split(",") if c.strip()]:
+                try:
+                    if "/" in cidr:
+                        if _ip_in_cidr(dest, cidr):
+                            check.matched = True
+                            check.action = "BYPASS"
+                            check.rule_name = policy_name
+                            check.reason = f'Destination matches ZCC IP exclusion "{cidr}" in profile "{policy_name}" — bypasses tunnel'
+                            return check
+                    elif dest == cidr:
+                        check.matched = True
+                        check.action = "BYPASS"
+                        check.rule_name = policy_name
+                        check.reason = f'Destination matches ZCC IP exclusion "{cidr}" in profile "{policy_name}" — bypasses tunnel'
+                        return check
+                except Exception:
+                    pass
+
+        # Port-based bypasses (format: "port:dest" e.g. "3389:*")
+        port_bypasses = str(ext.get("sourcePortBasedBypasses") or "")
+        if port_bypasses:
+            for bypass in [b.strip() for b in port_bypasses.split(",") if b.strip()]:
+                try:
+                    bypass_port = int(bypass.split(":")[0])
+                    if bypass_port == port:
+                        check.matched = True
+                        check.action = "BYPASS"
+                        check.rule_name = policy_name
+                        check.reason = f'Port {port} matches ZCC port bypass "{bypass}" in profile "{policy_name}" — bypasses tunnel'
+                        return check
+                except (ValueError, IndexError):
+                    pass
+
+    # App service (split-tunnel) bypass
+    if dest_is_ip:
+        for svc in app_services:
+            cfg = svc.raw_config or {}
+            app_name = cfg.get("app_name", "Unknown App")
+            for blob_str in cfg.get("app_data_blob", []):
+                try:
+                    blob = ast.literal_eval(blob_str) if isinstance(blob_str, str) else blob_str
+                    blob_proto = str(blob.get("proto", "")).upper()
+                    blob_ports = [int(p) for p in str(blob.get("port", "")).split(",") if p.strip().isdigit()]
+                    blob_ips = [ip.strip() for ip in str(blob.get("ipaddr") or blob.get("ip_addr", "")).split(",") if ip.strip()]
+                    proto_match = not blob_proto or protocol.upper().startswith(blob_proto.rstrip("S"))
+                    port_match = not blob_ports or port in blob_ports
+                    ip_match = any(
+                        (_ip_in_cidr(dest, cidr) if "/" in cidr else dest == cidr)
+                        for cidr in blob_ips
+                        if cidr
+                    )
+                    if proto_match and port_match and ip_match:
+                        check.matched = True
+                        check.action = "BYPASS"
+                        check.rule_name = app_name
+                        check.reason = f'Destination matches ZCC app service bypass for "{app_name}" — may bypass tunnel'
+                        return check
+                except Exception:
+                    pass
+
+    check.reason = "No ZCC bypass criteria matched — traffic will be tunneled through ZCC"
+    return check
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -930,6 +1029,7 @@ def simulate(
     nw_application: Optional[str] = None,
     app_service_group: Optional[str] = None,
     cloud_app: Optional[str] = None,
+    zcc_profile: Optional[str] = None,
     src_ip: Optional[str] = None,
     user_name: Optional[str] = None,
     dept_name: Optional[str] = None,
@@ -937,6 +1037,7 @@ def simulate(
     location_name: Optional[str] = None,
 ) -> SimulationResult:
     dest = destination.strip()
+    zcc_bypass = _eval_zcc_bypass(tenant_id, dest, port, protocol, zcc_profile)
     zpa = _eval_zpa(tenant_id, dest, port, protocol)
     zia_fw = _eval_zia_firewall(
         tenant_id, dest, port, protocol,
@@ -955,7 +1056,10 @@ def simulate(
     zia_exceptions = _eval_security_exceptions(tenant_id, dest)
 
     # Determine verdict
-    if zpa.matched:
+    if zcc_bypass.matched and zcc_bypass.action == "BYPASS":
+        verdict = "ZCC_BYPASS"
+        verdict_label = f'Traffic bypasses ZCC tunnel — goes direct to internet via "{zcc_bypass.rule_name}"'
+    elif zpa.matched:
         verdict = "ZPA"
         verdict_label = f'Routed through ZPA → "{zpa.rule_name}"'
     elif zia_fw.matched and (zia_fw.action or "").upper() in _BLOCK_ACTIONS:
@@ -978,6 +1082,7 @@ def simulate(
         destination=dest,
         port=port,
         protocol=protocol,
+        zcc_bypass=zcc_bypass,
         zpa=zpa,
         zia_firewall=zia_fw,
         zia_dns=zia_dns,

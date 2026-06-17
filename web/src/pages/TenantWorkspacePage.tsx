@@ -13,6 +13,7 @@ import {
   simulateTraffic,
   fetchSimApplications,
   fetchSimCloudApps,
+  fetchSimZccProfiles,
   fetchSimAppServiceGroups,
   fetchSimUsers,
   fetchSimDepartments,
@@ -6244,7 +6245,79 @@ type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid" | "sim";
 
 const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
 
+function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
+  type NodeState = "idle" | "matched" | "blocked" | "bypassed" | "skipped";
+
+  function nodeState(engine: string): NodeState {
+    if (!result) return "idle";
+    const check = (result as unknown as Record<string, PolicyCheck>)[engine];
+    if (!check) return "idle";
+    const action = (check.action || "").toUpperCase();
+    if (!check.matched) return "skipped";
+    if (action === "BYPASS") return "bypassed";
+    if (["BLOCK","BLOCK_DROP","BLOCK_ICMP","BLOCK_RESET"].some(a => action.includes(a))) return "blocked";
+    return "matched";
+  }
+
+  const colors: Record<NodeState, string> = {
+    idle:     "bg-gray-100 border-gray-300 text-gray-500",
+    matched:  "bg-green-50 border-green-400 text-green-800",
+    blocked:  "bg-red-50 border-red-400 text-red-800 font-semibold",
+    bypassed: "bg-orange-50 border-orange-400 text-orange-800",
+    skipped:  "bg-gray-50 border-gray-200 text-gray-400",
+  };
+
+  const nodes: { label: string; engine: string; sub?: string }[] = [
+    { label: "ZCC Bypass", engine: "zcc_bypass", sub: "Tunnel exclusions" },
+    { label: "ZPA", engine: "zpa", sub: "App segments" },
+    { label: "ZIA Firewall", engine: "zia_firewall", sub: "FW rules" },
+    { label: "ZIA Cloud App", engine: "zia_cloud_app", sub: "App control" },
+    { label: "ZIA DNS Filter", engine: "zia_dns", sub: "DNS rules" },
+    { label: "ZIA URL Filter", engine: "zia_url", sub: "URL categories" },
+    { label: "Security Exceptions", engine: "zia_exceptions", sub: "Allowlist" },
+    { label: "SSL Inspection", engine: "zia_ssl", sub: "Decrypt/bypass" },
+  ];
+
+  const verdictColors: Record<string, string> = {
+    ZCC_BYPASS: "bg-orange-100 border-orange-400 text-orange-800",
+    ZPA: "bg-blue-100 border-blue-400 text-blue-800",
+    ZIA_ALLOW: "bg-green-100 border-green-400 text-green-800",
+    ZIA_BLOCK_FIREWALL: "bg-red-100 border-red-400 text-red-800",
+    ZIA_BLOCK_CLOUDAPP: "bg-red-100 border-red-400 text-red-800",
+    ZIA_BLOCK_DNS: "bg-red-100 border-red-400 text-red-800",
+    ZIA_BLOCK_URL: "bg-red-100 border-red-400 text-red-800",
+    INTERNET: "bg-green-100 border-green-400 text-green-800",
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-0 text-xs">
+      {/* Start node */}
+      <div className="px-3 py-1.5 rounded-md border bg-gray-800 text-white text-center w-full text-xs font-medium">
+        User Traffic
+      </div>
+      {nodes.map((node) => {
+        const state = nodeState(node.engine);
+        return (
+          <div key={node.engine} className="flex flex-col items-center w-full">
+            <div className="w-px h-3 bg-gray-300" />
+            <div className={`w-full px-2 py-1.5 rounded border text-center ${colors[state]}`}>
+              <div className="font-medium">{node.label}</div>
+              {node.sub && <div className="text-[10px] opacity-70">{node.sub}</div>}
+            </div>
+          </div>
+        );
+      })}
+      {/* Verdict */}
+      <div className="w-px h-3 bg-gray-300" />
+      <div className={`w-full px-2 py-1.5 rounded border text-center font-semibold ${result ? (verdictColors[result.verdict] ?? "bg-green-100 border-green-400 text-green-800") : "bg-gray-100 border-gray-300 text-gray-500"}`}>
+        {result ? result.verdict.replace(/_/g, " ") : "Verdict"}
+      </div>
+    </div>
+  );
+}
+
 const VERDICT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  ZCC_BYPASS:         { bg: "bg-orange-50", text: "text-orange-800", label: "ZCC Bypass" },
   ZPA:                { bg: "bg-blue-50",  text: "text-blue-800",  label: "ZPA" },
   ZIA_ALLOW:          { bg: "bg-green-50", text: "text-green-800", label: "ZIA Allow" },
   ZIA_BLOCK_FIREWALL:  { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
@@ -6306,6 +6379,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const [nwApp, setNwApp] = useState("");
   const [appSvcGroup, setAppSvcGroup] = useState("");
   const [cloudApp, setCloudApp] = useState("");
+  const [zccProfile, setZccProfile] = useState("");
   const [srcIp, setSrcIp] = useState("");
   const [userName, setUserName] = useState("");
   const [deptName, setDeptName] = useState("");
@@ -6318,6 +6392,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const { data: appOptions = [] } = useQuery({ queryKey: ["sim-applications", tenant.id], queryFn: () => fetchSimApplications(tenant.id) });
   const { data: appSvcGroupOptions = [] } = useQuery({ queryKey: ["sim-app-service-groups", tenant.id], queryFn: () => fetchSimAppServiceGroups(tenant.id) });
   const { data: cloudAppOptions = [] } = useQuery({ queryKey: ["sim-cloud-apps", tenant.id], queryFn: () => fetchSimCloudApps(tenant.id) });
+  const { data: zccProfileOptions = [] } = useQuery({ queryKey: ["sim-zcc-profiles", tenant.id], queryFn: () => fetchSimZccProfiles(tenant.id) });
   const { data: userOptions = [] } = useQuery({ queryKey: ["sim-users", tenant.id], queryFn: () => fetchSimUsers(tenant.id) });
   const { data: deptOptions = [] } = useQuery({ queryKey: ["sim-depts", tenant.id], queryFn: () => fetchSimDepartments(tenant.id) });
   const { data: groupOptions = [] } = useQuery({ queryKey: ["sim-groups", tenant.id], queryFn: () => fetchSimGroups(tenant.id) });
@@ -6329,6 +6404,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
       nwApplication: nwApp.trim() || undefined,
       appServiceGroup: appSvcGroup.trim() || undefined,
       cloudApp: cloudApp.trim() || undefined,
+      zccProfile: zccProfile || undefined,
       srcIp: srcIp.trim() || undefined,
       userName: userName.trim() || undefined,
       deptName: deptName.trim() || undefined,
@@ -6356,7 +6432,8 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const verdictStyle = result ? (VERDICT_STYLES[result.verdict] ?? VERDICT_STYLES.INTERNET) : null;
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    <div className="flex gap-6 items-start">
+    <div className="space-y-6 flex-1 min-w-0">
       <div>
         <h2 className="text-base font-semibold text-gray-900">Traffic Simulator</h2>
         <p className="mt-1 text-sm text-gray-500">
@@ -6487,6 +6564,15 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
                 })()}
                 <p className="mt-0.5 text-xs text-gray-400">Evaluates Cloud App Control and SSL inspection rules</p>
               </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">ZCC Web Policy</label>
+                <select value={zccProfile} onChange={e => setZccProfile(e.target.value)}
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                  <option value="">(all profiles)</option>
+                  {zccProfileOptions.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates ZCC bypass criteria for this profile</p>
+              </div>
             </div>
             {/* Row 2: source */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -6561,6 +6647,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
           {/* Step-by-step checks */}
           <div className="space-y-2">
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Policy Evaluation Chain</p>
+            <PolicyCheckCard check={result.zcc_bypass} />
             <PolicyCheckCard check={result.zpa} />
             <PolicyCheckCard check={result.zia_firewall} />
             <PolicyCheckCard check={result.zia_cloud_app} />
@@ -6576,6 +6663,13 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
           </p>
         </div>
       )}
+    </div>
+
+    {/* Flow diagram side panel */}
+    <div className="hidden lg:block w-56 flex-shrink-0 sticky top-4">
+      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Policy Flow</p>
+      <SimulatorFlowDiagram result={result} />
+    </div>
     </div>
   );
 }

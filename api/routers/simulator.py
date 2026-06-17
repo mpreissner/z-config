@@ -19,6 +19,7 @@ class SimulateRequest(BaseModel):
     nw_application: str | None = None
     app_service_group: str | None = None
     cloud_app: str | None = None
+    zcc_profile: str | None = None
     src_ip: str | None = None
     user_name: str | None = None
     dept_name: str | None = None
@@ -40,7 +41,7 @@ def simulate_traffic(tenant_id: int, req: SimulateRequest, user: AuthUser = Depe
     from services.traffic_sim_service import simulate
     result = simulate(
         tenant_id, req.destination, req.port, req.protocol,
-        req.nw_application, req.app_service_group, req.cloud_app,
+        req.nw_application, req.app_service_group, req.cloud_app, req.zcc_profile,
         req.src_ip, req.user_name, req.dept_name, req.group_name, req.location_name,
     )
     return asdict(result)
@@ -107,6 +108,21 @@ def list_sim_groups(tenant_id: int, user: AuthUser = Depends(require_auth)):
 def list_sim_locations(tenant_id: int, user: AuthUser = Depends(require_auth)):
     _check_access(tenant_id, user)
     return _unique_names(tenant_id, "location", "name")
+
+
+@router.get("/{tenant_id}/simulate/zcc-profiles")
+def list_sim_zcc_profiles(tenant_id: int, user: AuthUser = Depends(require_auth)):
+    """Return ZCC web policy names for this tenant."""
+    _check_access(tenant_id, user)
+    from db.models import ZCCResource
+    with get_session() as s:
+        rows = s.query(ZCCResource).filter_by(tenant_id=tenant_id, resource_type="web_policy", is_deleted=False).all()
+    names: set[str] = set()
+    for r in rows:
+        n = (r.raw_config or {}).get("name")
+        if n:
+            names.add(str(n))
+    return sorted(names)
 
 
 @router.get("/{tenant_id}/simulate/cloud-apps")
