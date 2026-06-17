@@ -626,8 +626,10 @@ def _resolve_url_categories(tenant_id: int, s) -> Dict[str, Dict]:
 def _url_in_category(hostname: str, cat_cfg: Dict) -> bool:
     """True if hostname is listed in a URL category (custom or predefined)."""
     for url_list in (cat_cfg.get("custom_urls", []), cat_cfg.get("urls", []), cat_cfg.get("db_categorized_urls", [])):
-        for url in url_list:
-            url = url.strip().lower().lstrip("http://").lstrip("https://").strip("/")
+        for raw_url in url_list:
+            url = _strip_url(raw_url) if raw_url else ""
+            if not url:
+                continue
             if hostname == url or hostname.endswith("." + url) or fnmatch.fnmatch(hostname, url):
                 return True
     return False
