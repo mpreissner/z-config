@@ -581,7 +581,9 @@ def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
 
         dest_addrs: List[str] = cfg.get("dest_addresses", [])
         dest_ip_groups_ref: List[Dict] = cfg.get("dest_ip_groups", [])
-        has_dest = bool(dest_addrs or dest_ip_groups_ref)
+        dest_ip_cats: List[str] = cfg.get("dest_ip_categories", [])
+        res_cats: List[str] = cfg.get("res_categories", [])
+        has_dest = bool(dest_addrs or dest_ip_groups_ref or dest_ip_cats or res_cats)
 
         if has_dest:
             dest_matched = False
@@ -595,6 +597,15 @@ def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
                             if _ip_matches_any(dest, ip_groups[int(gid)]):
                                 dest_matched = True
                                 break
+            # dest_ip_categories / res_categories are predefined ZIA IP categories
+            # (e.g. OFFICE_365, GLOBAL_INT_ZOOM). We cannot resolve these offline,
+            # so skip the rule rather than falsely matching every hostname.
+            if dest_ip_cats or res_cats:
+                check.caveats.append(
+                    f'Rule "{cfg.get("name")}" skipped offline — uses predefined IP categories '
+                    f'({", ".join(set(dest_ip_cats + res_cats))}) that require a live ZIA lookup'
+                )
+                continue
             if not dest_matched:
                 continue
 
