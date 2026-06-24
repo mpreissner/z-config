@@ -152,14 +152,29 @@ def _eval_zpa(tenant_id: int, dest: str, port: int, protocol: str) -> PolicyChec
             .all()
         )
 
-    matched_app = None
-    for app in apps:
+    def _domain_specificity(app) -> int:
+        """Higher = more specific. Exact hostname > wildcard > IP."""
         cfg = app.raw_config or {}
-        if not cfg.get("enabled", True):
-            continue
-        domain_names: List[str] = cfg.get("domain_names", [])
-        tcp_ranges: List[Dict] = cfg.get("tcp_port_range", [])
-        udp_ranges: List[Dict] = cfg.get("udp_port_range", [])
+        domains = cfg.get("domainNames", cfg.get("domain_names", []))
+        if hostname in domains or dest in domains:
+            return 2  # exact match
+        if any(d.startswith("*.") for d in domains):
+            return 0  # wildcard
+        return 1
+
+    # Sort most-specific first so exact hostname beats wildcard
+    sorted_apps = sorted(
+        [a for a in apps if (a.raw_config or {}).get("enabled", True)],
+        key=_domain_specificity,
+        reverse=True,
+    )
+
+    matched_app = None
+    for app in sorted_apps:
+        cfg = app.raw_config or {}
+        domain_names: List[str] = cfg.get("domainNames", cfg.get("domain_names", []))
+        tcp_ranges: List[Dict] = cfg.get("tcpPortRange", cfg.get("tcp_port_range", []))
+        udp_ranges: List[Dict] = cfg.get("udpPortRange", cfg.get("udp_port_range", []))
 
         # Destination match
         dest_match = False
@@ -182,11 +197,75 @@ def _eval_zpa(tenant_id: int, dest: str, port: int, protocol: str) -> PolicyChec
 
     if matched_app:
         cfg = matched_app.raw_config or {}
+        seg_id = str(cfg.get("id", ""))
         check.matched = True
         check.rule_name = cfg.get("name", "Unknown App Segment")
         check.action = "ALLOW"
         check.reason = f'Destination matches ZPA application segment "{check.rule_name}"'
-        check.caveats = ["ZPA access policy rules not evaluated — assume access allowed if segment matches"]
+
+        # Find access policies that reference this segment and extract requirements
+        with get_session() as s:
+            access_policies = s.query(ZPAResource).filter_by(
+                tenant_id=tenant_id, resource_type="policy_access", is_deleted=False
+            ).all()
+            scim_groups = s.query(ZPAResource).filter_by(
+                tenant_id=tenant_id, resource_type="scim_group", is_deleted=False
+            ).all()
+            saml_attrs = s.query(ZPAResource).filter_by(
+                tenant_id=tenant_id, resource_type="saml_attribute", is_deleted=False
+            ).all()
+
+        scim_group_map = {str((r.raw_config or {}).get("id", "")): (r.raw_config or {}).get("name", "") for r in scim_groups}
+        saml_attr_map = {str((r.raw_config or {}).get("id", "")): (r.raw_config or {}).get("name", "") for r in saml_attrs}
+
+        _OBJ_LABEL = {
+            "APP": "App", "APP_GROUP": "Segment Group",
+            "SAML": "Identity", "SCIM": "SCIM User", "SCIM_GROUP": "SCIM Group",
+            "CLIENT_TYPE": "Client Type", "POSTURE": "Device Posture",
+            "PLATFORM": "Platform", "TRUSTED_NETWORK": "Trusted Network",
+            "IDP": "IdP", "COUNTRY_CODE": "Country",
+        }
+
+        policy_summaries = []
+        for pol in access_policies:
+            pcfg = pol.raw_config or {}
+            if pcfg.get("disabled") == "1" or pcfg.get("action") == "DENY":
+                continue
+            conditions = pcfg.get("conditions", [])
+            # Check if this policy references our segment
+            refs_segment = any(
+                op.get("object_type") == "APP" and op.get("rhs") == seg_id
+                for cond in conditions for op in cond.get("operands", [])
+            )
+            if not refs_segment:
+                continue
+            # Extract non-APP conditions as access requirements
+            reqs = []
+            for cond in conditions:
+                for op in cond.get("operands", []):
+                    ot = op.get("object_type", "")
+                    if ot == "APP":
+                        continue
+                    label = _OBJ_LABEL.get(ot, ot)
+                    rhs = str(op.get("rhs", ""))
+                    if ot == "SCIM_GROUP":
+                        name = scim_group_map.get(rhs) or op.get("name") or rhs
+                    elif ot == "SAML":
+                        attr_id = str(op.get("lhs", ""))
+                        attr_name = saml_attr_map.get(attr_id) or op.get("name") or attr_id
+                        name = f"{attr_name}={rhs}"
+                    else:
+                        name = op.get("name") or rhs
+                    if name:
+                        reqs.append(f"{label}: {name}")
+            summary = f'Policy "{pcfg.get("name", "?")}": '
+            summary += (", ".join(reqs) if reqs else "No user/group restrictions")
+            policy_summaries.append(summary)
+
+        if policy_summaries:
+            check.caveats = [f"ZPA access requirements — {s}" for s in policy_summaries]
+        else:
+            check.caveats = ["No ZPA access policies found for this segment — access may be unrestricted"]
     else:
         check.reason = "No ZPA application segment matches this destination / port"
 
