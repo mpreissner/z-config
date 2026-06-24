@@ -583,9 +583,23 @@ def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
         dest_ip_groups_ref: List[Dict] = cfg.get("dest_ip_groups", [])
         dest_ip_cats: List[str] = cfg.get("dest_ip_categories", [])
         res_cats: List[str] = cfg.get("res_categories", [])
-        has_dest = bool(dest_addrs or dest_ip_groups_ref or dest_ip_cats or res_cats)
+        applications: List[str] = cfg.get("applications", [])
+        has_dest = bool(dest_addrs or dest_ip_groups_ref or dest_ip_cats or res_cats or applications)
 
         if has_dest:
+            # Predefined IP categories and application IDs require a live ZIA lookup —
+            # skip the rule offline rather than falsely matching every destination.
+            if dest_ip_cats or res_cats or applications:
+                skip_reason_parts = []
+                if dest_ip_cats or res_cats:
+                    skip_reason_parts.append(f'predefined IP categories ({", ".join(set(dest_ip_cats + res_cats))})')
+                if applications:
+                    skip_reason_parts.append(f'applications ({", ".join(applications[:5])}{"..." if len(applications) > 5 else ""})')
+                check.caveats.append(
+                    f'Rule "{cfg.get("name")}" skipped offline — uses {" and ".join(skip_reason_parts)} that require a live ZIA lookup'
+                )
+                continue
+
             dest_matched = False
             if _is_ip(dest):
                 if dest_addrs:
@@ -597,15 +611,6 @@ def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
                             if _ip_matches_any(dest, ip_groups[int(gid)]):
                                 dest_matched = True
                                 break
-            # dest_ip_categories / res_categories are predefined ZIA IP categories
-            # (e.g. OFFICE_365, GLOBAL_INT_ZOOM). We cannot resolve these offline,
-            # so skip the rule rather than falsely matching every hostname.
-            if dest_ip_cats or res_cats:
-                check.caveats.append(
-                    f'Rule "{cfg.get("name")}" skipped offline — uses predefined IP categories '
-                    f'({", ".join(set(dest_ip_cats + res_cats))}) that require a live ZIA lookup'
-                )
-                continue
             if not dest_matched:
                 continue
 
