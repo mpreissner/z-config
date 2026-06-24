@@ -99,7 +99,7 @@ export interface SimulationResult {
   zia_ssl: PolicyCheck;
   zia_cloud_app: PolicyCheck;
   zia_exceptions: PolicyCheck;
-  verdict: "ZCC_BYPASS" | "ZPA" | "ZIA_ALLOW" | "ZIA_BLOCK_FIREWALL" | "ZIA_BLOCK_DNS" | "ZIA_BLOCK_URL" | "ZIA_BLOCK_CLOUDAPP" | "INTERNET";
+  verdict: "ZCC_BYPASS" | "ZCC_INACTIVE" | "ZPA" | "ZIA_ALLOW" | "ZIA_BLOCK_FIREWALL" | "ZIA_BLOCK_DNS" | "ZIA_BLOCK_URL" | "ZIA_BLOCK_CLOUDAPP" | "INTERNET";
   verdict_label: string;
 }
 
@@ -116,6 +116,7 @@ export interface SimulateParams {
   deptName?: string;
   groupName?: string;
   locationName?: string;
+  networkContext?: "on" | "vpn" | "off";
 }
 
 export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<SimulationResult> =>
@@ -134,6 +135,7 @@ export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<Si
       dept_name: p.deptName || null,
       group_name: p.groupName || null,
       location_name: p.locationName || null,
+      network_context: p.networkContext || null,
     }),
     headers: { "Content-Type": "application/json" },
   });

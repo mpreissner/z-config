@@ -25,6 +25,7 @@ class SimulateRequest(BaseModel):
     dept_name: str | None = None
     group_name: str | None = None
     location_name: str | None = None
+    network_context: str | None = None
 
 
 @router.post("/{tenant_id}/simulate")
@@ -43,6 +44,7 @@ def simulate_traffic(tenant_id: int, req: SimulateRequest, user: AuthUser = Depe
         tenant_id, req.destination, req.port, req.protocol,
         req.nw_application, req.app_service_group, req.cloud_app, req.zcc_profile,
         req.src_ip, req.user_name, req.dept_name, req.group_name, req.location_name,
+        req.network_context,
     )
     return asdict(result)
 

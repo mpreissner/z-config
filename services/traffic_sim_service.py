@@ -1024,6 +1024,51 @@ def _eval_zcc_bypass(
 _BLOCK_ACTIONS = {"BLOCK", "BLOCK_DROP", "BLOCK_ICMP", "BLOCK_RESET", "BLOCK_BYPASS"}
 
 
+_NC_INT = {"on": 1, "vpn": 2, "off": 0}
+
+
+def _eval_network_context(tenant_id: int, zcc_profile: Optional[str], network_context: str) -> Optional[PolicyCheck]:
+    """Return a PolicyCheck if ZCC is inactive (actionType==3) for this network context."""
+    nc = _NC_INT.get(network_context)
+    if nc is None:
+        return None
+    with get_session() as s:
+        fps = s.query(ZCCResource).filter_by(
+            tenant_id=tenant_id, resource_type="forwarding_profile", is_deleted=False
+        ).all()
+        policies = s.query(ZCCResource).filter_by(
+            tenant_id=tenant_id, resource_type="web_policy", is_deleted=False
+        ).all()
+
+    # If a specific ZCC profile is requested, find its forwarding profile id
+    fp_ids: set = set()
+    if zcc_profile:
+        for p in policies:
+            cfg = p.raw_config or {}
+            if cfg.get("name") == zcc_profile:
+                fpid = cfg.get("forwardingProfileId") or cfg.get("forwarding_profile_id")
+                if fpid:
+                    fp_ids.add(str(fpid))
+
+    for fp in fps:
+        cfg = fp.raw_config or {}
+        if fp_ids and str(cfg.get("id", "")) not in fp_ids:
+            continue
+        fp_name = cfg.get("name", "")
+        for action in (cfg.get("fpActions") or cfg.get("fp_actions") or []):
+            nt = action.get("networkType") or action.get("network_type")
+            at = action.get("actionType") or action.get("action_type")
+            if nt is not None and int(nt) == nc and at is not None and int(at) == 3:
+                check = PolicyCheck(engine="ZCC Network Context")
+                check.matched = True
+                check.action = "BYPASS"
+                ctx_label = {"on": "On Trusted Network", "vpn": "VPN Trusted Network", "off": "Off Trusted Network"}.get(network_context, network_context)
+                check.rule_name = fp_name
+                check.reason = f'ZCC client is inactive on "{ctx_label}" per forwarding profile "{fp_name}" — traffic goes direct'
+                return check
+    return None
+
+
 def simulate(
     tenant_id: int, destination: str, port: int, protocol: str,
     nw_application: Optional[str] = None,
@@ -1035,8 +1080,28 @@ def simulate(
     dept_name: Optional[str] = None,
     group_name: Optional[str] = None,
     location_name: Optional[str] = None,
+    network_context: Optional[str] = None,
 ) -> SimulationResult:
     dest = destination.strip()
+
+    # Check if ZCC is inactive for this network context (actionType==3 = bypass)
+    if network_context:
+        nc_check = _eval_network_context(tenant_id, zcc_profile, network_context)
+        if nc_check:
+            return SimulationResult(
+                destination=dest, port=port, protocol=protocol,
+                zcc_bypass=nc_check,
+                zpa=PolicyCheck(engine="ZPA", reason="ZCC inactive — ZPA not evaluated"),
+                zia_firewall=PolicyCheck(engine="ZIA Firewall", reason="ZCC inactive — ZIA not evaluated"),
+                zia_dns=PolicyCheck(engine="ZIA DNS", reason="ZCC inactive — ZIA not evaluated"),
+                zia_url=PolicyCheck(engine="ZIA URL Filter", reason="ZCC inactive — ZIA not evaluated"),
+                zia_ssl=PolicyCheck(engine="ZIA SSL", reason="ZCC inactive — ZIA not evaluated"),
+                zia_cloud_app=PolicyCheck(engine="ZIA Cloud App", reason="ZCC inactive — ZIA not evaluated"),
+                zia_exceptions=PolicyCheck(engine="ZIA Exceptions", reason="ZCC inactive — ZIA not evaluated"),
+                verdict="ZCC_INACTIVE",
+                verdict_label=nc_check.reason,
+            )
+
     zcc_bypass = _eval_zcc_bypass(tenant_id, dest, port, protocol, zcc_profile)
     zpa = _eval_zpa(tenant_id, dest, port, protocol)
     zia_fw = _eval_zia_firewall(

@@ -6245,13 +6245,18 @@ type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid" | "sim";
 
 const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
 
-function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
+function SimulatorFlowDiagram({ result, networkCtx, setNetworkCtx }: {
+  result: SimulationResult | null;
+  networkCtx: "on" | "vpn" | "off";
+  setNetworkCtx: (v: "on" | "vpn" | "off") => void;
+}) {
   const active = result
-    ? result.verdict === "ZCC_BYPASS" ? "bypass"
+    ? result.verdict === "ZCC_BYPASS" || result.verdict === "ZCC_INACTIVE" ? "bypass"
       : result.verdict === "ZPA" ? "zpa"
       : "zia"
     : null;
   const ziaBlocked = result ? result.verdict.includes("BLOCK") : false;
+  const zccInactive = result?.verdict === "ZCC_INACTIVE";
 
   function branchColor(id: string) {
     if (id === "bypass") return "#f97316";
@@ -6269,7 +6274,8 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
     { key: "zia_ssl",        label: "SSL"        },
   ];
   function engineDotColor(key: string): string {
-    if (!result) return "#e5e7eb";
+    // ZIA not evaluated when traffic goes via ZPA or ZCC bypass
+    if (!result || active !== "zia") return "#e5e7eb";
     const c = (result as unknown as Record<string, PolicyCheck>)[key];
     if (!c?.matched) return "#e5e7eb";
     const a = (c.action || "").toUpperCase();
@@ -6283,23 +6289,23 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
   const bCYs = bYs.map(y => y + bH/2);
   const uCY  = bCYs[1];
 
-  // Column X positions
-  const uX=6,   uW=64, uH=44;
-  const rdX=82, rdW=82;
+  // Column X positions — spread wide so viewBox aspect ratio keeps height reasonable
+  const uX=10,  uW=90,  uH=50;
+  const rdX=120, rdW=160;
   const rdY=bYs[0], rdH=bYs[2]+bH-bYs[0];
   const rdCY=rdY+rdH/2;
-  const trunkX=172;
-  const bX=184, bW=88;
-  const detX=284;
+  const trunkX=292;
+  const bX=308, bW=130;
+  const detX=428;
 
   // ZIA detail box height (6 engines × 20px + padding)
   const ziaDetH = 6*20+22;
   const ziaDetY = bCYs[2] - ziaDetH/2;
   const detSmH  = bH;
-  const detW    = 148;
+  const detW    = 230;
 
   const svgH = Math.max(bYs[2]+bH, ziaDetY+ziaDetH) + 16;
-  const svgW  = detX + detW + 8;
+  const svgW  = detX + detW + 16;
 
   const uY = uCY - uH/2;
 
@@ -6310,7 +6316,7 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
 
   return (
     <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white overflow-hidden select-none">
-      <svg viewBox={`0 0 ${svgW} ${svgH}`} xmlns="http://www.w3.org/2000/svg" style={{ display: "block", width: "100%", maxHeight: "650px" }}>
+      <svg viewBox={`0 0 ${svgW} ${svgH}`} xmlns="http://www.w3.org/2000/svg" style={{ display: "block", width: "100%" }}>
         <defs>
           <marker id="fd-gry" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
           <marker id="fd-ora" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
@@ -6342,13 +6348,38 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
         </g>
         <text x={rdX+8} y={rdY+13} fontSize="7.5" fontWeight="700" fill="#374151">ZCC Policy</text>
         <line x1={rdX+6} y1={rdY+18} x2={rdX+rdW-6} y2={rdY+18} stroke="#f3f4f6" strokeWidth="1"/>
+
+        {/* Network context buttons */}
+        {([
+          { id:"on",  label:"On Trusted Network",  color:"#7c3aed", bg:"#faf5ff" },
+          { id:"vpn", label:"VPN Trusted Network", color:"#4f46e5", bg:"#eef2ff" },
+          { id:"off", label:"Off Trusted Network", color:"#0d9488", bg:"#f0fdfa" },
+        ] as const).map((nc, i) => {
+          const ny = rdY + 22 + i * 28;
+          const isSelected = networkCtx === nc.id;
+          return (
+            <g key={nc.id} className="cursor-pointer" onClick={() => setNetworkCtx(nc.id)}>
+              <rect x={rdX+6} y={ny} width={rdW-12} height={22} rx="4"
+                fill={isSelected ? nc.bg : "white"}
+                stroke={isSelected ? nc.color : "#e5e7eb"}
+                strokeWidth={isSelected ? 1.5 : 1}/>
+              <circle cx={rdX+14} cy={ny+11} r="3.5" fill={isSelected ? nc.color : "#d1d5db"}/>
+              <text x={rdX+21} y={ny+15} fontSize="6.5" fontWeight={isSelected?"700":"400"}
+                fill={isSelected ? nc.color : "#9ca3af"} className="pointer-events-none">{nc.label}</text>
+            </g>
+          );
+        })}
+
+        <line x1={rdX+6} y1={rdY+112} x2={rdX+rdW-6} y2={rdY+112} stroke="#f3f4f6" strokeWidth="1"/>
+
         {/* criteria rows */}
         {([
           { dot:"#f97316", label:"Bypass rule?", dest:"→ Bypass" },
           { dot:"#6366f1", label:"App segment?", dest:"→ ZPA"    },
           { dot:"#6b7280", label:"Default",      dest:"→ ZIA"    },
         ]).map((row, i) => {
-          const ry = rdY + 28 + i * (rdH - 28) / 3;
+          const remaining = rdH - 118;
+          const ry = rdY + 118 + i * remaining / 3;
           const isActive = active === (["bypass","zpa","zia"][i]);
           return (
             <g key={i}>
@@ -6408,9 +6439,11 @@ function SimulatorFlowDiagram({ result }: { result: SimulationResult | null }) {
                 <rect x={detX} y={by} width={detW} height={detSmH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
               </g>
               {on && <rect x={detX} y={by} width="4" height={detSmH} rx="2" fill={color}/>}
-              <text x={detX+10} y={by+14} fontSize="8" fontWeight="700" fill={on?"#9a3412":"#6b7280"}>Direct</text>
+              <text x={detX+10} y={by+14} fontSize="8" fontWeight="700" fill={on?"#9a3412":"#6b7280"}>
+                {zccInactive ? "ZCC Inactive" : "Direct"}
+              </text>
               <text x={detX+10} y={by+27} fontSize="7" fill={on?"#c2410c":"#9ca3af"} clipPath="url(#fd-det-clip)">
-                {on && bypassRule ? bypassRule : "No bypass rule matched"}
+                {on ? (zccInactive ? "ZCC disabled on this network — traffic goes direct" : bypassRule || "No bypass rule matched") : "No bypass rule matched"}
               </text>
             </g>
           );
@@ -6483,7 +6516,11 @@ function SimulatorFlowDetail({ result }: { result: SimulationResult }) {
     { key: "zia_ssl",       label: "SSL" },
   ];
 
+  const ziaKeys = new Set(["zia_firewall","zia_dns","zia_cloud_app","zia_url","zia_exceptions","zia_ssl"]);
+  const skipZia = result.verdict === "ZPA" || result.verdict === "ZCC_BYPASS" || result.verdict === "ZCC_INACTIVE";
+
   const matched = engines.filter(e => {
+    if (skipZia && ziaKeys.has(e.key as string)) return false;
     const c = result[e.key] as PolicyCheck;
     return c?.matched;
   });
@@ -6513,6 +6550,7 @@ function SimulatorFlowDetail({ result }: { result: SimulationResult }) {
 
 const VERDICT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   ZCC_BYPASS:         { bg: "bg-orange-50", text: "text-orange-800", label: "ZCC Bypass" },
+  ZCC_INACTIVE:       { bg: "bg-gray-50",  text: "text-gray-700",  label: "ZCC Inactive — Direct" },
   ZPA:                { bg: "bg-blue-50",  text: "text-blue-800",  label: "ZPA" },
   ZIA_ALLOW:          { bg: "bg-green-50", text: "text-green-800", label: "ZIA Allow" },
   ZIA_BLOCK_FIREWALL:  { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
@@ -6581,6 +6619,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const [groupName, setGroupName] = useState("");
   const [locationName, setLocationName] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [networkCtx, setNetworkCtx] = useState<"on" | "vpn" | "off">("off");
   const [result, setResult] = useState<SimulationResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -6600,6 +6639,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
       appServiceGroup: appSvcGroup.trim() || undefined,
       cloudApp: cloudApp.trim() || undefined,
       zccProfile: zccProfile || undefined,
+      networkContext: networkCtx,
       srcIp: srcIp.trim() || undefined,
       userName: userName.trim() || undefined,
       deptName: deptName.trim() || undefined,
@@ -6840,14 +6880,24 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
           </div>
           <div className="space-y-1.5">
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Policy Evaluation Chain</p>
-            <PolicyCheckCard check={result.zcc_bypass} />
-            <PolicyCheckCard check={result.zpa} />
-            <PolicyCheckCard check={result.zia_firewall} />
-            <PolicyCheckCard check={result.zia_dns} />
-            <PolicyCheckCard check={result.zia_cloud_app} />
-            <PolicyCheckCard check={result.zia_url} />
-            <PolicyCheckCard check={result.zia_exceptions} />
-            <PolicyCheckCard check={result.zia_ssl} />
+            {result.verdict !== "ZCC_INACTIVE" && <PolicyCheckCard check={result.zcc_bypass} />}
+            {result.verdict !== "ZCC_INACTIVE" && <PolicyCheckCard check={result.zpa} />}
+            {(result.verdict === "ZPA" || result.verdict === "ZCC_BYPASS" || result.verdict === "ZCC_INACTIVE") ? (
+              <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-400 italic">
+                {result.verdict === "ZCC_INACTIVE"
+                  ? "ZCC client inactive on this network — traffic goes direct, ZPA and ZIA not evaluated"
+                  : `ZIA policies not evaluated — traffic routed via ${result.verdict === "ZPA" ? "ZPA" : "ZCC Bypass"} before reaching ZIA`}
+              </div>
+            ) : (
+              <>
+                <PolicyCheckCard check={result.zia_firewall} />
+                <PolicyCheckCard check={result.zia_dns} />
+                <PolicyCheckCard check={result.zia_cloud_app} />
+                <PolicyCheckCard check={result.zia_url} />
+                <PolicyCheckCard check={result.zia_exceptions} />
+                <PolicyCheckCard check={result.zia_ssl} />
+              </>
+            )}
           </div>
           <p className="text-xs text-gray-400">
             Results are based on your last imported policy snapshot. Predefined URL categories,
@@ -6859,7 +6909,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
 
       {/* ── Right: diagram ── */}
       <div className="space-y-3" style={{ width: "65%" }}>
-        <SimulatorFlowDiagram result={result} />
+        <SimulatorFlowDiagram result={result} networkCtx={networkCtx} setNetworkCtx={setNetworkCtx} />
         {result && <SimulatorFlowDetail result={result} />}
       </div>
       </div>
