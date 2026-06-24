@@ -6296,7 +6296,7 @@ function SimulatorFlowDiagram({ result, networkCtx, setNetworkCtx }: {
   const rdCY=rdY+rdH/2;
   const trunkX=292;
   const bX=308, bW=130;
-  const detX=428;
+  const detX=468;
 
   // ZIA detail box height (6 engines × 20px + padding)
   const ziaDetH = 6*20+22;
