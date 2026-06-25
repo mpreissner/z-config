@@ -49,6 +49,30 @@ def simulate_traffic(tenant_id: int, req: SimulateRequest, user: AuthUser = Depe
     return asdict(result)
 
 
+@router.post("/{tenant_id}/simulate/all")
+def simulate_traffic_all(tenant_id: int, req: SimulateRequest, user: AuthUser = Depends(require_auth)):
+    if user.role != "admin":
+        from api.routers.tenants import check_tenant_access
+        check_tenant_access(tenant_id, user)
+
+    with get_session() as s:
+        t = s.get(TenantConfig, tenant_id)
+        if not t or not t.is_active:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+
+    from services.traffic_sim_service import simulate
+    args = (
+        tenant_id, req.destination, req.port, req.protocol,
+        req.nw_application, req.app_service_group, req.cloud_app, req.zcc_profile,
+        req.src_ip, req.user_name, req.dept_name, req.group_name, req.location_name,
+    )
+    return {
+        "on":  asdict(simulate(*args, "on")),
+        "vpn": asdict(simulate(*args, "vpn")),
+        "off": asdict(simulate(*args, "off")),
+    }
+
+
 @router.get("/{tenant_id}/simulate/applications")
 def list_sim_applications(tenant_id: int, user: AuthUser = Depends(require_auth)):
     """Return unique nw_application IDs referenced by this tenant's firewall rules."""

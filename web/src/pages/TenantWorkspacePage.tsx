@@ -10,7 +10,8 @@ import {
   importZCC,
   clearZCCDisabledResources,
   downloadTerraform,
-  simulateTraffic,
+  simulateTrafficAll,
+  SimulationResultAll,
   fetchSimApplications,
   fetchSimCloudApps,
   fetchSimZccProfiles,
@@ -6620,8 +6621,9 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const [locationName, setLocationName] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [networkCtx, setNetworkCtx] = useState<"on" | "vpn" | "off">("off");
-  const [result, setResult] = useState<SimulationResult | null>(null);
+  const [results, setResults] = useState<SimulationResultAll | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const result = results ? results[networkCtx] : null;
 
   const { data: appOptions = [] } = useQuery({ queryKey: ["sim-applications", tenant.id], queryFn: () => fetchSimApplications(tenant.id) });
   const { data: appSvcGroupOptions = [] } = useQuery({ queryKey: ["sim-app-service-groups", tenant.id], queryFn: () => fetchSimAppServiceGroups(tenant.id) });
@@ -6633,27 +6635,26 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
   const { data: locationOptions = [] } = useQuery({ queryKey: ["sim-locations", tenant.id], queryFn: () => fetchSimLocations(tenant.id) });
 
   const mut = useMutation({
-    mutationFn: () => simulateTraffic(tenant.id, {
+    mutationFn: () => simulateTrafficAll(tenant.id, {
       destination: dest.trim(), port: parseInt(port) || 443, protocol,
       nwApplication: nwApp.trim() || undefined,
       appServiceGroup: appSvcGroup.trim() || undefined,
       cloudApp: cloudApp.trim() || undefined,
       zccProfile: zccProfile || undefined,
-      networkContext: networkCtx,
       srcIp: srcIp.trim() || undefined,
       userName: userName.trim() || undefined,
       deptName: deptName.trim() || undefined,
       groupName: groupName.trim() || undefined,
       locationName: locationName.trim() || undefined,
     }),
-    onSuccess: (data) => { setResult(data); setErr(null); },
+    onSuccess: (data) => { setResults(data); setErr(null); },
     onError: (e: Error) => setErr(e.message),
   });
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!dest.trim()) return;
-    setResult(null);
+    setResults(null);
     mut.mutate();
   }
 

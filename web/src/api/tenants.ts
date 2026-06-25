@@ -140,6 +140,32 @@ export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<Si
     headers: { "Content-Type": "application/json" },
   });
 
+export interface SimulationResultAll {
+  on: SimulationResult;
+  vpn: SimulationResult;
+  off: SimulationResult;
+}
+
+export const simulateTrafficAll = (tenantId: number, p: SimulateParams): Promise<SimulationResultAll> =>
+  apiFetch<SimulationResultAll>(`/api/v1/tenants/${tenantId}/simulate/all`, {
+    method: "POST",
+    body: JSON.stringify({
+      destination: p.destination,
+      port: p.port,
+      protocol: p.protocol,
+      nw_application: p.nwApplication || null,
+      app_service_group: p.appServiceGroup || null,
+      cloud_app: p.cloudApp || null,
+      zcc_profile: p.zccProfile || null,
+      src_ip: p.srcIp || null,
+      user_name: p.userName || null,
+      dept_name: p.deptName || null,
+      group_name: p.groupName || null,
+      location_name: p.locationName || null,
+    }),
+    headers: { "Content-Type": "application/json" },
+  });
+
 export const fetchSimApplications = (tenantId: number): Promise<string[]> =>
   apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/applications`);
 

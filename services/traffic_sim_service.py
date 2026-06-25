@@ -1119,48 +1119,85 @@ def _eval_zcc_bypass(
 _BLOCK_ACTIONS = {"BLOCK", "BLOCK_DROP", "BLOCK_ICMP", "BLOCK_RESET", "BLOCK_BYPASS"}
 
 
-_NC_INT = {"on": 1, "vpn": 2, "off": 0}
+_NC_INT = {"on": 0, "vpn": 1, "off": 2}
+
+
+def _resolve_forwarding_profile(tenant_id: int, zcc_profile: str, session) -> Optional[dict]:
+    """Resolve the forwarding profile raw_config for a ZCC app profile name.
+
+    Mirrors the logic in api/routers/zcc.py get_traffic_profile:
+    1. Find the web_policy by name
+    2. Use onNetPolicy (embedded by direct HTTP import) if present
+    3. Fall back to forwardingProfileId lookup in forwarding_profile records
+    """
+    policy_row = session.query(ZCCResource).filter_by(
+        tenant_id=tenant_id, resource_type="web_policy", is_deleted=False
+    ).all()
+
+    raw_policy = None
+    for p in policy_row:
+        if (p.raw_config or {}).get("name") == zcc_profile:
+            raw_policy = p.raw_config or {}
+            break
+    if raw_policy is None:
+        return None
+
+    # Prefer onNetPolicy (embedded forwarding profile from direct HTTP import)
+    raw_fp = raw_policy.get("onNetPolicy") or None
+    if raw_fp:
+        return raw_fp
+
+    # Fallback: look up forwarding_profile record by forwardingProfileId
+    fp_id = str(raw_policy.get("forwardingProfileId") or raw_policy.get("forwarding_profile_id") or "")
+    if not fp_id:
+        return None
+    fp_id_candidates = [fp_id, fp_id + ".0"] if not fp_id.endswith(".0") else [fp_id, fp_id[:-2]]
+    fp_row = session.query(ZCCResource).filter(
+        ZCCResource.tenant_id == tenant_id,
+        ZCCResource.resource_type == "forwarding_profile",
+        ZCCResource.zcc_id.in_(fp_id_candidates),
+        ZCCResource.is_deleted == False,  # noqa: E712
+    ).first()
+    return fp_row.raw_config if fp_row else None
 
 
 def _eval_network_context(tenant_id: int, zcc_profile: Optional[str], network_context: str) -> Optional[PolicyCheck]:
-    """Return a PolicyCheck if ZCC is inactive (actionType==3) for this network context."""
+    """Return a PolicyCheck if ZCC is inactive for this network context.
+
+    Uses the same forwarding profile resolution as the ZCC traffic profile
+    visualizer (onNetPolicy → forwardingProfileId fallback).
+    action_type=0 (None/Disabled) means ZCC is off for that network context.
+    """
     nc = _NC_INT.get(network_context)
-    if nc is None:
+    if nc is None or not zcc_profile:
         return None
+
     with get_session() as s:
-        fps = s.query(ZCCResource).filter_by(
-            tenant_id=tenant_id, resource_type="forwarding_profile", is_deleted=False
-        ).all()
-        policies = s.query(ZCCResource).filter_by(
-            tenant_id=tenant_id, resource_type="web_policy", is_deleted=False
-        ).all()
+        raw_fp = _resolve_forwarding_profile(tenant_id, zcc_profile, s)
 
-    # If a specific ZCC profile is requested, find its forwarding profile id
-    fp_ids: set = set()
-    if zcc_profile:
-        for p in policies:
-            cfg = p.raw_config or {}
-            if cfg.get("name") == zcc_profile:
-                fpid = cfg.get("forwardingProfileId") or cfg.get("forwarding_profile_id")
-                if fpid:
-                    fp_ids.add(str(fpid))
+    if not raw_fp:
+        return None
 
-    for fp in fps:
-        cfg = fp.raw_config or {}
-        if fp_ids and str(cfg.get("id", "")) not in fp_ids:
+    fp_name = raw_fp.get("name", zcc_profile)
+    actions = (
+        raw_fp.get("forwarding_profile_actions")
+        or raw_fp.get("forwardingProfileActions")
+        or raw_fp.get("fp_actions")
+        or []
+    )
+    for action in actions:
+        nt = action.get("network_type") if action.get("network_type") is not None else action.get("networkType")
+        at = action.get("action_type") if action.get("action_type") is not None else action.get("actionType")
+        if nt is None or at is None:
             continue
-        fp_name = cfg.get("name", "")
-        for action in (cfg.get("fpActions") or cfg.get("fp_actions") or []):
-            nt = action.get("networkType") or action.get("network_type")
-            at = action.get("actionType") or action.get("action_type")
-            if nt is not None and int(nt) == nc and at is not None and int(at) == 3:
-                check = PolicyCheck(engine="ZCC Network Context")
-                check.matched = True
-                check.action = "BYPASS"
-                ctx_label = {"on": "On Trusted Network", "vpn": "VPN Trusted Network", "off": "Off Trusted Network"}.get(network_context, network_context)
-                check.rule_name = fp_name
-                check.reason = f'ZCC client is inactive on "{ctx_label}" per forwarding profile "{fp_name}" — traffic goes direct'
-                return check
+        if int(nt) == nc and int(at) == 0:
+            check = PolicyCheck(engine="ZCC Network Context")
+            check.matched = True
+            check.action = "BYPASS"
+            ctx_label = {"on": "On Trusted Network", "vpn": "VPN Trusted Network", "off": "Off Trusted Network"}.get(network_context, network_context)
+            check.rule_name = fp_name
+            check.reason = f'ZCC client is inactive on "{ctx_label}" per forwarding profile "{fp_name}" — traffic goes direct'
+            return check
     return None
 
 
