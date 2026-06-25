@@ -632,7 +632,36 @@ def _eval_zia_firewall(
 # ZIA DNS Filtering evaluation
 # ---------------------------------------------------------------------------
 
-def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> PolicyCheck:
+def _zia_url_lookup(tenant_id: int, dest: str) -> Optional[List[str]]:
+    """Call ZIA urlLookup for dest and return list of category strings, or None on failure."""
+    try:
+        from db.models import TenantConfig
+        from lib.auth import ZscalerAuth
+        from lib.zia_client import ZIAClient
+        from services.config_service import decrypt_secret
+        with get_session() as s:
+            t = s.get(TenantConfig, tenant_id)
+            if not t:
+                return None
+            auth = ZscalerAuth(
+                t.zidentity_base_url, t.client_id,
+                decrypt_secret(t.client_secret_enc),
+                govcloud=bool(t.govcloud),
+            )
+            client = ZIAClient(auth, t.oneapi_base_url)
+            results = client.url_lookup([dest])
+            if not results:
+                return []
+            cats: List[str] = []
+            for item in results:
+                cats.extend(item.get("urlClassifications", []))
+                cats.extend(item.get("urlClassificationsWithSecurityAlert", []))
+            return cats
+    except Exception:
+        return None
+
+
+def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str, live_cats: Optional[List[str]] = None) -> PolicyCheck:
     check = PolicyCheck(engine="ZIA DNS Filter")
 
     with get_session() as s:
@@ -666,30 +695,55 @@ def _eval_zia_dns(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
         has_dest = bool(dest_addrs or dest_ip_groups_ref or dest_ip_cats or res_cats or applications)
 
         if has_dest:
-            # Predefined IP categories and application IDs require a live ZIA lookup —
-            # skip the rule offline rather than falsely matching every destination.
             if dest_ip_cats or res_cats or applications:
                 skip_reason_parts = []
-                if dest_ip_cats or res_cats:
-                    skip_reason_parts.append(f'predefined IP categories ({", ".join(set(dest_ip_cats + res_cats))})')
+                # In DNS rules, dest_ip_categories and res_categories are domain/URL
+                # categories that url_lookup can resolve. Evaluate both with live_cats.
+                all_url_cats = list(set(dest_ip_cats + res_cats))
+                if all_url_cats:
+                    if live_cats is not None:
+                        matched_cats = [c for c in all_url_cats if c in live_cats]
+                        if matched_cats:
+                            # Live lookup matched — rule applies, fall through to dest check
+                            pass
+                        else:
+                            # Live lookup returned but no match — rule does not apply
+                            if not applications:
+                                continue
+                            # applications still need to be skipped with caveat
+                    else:
+                        skip_reason_parts.append(
+                            f'categories ({", ".join(all_url_cats[:5])}{"..." if len(all_url_cats) > 5 else ""})'
+                        )
+
+                # applications require traffic inspection — always skip
                 if applications:
                     skip_reason_parts.append(f'applications ({", ".join(applications[:5])}{"..." if len(applications) > 5 else ""})')
-                check.caveats.append(
-                    f'Rule "{cfg.get("name")}" skipped offline — uses {" and ".join(skip_reason_parts)} that require a live ZIA lookup'
-                )
-                continue
 
-            dest_matched = False
-            if _is_ip(dest):
-                if dest_addrs:
-                    dest_matched = _ip_matches_any(dest, dest_addrs)
-                if not dest_matched:
-                    for grp in dest_ip_groups_ref:
-                        gid = grp.get("id")
-                        if gid and int(gid) in ip_groups:
-                            if _ip_matches_any(dest, ip_groups[int(gid)]):
-                                dest_matched = True
-                                break
+                if skip_reason_parts:
+                    check.caveats.append(
+                        f'Rule "{cfg.get("name")}" skipped offline — uses {" and ".join(skip_reason_parts)} that require a live ZIA lookup'
+                    )
+                    if applications and not (live_cats is not None and matched_cats):
+                        continue
+
+            # Category match via live lookup counts as destination match
+            cat_matched = bool(
+                (dest_ip_cats or res_cats) and live_cats is not None
+                and any(c in live_cats for c in set(dest_ip_cats + res_cats))
+            )
+            dest_matched = cat_matched
+            if not dest_matched:
+                if _is_ip(dest):
+                    if dest_addrs:
+                        dest_matched = _ip_matches_any(dest, dest_addrs)
+                    if not dest_matched:
+                        for grp in dest_ip_groups_ref:
+                            gid = grp.get("id")
+                            if gid and int(gid) in ip_groups:
+                                if _ip_matches_any(dest, ip_groups[int(gid)]):
+                                    dest_matched = True
+                                    break
             if not dest_matched:
                 continue
 
@@ -1234,6 +1288,9 @@ def simulate(
                 verdict_label=nc_check.reason,
             )
 
+    # Live ZIA url_lookup for res_categories evaluation (DNS rules)
+    live_cats = _zia_url_lookup(tenant_id, dest) if not _is_ip(dest) else None
+
     zcc_bypass = _eval_zcc_bypass(tenant_id, dest, port, protocol, zcc_profile)
     zpa = _eval_zpa(tenant_id, dest, port, protocol)
     zia_fw = _eval_zia_firewall(
@@ -1241,7 +1298,7 @@ def simulate(
         nw_application, app_service_group,
         src_ip, user_name, dept_name, group_name, location_name,
     )
-    zia_dns = _eval_zia_dns(tenant_id, dest, port, protocol)
+    zia_dns = _eval_zia_dns(tenant_id, dest, port, protocol, live_cats)
     zia_url = _eval_zia_url(tenant_id, dest, port, protocol)
     zia_ssl = _eval_ssl_inspection(
         tenant_id, dest, protocol,
