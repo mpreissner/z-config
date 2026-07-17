@@ -255,9 +255,42 @@ done
 # so the file is never committed with real cert content.
 
 BUNDLE="$REPO_DIR/docker/ca-bundle.pem"
+
+# ── Force IPv4 for Docker Hub pulls ───────────────────────────────────────────
+# Some hosts have an IPv6 route that's configured but not actually functional
+# (common on cloud VMs and behind corporate proxies). Docker's image puller
+# does a single dial with no IPv4 fallback, so a broken IPv6 path shows up as
+# "dial tcp [ipv6]:443: i/o timeout" resolving registry-1.docker.io — instead
+# of failing over. Pin the known Docker Hub hosts to their IPv4 address in
+# /etc/hosts for the duration of the build only; removed on exit.
+DOCKER_HUB_HOSTS=(registry-1.docker.io auth.docker.io production.cloudflare.docker.com)
+HOSTS_MARKER="# added by zs-config deploy.sh (IPv4 pin, build-time only)"
+_pinned_ipv4=0
+
+_pin_ipv4_hosts() {
+    [[ "$(uname)" == "Darwin" ]] && return 0
+    command -v getent &>/dev/null || return 0
+
+    local h ip
+    for h in "${DOCKER_HUB_HOSTS[@]}"; do
+        grep -qE "[[:space:]]${h}\$" /etc/hosts 2>/dev/null && continue
+        ip="$(getent ahostsv4 "$h" 2>/dev/null | awk '{print $1; exit}')"
+        [[ -n "$ip" ]] || continue
+        echo "$ip	$h	$HOSTS_MARKER" | sudo tee -a /etc/hosts >/dev/null
+        _pinned_ipv4=1
+    done
+    [[ "$_pinned_ipv4" -eq 1 ]] && echo "Pinned Docker Hub hosts to IPv4 in /etc/hosts (build-time only) to avoid broken-IPv6 pull timeouts."
+}
+
+_unpin_ipv4_hosts() {
+    [[ "$_pinned_ipv4" -eq 1 ]] || return 0
+    sudo sed -i.bak "/${HOSTS_MARKER//\//\\/}\$/d" /etc/hosts 2>/dev/null && sudo rm -f /etc/hosts.bak
+}
+
 cleanup_bundle() {
     : > "$BUNDLE"
     [[ -n "$DC_BACKUP" ]] && rm -f "$DC_BACKUP"
+    _unpin_ipv4_hosts
 }
 trap cleanup_bundle EXIT
 
@@ -282,6 +315,8 @@ else
 fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
+
+_pin_ipv4_hosts
 
 echo "Building image..."
 docker compose build
