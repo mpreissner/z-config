@@ -61,7 +61,21 @@ if ! command -v docker &>/dev/null; then
     sudo systemctl enable --now docker 2>/dev/null || true
 fi
 
-if ! docker compose version &>/dev/null; then
+DOCKER="docker"
+if ! docker info &>/dev/null; then
+    if sudo docker info &>/dev/null; then
+        echo "Current user ($USER) cannot access the Docker daemon socket — using sudo for docker commands this run."
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+        echo "Added $USER to the docker group — log out/in (or run 'newgrp docker') so future runs don't need sudo."
+        DOCKER="sudo docker"
+    else
+        echo "ERROR: Cannot connect to the Docker daemon, even with sudo. Is the Docker service running?" >&2
+        echo "  Try: sudo systemctl enable --now docker" >&2
+        exit 1
+    fi
+fi
+
+if ! $DOCKER compose version &>/dev/null; then
     echo "ERROR: docker compose (v2) is required. Install Docker Engine 20.10+ or add the Compose plugin." >&2
     exit 1
 fi
@@ -243,9 +257,9 @@ mkdir -p "$REPO_DIR/certs"
 # ── Ensure persistent Docker volumes exist ────────────────────────────────────
 
 for vol in zs-config_zs-db zs-config_zs-plugins; do
-    if ! docker volume inspect "$vol" &>/dev/null; then
+    if ! $DOCKER volume inspect "$vol" &>/dev/null; then
         echo "Creating Docker volume: $vol"
-        docker volume create "$vol"
+        $DOCKER volume create "$vol"
     fi
 done
 
@@ -319,15 +333,15 @@ fi
 _pin_ipv4_hosts
 
 echo "Building image..."
-docker compose build
+$DOCKER compose build
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
 echo "Stopping existing container..."
-docker compose down
+$DOCKER compose down
 
 echo "Starting container..."
-docker compose up -d
+$DOCKER compose up -d
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
@@ -342,7 +356,7 @@ for i in $(seq 1 15); do
             echo "zs-config is running at http://localhost:8000"
         fi
         echo ""
-        docker compose logs --tail=5
+        $DOCKER compose logs --tail=5
         exit 0
     fi
     printf "."
