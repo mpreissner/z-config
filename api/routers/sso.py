@@ -398,13 +398,21 @@ def sso_test(_: AuthUser = Depends(require_admin)):
             raise HTTPException(status_code=400, detail="Issuer URL is required")
         try:
             doc = sso_service.discover(cfg.issuer_url, force=True)
+            # Discovery alone is a weak test: an IdP with no signing key assigned
+            # answers it happily and then hands out ID tokens nothing can verify.
+            # Check the key set here so Test connection fails where login would,
+            # rather than passing and leaving the admin to find out at the callback.
+            key_count = sso_service.jwks_key_count(doc)
         except SsoError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
+        if key_count == 0:
+            raise HTTPException(status_code=502, detail=sso_service.jwks_empty_message(doc))
         return {
             "ok": True,
             "provider": "oidc",
             "issuer": doc.get("issuer"),
             "authorization_endpoint": doc.get("authorization_endpoint"),
+            "signing_keys": key_count,
             "client_secret_configured": bool(cfg.client_secret),
             "redirect_uri": cfg.redirect_uri(),
         }
