@@ -83,7 +83,7 @@ def load_config() -> SsoConfig:
         auto_provision=(get_setting("idp_auto_provision") or "true") == "true",
         default_role=get_setting("idp_default_role") or "user",
         group_claim=get_setting("idp_group_claim") or "groups",
-        issuer_url=(get_setting("idp_issuer_url") or "").rstrip("/"),
+        issuer_url=issuer_from_url(get_setting("idp_issuer_url") or ""),
         client_id=get_setting("idp_client_id") or "",
         client_secret=_secret_setting("idp_client_secret"),
         scopes=get_setting("idp_scopes") or "openid profile email",
@@ -105,6 +105,21 @@ class SsoError(Exception):
 _DISCOVERY_TTL = 900  # seconds
 _discovery_cache: Dict[str, Tuple[float, dict]] = {}
 _jwks_cache: Dict[str, Tuple[float, dict]] = {}
+
+
+_WELL_KNOWN_SUFFIX = "/.well-known/openid-configuration"
+
+
+def issuer_from_url(url: str) -> str:
+    """Reduce anything an admin might paste to a bare issuer URL.
+
+    IdP consoles hand out the full discovery URL far more often than the
+    issuer, and the two differ only by a fixed suffix, so accept either.
+    """
+    cleaned = (url or "").strip().rstrip("/")
+    if cleaned.lower().endswith(_WELL_KNOWN_SUFFIX):
+        cleaned = cleaned[: -len(_WELL_KNOWN_SUFFIX)]
+    return cleaned.rstrip("/")
 
 
 def discover(issuer_url: str, *, force: bool = False) -> dict:

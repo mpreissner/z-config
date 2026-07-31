@@ -8,7 +8,7 @@ import {
   uploadSSLPfx, uploadSSLPemFile, uploadSSLPemPaste,
   removeSSL,
 } from "../api/ssl";
-import { testSso, ssoMetadataUrl } from "../api/sso";
+import { testSso, ssoMetadataUrl, discoverSso } from "../api/sso";
 import {
   fetchScimTokens, createScimToken, revokeScimToken,
   fetchScimGroups, mapScimGroup,
@@ -60,7 +60,9 @@ function FieldRow({ label, hint, children }: {
         <p className="text-sm font-medium text-gray-700">{label}</p>
         {hint && <p className="text-xs text-gray-400 mt-0.5">{hint}</p>}
       </div>
-      <div className="flex-1">{children}</div>
+      {/* min-w-0 lets long values (callback URLs, tokens) shrink and truncate
+          instead of forcing the row wider than the card it sits in. */}
+      <div className="flex-1 min-w-0">{children}</div>
     </div>
   );
 }
@@ -272,6 +274,15 @@ export default function AdminSettingsPage() {
     for (const k of Object.keys(draft) as (keyof SystemSettings)[]) {
       if (draft[k] !== settings[k]) (patch as Record<string, unknown>)[k] = draft[k];
     }
+    // The Protocol dropdown shows OIDC when nothing is stored, but that is only
+    // a display fallback — an admin who fills in the OIDC fields without ever
+    // touching the dropdown would otherwise save a config with no provider,
+    // which silently disables SSO and makes Test connection report that no
+    // provider is selected. Persist what the form is showing them.
+    const touchesSso = Object.keys(patch).some(
+      (k) => k.startsWith("idp_") || k.startsWith("saml_") || k === "sso_base_url",
+    );
+    if (touchesSso && !draft.idp_provider) patch.idp_provider = "oidc";
     if (Object.keys(patch).length > 0) mut.mutate(patch);
   }
 
@@ -1278,6 +1289,32 @@ type SetFn = <K extends keyof SystemSettings>(key: K, value: SystemSettings[K]) 
 function IdentityProviderSection({ draft, set }: { draft: SystemSettings; set: SetFn }) {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+  const [discoveryUrl, setDiscoveryUrl] = useState("");
+  const [discoverNote, setDiscoverNote] = useState<string | null>(null);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+
+  const discover = useMutation({
+    mutationFn: () => discoverSso(discoveryUrl),
+    onSuccess: (res) => {
+      setDiscoverError(null);
+      set("idp_issuer_url", res.issuer_url);
+      // Only narrow the scopes if the IdP actually advertises the ones we need;
+      // an incomplete scopes_supported list is common and not worth trusting.
+      const wanted = ["openid", "profile", "email"];
+      if (wanted.every((s) => res.scopes_supported.includes(s))) {
+        set("idp_scopes", wanted.join(" "));
+      }
+      setDiscoverNote(
+        `Issuer: ${res.issuer_url}\nAuthorization: ${res.authorization_endpoint ?? "—"}\n` +
+        `Token: ${res.token_endpoint ?? "—"}\nJWKS: ${res.jwks_uri ?? "—"}\n\n` +
+        "Fields updated below. Add your client ID and secret, then Save.",
+      );
+    },
+    onError: (err: unknown) => {
+      setDiscoverNote(null);
+      setDiscoverError(err instanceof Error ? err.message : "Discovery failed");
+    },
+  });
 
   const test = useMutation({
     mutationFn: testSso,
@@ -1325,7 +1362,37 @@ function IdentityProviderSection({ draft, set }: { draft: SystemSettings; set: S
 
       {provider === "oidc" ? (
         <>
-          <FieldRow label="Issuer URL" hint="Discovery is read from {issuer}/.well-known/openid-configuration.">
+          <FieldRow
+            label="Discovery URL"
+            hint="Paste the .well-known URL from your IdP to fill in the fields below. Nothing is saved until you press Save."
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <TextInput
+                    value={discoveryUrl}
+                    onChange={setDiscoveryUrl}
+                    placeholder="https://login.example.com/.well-known/openid-configuration"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => discover.mutate()}
+                  disabled={discover.isPending || !discoveryUrl.trim()}
+                  className="px-3 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700 flex-shrink-0"
+                >
+                  {discover.isPending ? "Fetching…" : "Fetch"}
+                </button>
+              </div>
+              {discoverError && <ErrorMessage message={discoverError} />}
+              {discoverNote && (
+                <pre className="rounded bg-green-50 border border-green-200 px-3 py-2 text-xs text-green-800 whitespace-pre-wrap break-all">
+                  {discoverNote}
+                </pre>
+              )}
+            </div>
+          </FieldRow>
+          <FieldRow label="Issuer URL" hint="Discovery is read from {issuer}/.well-known/openid-configuration. A full .well-known URL is accepted here too.">
             <TextInput
               value={draft.idp_issuer_url}
               onChange={(v) => set("idp_issuer_url", v)}

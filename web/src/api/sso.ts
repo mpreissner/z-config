@@ -36,6 +36,22 @@ export function testSso(): Promise<SsoTestResult> {
   return apiFetch<SsoTestResult>("/api/v1/auth/sso/test", { method: "POST" });
 }
 
+export interface SsoDiscoveryResult {
+  issuer_url: string;
+  authorization_endpoint: string | null;
+  token_endpoint: string | null;
+  jwks_uri: string | null;
+  scopes_supported: string[];
+}
+
+/** Reads an IdP's .well-known document so the OIDC form can fill itself in. */
+export function discoverSso(url: string): Promise<SsoDiscoveryResult> {
+  return apiFetch<SsoDiscoveryResult>("/api/v1/auth/sso/discover", {
+    method: "POST",
+    body: JSON.stringify({ url }),
+  });
+}
+
 /** Trades the one-time code from the IdP redirect for real tokens. */
 export function exchangeSsoCode(code: string): Promise<SsoExchangeResult> {
   return apiFetch<SsoExchangeResult>("/api/v1/auth/sso/exchange", {
