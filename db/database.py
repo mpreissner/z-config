@@ -200,6 +200,24 @@ def init_db(db_url: Optional[str] = None) -> None:
     _secure_db_file()
 
 
+def dispose_engine() -> None:
+    """Close pooled connections and drop the engine.
+
+    Call this before replacing the underlying database file so no handle is
+    left open on the old inode — a stale SQLCipher connection can otherwise
+    checkpoint its WAL over the incoming database. init_db() rebuilds both
+    the engine and the session factory.
+    """
+    global _engine, _SessionFactory
+    if _engine is not None:
+        try:
+            _engine.dispose()
+        except Exception:
+            pass
+    _engine = None
+    _SessionFactory = None
+
+
 def _secure_db_file() -> None:
     """Ensure the SQLite database file is owner-readable only (chmod 600).
 

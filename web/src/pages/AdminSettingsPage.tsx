@@ -948,13 +948,15 @@ function ImportDatabaseSection() {
   return (
     <div className="space-y-4">
       <p className="text-xs text-gray-500">
-        Replace the running database with one exported from a local TUI-based zs-config install.
+        Replace the running database with one exported from another zs-config install.
+        Encrypted (SQLCipher) databases are accepted — upload the matching{" "}
+        <code className="bg-gray-100 px-1 rounded text-xs font-mono">secret.key</code> with them.
         Use the <code className="bg-gray-100 px-1 rounded text-xs font-mono">scripts/export_tui_db.sh</code> script
         to export the database and encryption key from a local install.
       </p>
       <FieldRow
         label="Database file"
-        hint="SQLite .db file exported from a local install."
+        hint="zscaler.db from another install — plaintext SQLite or SQLCipher-encrypted."
       >
         <input
           ref={dbRef}
@@ -967,7 +969,7 @@ function ImportDatabaseSection() {
       </FieldRow>
       <FieldRow
         label="Encryption key"
-        hint="secret.key file — required if the exported database contains encrypted tenant credentials."
+        hint="secret.key file — required for an encrypted database, or if it holds encrypted tenant credentials."
       >
         <input
           ref={keyRef}

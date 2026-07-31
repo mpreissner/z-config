@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from api.dependencies import require_admin, AuthUser
 from api.auth_utils import hash_password
-from db.database import get_session, get_setting, init_db, get_db_url
+from db.database import dispose_engine, get_session, get_setting, init_db, get_db_url
 from db.models import (
     AuditLog, RestorePoint, ScimGroup, ScimGroupMember, ScimToken, SyncLog,
     TenantConfig, User, UserTenantEntitlement, ZCCResource, ZIAResource,
@@ -283,6 +283,70 @@ def rotate_encryption_key(body: RotateKeyRequest, _: AuthUser = Depends(require_
 
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# SQLite writes these next to the main file in WAL mode. They describe the
+# database being replaced, so they must not survive a swap — SQLite would try
+# to replay a stale WAL against the incoming file.
+_SIDECAR_SUFFIXES = ("-wal", "-shm")
+
+
+def _sqlcipher_key_from_material(raw: bytes) -> bytes:
+    """Derive the 32-byte SQLCipher key from raw secret.key file content.
+
+    Mirrors db.database._derive_sqlcipher_key(), but takes the material
+    explicitly so an uploaded key can be tested before it is installed.
+    """
+    import base64
+
+    from lib.crypto import CryptoAlgorithm, get_active_algorithm
+
+    if get_active_algorithm() == CryptoAlgorithm.FERNET:
+        return base64.urlsafe_b64decode(raw)[:32]
+    return base64.b64decode(raw)[:32]
+
+
+def _probe_database(path: Path, key_material: Optional[bytes]) -> Optional[str]:
+    """Return None if the file is a usable database, else a reason string.
+
+    A plaintext SQLite file is accepted on its header — init_db() converts it
+    to SQLCipher on first open. Anything else is treated as already encrypted,
+    where the header is ciphertext and there is no magic number to match; the
+    only way to distinguish a real SQLCipher database from arbitrary bytes is
+    to decrypt it, which also verifies the key actually fits the data.
+    """
+    with open(path, "rb") as fh:
+        header = fh.read(16)
+    if len(header) < 16:
+        return "the file is too small to be a database"
+    if header == _SQLITE_MAGIC:
+        return None
+
+    if not key_material:
+        return (
+            "the file is not plaintext SQLite, and no encryption key is available "
+            "to decrypt it — upload the matching secret.key alongside it"
+        )
+
+    try:
+        import binascii
+
+        import sqlcipher3.dbapi2 as sqlcipher
+
+        hex_key = binascii.hexlify(_sqlcipher_key_from_material(key_material)).decode()
+        conn = sqlcipher.connect(str(path))
+        try:
+            conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+            conn.execute("SELECT count(*) FROM sqlite_master")
+        finally:
+            conn.close()
+    except Exception:
+        # Deliberately not surfacing the driver error — it varies by failure
+        # mode and adds nothing an operator can act on.
+        return (
+            "the file could not be opened — it is neither a plaintext SQLite "
+            "database nor a SQLCipher database matching the supplied key"
+        )
+    return None
+
 
 @router.post("/import-db")
 async def import_database(
@@ -293,13 +357,14 @@ async def import_database(
     """Replace the running database and (optionally) the encryption key.
 
     Accepts multipart/form-data with:
-      - db_file  — SQLite database exported from a TUI zs-config install
-      - key_file — secret.key Fernet key file (optional; omit if tenant secrets
-                   were not encrypted or you are importing into a fresh install
-                   that has not yet encrypted anything)
+      - db_file  — a zs-config database, either plaintext SQLite (older TUI
+                   exports) or SQLCipher-encrypted (anything current)
+      - key_file — secret.key material. Required when db_file is encrypted,
+                   unless this install already holds the matching key.
 
-    The endpoint writes the new files and reinitialises the SQLAlchemy engine.
-    A page reload is required after import.
+    The upload is staged and opened before anything live is touched, and the
+    previous database and key are restored if the swap or the reinitialisation
+    fails. A page reload is required after a successful import.
     """
     db_path_str = os.environ.get("ZSCALER_DB_PATH")
     if not db_path_str:
@@ -307,40 +372,93 @@ async def import_database(
 
     db_path = Path(db_path_str)
     key_dir = db_path.parent
+    key_path = key_dir / "secret.key"
 
-    # Read and validate the SQLite file
     db_bytes = await db_file.read()
-    if len(db_bytes) < 16 or db_bytes[:16] != _SQLITE_MAGIC:
-        raise HTTPException(status_code=422, detail="Uploaded file is not a valid SQLite database")
 
-    # Write atomically: write to a temp file first, then replace
-    tmp_db = db_path.with_suffix(".tmp")
-    try:
-        tmp_db.write_bytes(db_bytes)
-        if sys.platform != "win32":
-            tmp_db.chmod(0o600)
-        shutil.move(str(tmp_db), str(db_path))
-    except Exception as exc:
-        tmp_db.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Failed to write database: {exc}")
-
-    # Write key file if provided
+    new_key: Optional[str] = None
     if key_file is not None:
         key_bytes = await key_file.read()
-        key_str = key_bytes.decode().strip()
-        # Validate — must be a 44-char base64url string (Fernet key)
-        if len(key_str) != 44:
-            raise HTTPException(status_code=422, detail="Key file does not look like a valid Fernet key (expected 44 characters)")
-        key_out = key_dir / "secret.key"
-        key_out.write_text(key_str)
-        if sys.platform != "win32":
-            key_out.chmod(0o600)
+        try:
+            new_key = key_bytes.decode().strip()
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=422, detail="Key file is not valid text")
+        # Fernet keys are 44 base64url chars; the raw-byte algorithms store
+        # base64 of 32 bytes, which is also 44.
+        if len(new_key) != 44:
+            raise HTTPException(status_code=422, detail="Key file does not look like a valid key (expected 44 characters)")
 
-    # Reinitialise the database engine against the new file
+    # The candidate is opened with the uploaded key when one was supplied,
+    # otherwise with whatever this install already uses.
+    if new_key is not None:
+        probe_key: Optional[bytes] = new_key.encode()
+    elif os.environ.get("ZSCALER_SECRET_KEY"):
+        probe_key = os.environ["ZSCALER_SECRET_KEY"].encode()
+    elif key_path.exists():
+        probe_key = key_path.read_bytes().strip()
+    else:
+        probe_key = None
+
+    staged = db_path.with_suffix(".import.tmp")
     try:
+        staged.write_bytes(db_bytes)
+        if sys.platform != "win32":
+            staged.chmod(0o600)
+    except Exception as exc:
+        staged.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to write database: {exc}")
+
+    reason = _probe_database(staged, probe_key)
+    if reason is not None:
+        staged.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=f"Uploaded file rejected — {reason}.")
+
+    # Past this point live files change, so keep restorable copies of each.
+    backup_dir = Path(tempfile.mkdtemp(prefix=".zs-import-", dir=str(key_dir)))
+    saved: dict = {}
+
+    def _save(src: Path) -> None:
+        if src.exists():
+            dest = backup_dir / src.name
+            shutil.copy2(src, dest)
+            saved[src] = dest
+
+    try:
+        # Drop handles on the outgoing file before it is replaced.
+        dispose_engine()
+
+        _save(db_path)
+        _save(key_path)
+        for suffix in _SIDECAR_SUFFIXES:
+            _save(Path(str(db_path) + suffix))
+        for suffix in _SIDECAR_SUFFIXES:
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+        shutil.move(str(staged), str(db_path))
+
+        if new_key is not None:
+            key_path.write_text(new_key)
+            if sys.platform != "win32":
+                key_path.chmod(0o600)
+
         init_db()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Database reinitialisation failed: {exc}")
+        for src, dest in saved.items():
+            try:
+                shutil.copy2(dest, src)
+            except Exception:
+                pass
+        staged.unlink(missing_ok=True)
+        try:
+            init_db()  # bring the previous database back online
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Import failed and the previous database was restored: {exc}",
+        )
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
     # Seed a default admin if the imported DB has no admin accounts (e.g. TUI export)
     from api.main import seed_admin_if_needed
