@@ -6,7 +6,6 @@ export interface SystemInfo {
   db_path: string;
   plugin_dir: string | null;
   idle_timeout_minutes: number;
-  govcloud_enabled: boolean;
 }
 
 export interface HealthStatus {

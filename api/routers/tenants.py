@@ -486,9 +486,16 @@ def import_zcc(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
     from api.jobs import store, import_job_key
 
+    from lib.zcc_client import ZCCUnavailableError
+
     if user.role != "admin":
         check_tenant_access(tenant_id, user)
-    client, tenant_name = _get_zcc_import_client(tenant_id)
+    try:
+        client, tenant_name = _get_zcc_import_client(tenant_id)
+    except ZCCUnavailableError as exc:
+        # GovCloud tenant — nothing to import, so say so instead of starting a
+        # job that can only fail.
+        raise HTTPException(status_code=400, detail=str(exc))
     job_id, created = store.create_unique(import_job_key(tenant_id, "ZCC"))
     if not created:
         return {"job_id": job_id, "already_running": True}

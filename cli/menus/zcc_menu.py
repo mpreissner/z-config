@@ -2205,7 +2205,7 @@ def _restore_zcc_snapshot(client, tenant):
     if target_tenant_name:
         from services.config_service import get_tenant, decrypt_secret
         from lib.auth import ZscalerAuth
-        from lib.zcc_client import ZCCClient
+        from lib.zcc_client import ZCCClient, ZCCUnavailableError
         tgt = get_tenant(target_tenant_name)
         if not tgt:
             console.print(f"[red]x Tenant '{target_tenant_name}' not found.[/red]")
@@ -2218,7 +2218,12 @@ def _restore_zcc_snapshot(client, tenant):
             govcloud=bool(tgt.govcloud),
             gov_tier=tgt.gov_cloud_tier,
         )
-        target_client = ZCCClient(tgt_auth, tgt.oneapi_base_url, tgt.zia_cloud, tgt.zia_tenant_id)
+        try:
+            target_client = ZCCClient(tgt_auth, tgt.oneapi_base_url, tgt.zia_cloud, tgt.zia_tenant_id)
+        except ZCCUnavailableError as e:
+            console.print(f"[red]x Target tenant '{target_tenant_name}': {e}[/red]")
+            questionary.press_any_key_to_continue("Press any key to continue...").ask()
+            return
         target_tenant_id = tgt.id
 
     mode_label = "dry run" if dry_run else "restore"

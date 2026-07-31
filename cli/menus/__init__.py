@@ -81,7 +81,7 @@ def get_zcc_client(tenant=None):
     """
     from cli.session import get_active_tenant
     from lib.auth import ZscalerAuth
-    from lib.zcc_client import ZCCClient
+    from lib.zcc_client import ZCCClient, ZCCUnavailableError
     from services.config_service import decrypt_secret
 
     if tenant is None:
@@ -93,7 +93,12 @@ def get_zcc_client(tenant=None):
 
     auth = ZscalerAuth(tenant.zidentity_base_url, tenant.client_id, decrypt_secret(tenant.client_secret_enc),
                        govcloud=tenant.govcloud, gov_tier=tenant.gov_cloud_tier)
-    return ZCCClient(auth, tenant.oneapi_base_url, tenant.zia_cloud, tenant.zia_tenant_id), tenant
+    try:
+        client = ZCCClient(auth, tenant.oneapi_base_url, tenant.zia_cloud, tenant.zia_tenant_id)
+    except ZCCUnavailableError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        return None, None
+    return client, tenant
 
 
 def get_zidentity_client(tenant=None):

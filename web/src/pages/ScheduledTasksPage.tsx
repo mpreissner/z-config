@@ -240,6 +240,10 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
     if (newId !== "") {
       setSelectedTargetIds((prev) => prev.filter((id) => id !== newId));
     }
+    // ZCC has no GovCloud endpoint — drop it if the new source is a gov tenant.
+    if ((tenants ?? []).some((t) => t.id === newId && t.govcloud)) {
+      setSelectedProducts((prev) => prev.filter((p) => p !== "ZCC"));
+    }
   }
 
   function addFanoutTarget(tenantId: number) {
@@ -264,7 +268,7 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
     if (!schedule) { setError("Schedule is required."); return; }
 
     if (taskType === "import") {
-      if (selectedProducts.length === 0) {
+      if (selectedProducts.filter((p) => availableImportProducts.includes(p)).length === 0) {
         setError("Select at least one product.");
         return;
       }
@@ -312,7 +316,8 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
     };
 
     if (taskType === "import") {
-      data.import_products = selectedProducts;
+      // Never submit a product the source tenant's cloud cannot serve.
+      data.import_products = selectedProducts.filter((p) => availableImportProducts.includes(p));
     } else {
       // sync
       if (targetMode === "single") {
@@ -339,6 +344,13 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
 
   const tenantNameById: Record<number, string> = {};
   (tenants ?? []).forEach((t) => { tenantNameById[t.id] = t.name; });
+
+  // The FedRAMP OneAPI gateway does not serve the ZCC API, so a gov source
+  // tenant can never import ZCC.
+  const sourceIsGov = (tenants ?? []).some((t) => t.id === sourceTenantId && t.govcloud);
+  const availableImportProducts = sourceIsGov
+    ? IMPORT_PRODUCTS.filter((p) => p !== "ZCC")
+    : IMPORT_PRODUCTS;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-40 flex items-center justify-center p-4">
@@ -658,7 +670,7 @@ function TaskFormModal({ mode, initial, onClose, onSaved }: TaskFormModalProps) 
                 Import Products <span className="text-red-500">*</span>
               </label>
               <div className="flex gap-6">
-                {IMPORT_PRODUCTS.map((p) => (
+                {availableImportProducts.map((p) => (
                   <label key={p} className="flex items-center gap-2 text-sm cursor-pointer">
                     <input
                       type="checkbox"
