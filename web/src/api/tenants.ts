@@ -56,6 +56,9 @@ export interface ImportResult {
 
 export interface JobRef {
   job_id: string;
+  /** True when an import for this tenant/product was already running and the
+   *  existing job was returned instead of starting a second one. */
+  already_running?: boolean;
 }
 
 export const fetchTenants = (): Promise<Tenant[]> =>
