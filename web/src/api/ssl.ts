@@ -106,7 +106,10 @@ export async function pollSSLHealthy(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const url = `https://${window.location.hostname}:8443/health`;
+      // Poll wherever the browser actually reached us. Hardcoding :8443 works
+      // only for direct access; behind ZPA Browser Access or a reverse proxy
+      // that port is not published and every probe hangs until TCP timeout.
+      const url = `${window.location.origin}/health`;
       const res = await fetch(url, { mode: "no-cors" });
       if (res.ok || res.type === "opaque") return true;
     } catch {

@@ -23,6 +23,18 @@ KEY_PATH  = SSL_DIR / "key.pem"
 _ACTIVE_MODES = ("upload", "letsencrypt")
 
 
+def public_origin(domain: str) -> str:
+    """The origin browsers actually use to reach this instance.
+
+    Direct access lands on 8443, but behind ZPA Browser Access or a reverse
+    proxy the browser sees port 443 and a WebAuthn assertion signed for
+    ':8443' is rejected on origin mismatch. Deployments that publish on a
+    different port set ZS_PUBLIC_ORIGIN (e.g. https://zs.example.com).
+    """
+    override = os.environ.get("ZS_PUBLIC_ORIGIN", "").strip().rstrip("/")
+    return override or f"https://{domain}:8443"
+
+
 class SSLValidationError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -226,7 +238,7 @@ def save_bundle(bundle: ParsedCertBundle, domain: str, mode: str = "upload") -> 
         raise SSLValidationError("write_failed", f"Failed to write SSL files: {e}")
     set_setting("ssl_mode", mode)
     set_setting("ssl_domain", domain)
-    set_setting("webauthn_origin", f"https://{domain}:8443")
+    set_setting("webauthn_origin", public_origin(domain))
     set_setting("webauthn_rp_id", domain)
     if origin_changing:
         with get_session() as session:

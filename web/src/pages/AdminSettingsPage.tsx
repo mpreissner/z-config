@@ -730,11 +730,22 @@ function SSLTlsSection() {
     }
     const deadline = Date.now() + 30_000;
     let recovered = false;
+    // Removing the cert drops the app back to plain HTTP on 8000, so that is
+    // where a directly-reached container reappears. Someone coming in through
+    // ZPA or a reverse proxy never sees port 8000 at all, so probe the origin
+    // they actually used as well and take whichever answers first.
+    const probes = [
+      `${window.location.origin}/health`,
+      `http://${window.location.hostname}:8000/health`,
+    ];
     while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`http://${window.location.hostname}:8000/health`);
-        if (res.ok) { recovered = true; break; }
-      } catch { /* not yet up */ }
+      const results = await Promise.allSettled(
+        probes.map((url) => fetch(url, { mode: "no-cors" })),
+      );
+      if (results.some((r) => r.status === "fulfilled" && (r.value.ok || r.value.type === "opaque"))) {
+        recovered = true;
+        break;
+      }
       await new Promise((r) => setTimeout(r, 1_000));
     }
     if (recovered) {
