@@ -2216,6 +2216,7 @@ def _restore_zcc_snapshot(client, tenant):
             tgt.client_id,
             decrypt_secret(tgt.client_secret_enc),
             govcloud=bool(tgt.govcloud),
+            gov_tier=tgt.gov_cloud_tier,
         )
         target_client = ZCCClient(tgt_auth, tgt.oneapi_base_url, tgt.zia_cloud, tgt.zia_tenant_id)
         target_tenant_id = tgt.id

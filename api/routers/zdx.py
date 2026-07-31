@@ -26,6 +26,7 @@ def _get_service(tenant_name: str, user: AuthUser):
         tenant.client_id,
         decrypt_secret(tenant.client_secret_enc),
         govcloud=bool(tenant.govcloud),
+        gov_tier=tenant.gov_cloud_tier,
     )
     client = ZDXClient(auth)
     return ZDXService(client, tenant_id=tenant.id)

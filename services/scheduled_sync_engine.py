@@ -721,12 +721,13 @@ def _build_client(tenant_id: int, product: str):
         secret = decrypt_secret(t.client_secret_enc)
         oneapi = t.oneapi_base_url
         govcloud = t.govcloud
+        gov_tier = t.gov_cloud_tier
         zpa_customer_id = t.zpa_customer_id
         zpa_tenant_cloud = t.zpa_tenant_cloud
         zia_cloud = t.zia_cloud
         zia_tenant_id = t.zia_tenant_id
 
-    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
+    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud, gov_tier=gov_tier)
 
     if product == "ZIA":
         from lib.zia_client import ZIAClient
@@ -735,8 +736,7 @@ def _build_client(tenant_id: int, product: str):
         if not zpa_customer_id:
             raise ValueError("ZPA requires zpa_customer_id")
         from lib.zpa_client import ZPAClient
-        govcloud_cloud = zpa_tenant_cloud if govcloud else None
-        return ZPAClient(auth, zpa_customer_id, oneapi, govcloud_cloud=govcloud_cloud)
+        return ZPAClient(auth, zpa_customer_id, oneapi)
     elif product == "ZCC":
         from lib.zcc_client import ZCCClient
         return ZCCClient(auth, oneapi, zia_cloud=zia_cloud, zia_tenant_id=zia_tenant_id)
@@ -764,8 +764,9 @@ def _build_zia_client(tenant_id: int):
         secret = decrypt_secret(t.client_secret_enc)
         oneapi = t.oneapi_base_url
         govcloud = t.govcloud
+        gov_tier = t.gov_cloud_tier
 
-    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
+    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud, gov_tier=gov_tier)
     return ZIAClient(auth, oneapi)
 
 

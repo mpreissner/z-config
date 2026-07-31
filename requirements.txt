@@ -2,7 +2,7 @@
 requests>=2.33.0
 
 # Zscaler SDK
-zscaler-sdk-python>=1.9.20
+zscaler-sdk-python>=1.9.39
 
 # Rich TUI (CLI)
 rich>=13.7.0

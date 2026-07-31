@@ -293,6 +293,10 @@ def _migrate(engine) -> None:
         "ALTER TABLE scheduled_tasks ADD COLUMN import_products JSON",
         "ALTER TABLE task_run_history ADD COLUMN parent_run_id INTEGER REFERENCES task_run_history(id) ON DELETE SET NULL",
         "ALTER TABLE task_run_history ADD COLUMN target_tenant_id INTEGER",
+        # GovCloud FedRAMP tier. Tenants created before the picker existed used
+        # the .us endpoints exclusively, so they backfill to 'govus'.
+        "ALTER TABLE tenant_configs ADD COLUMN gov_cloud_tier VARCHAR(16)",
+        "UPDATE tenant_configs SET gov_cloud_tier = 'govus' WHERE govcloud = 1 AND gov_cloud_tier IS NULL",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

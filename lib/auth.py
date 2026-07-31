@@ -1,5 +1,6 @@
 import threading
 import time
+from typing import Optional
 
 import requests
 from urllib.parse import urlparse
@@ -7,6 +8,13 @@ from urllib.parse import urlparse
 # Module-level token cache: key=(client_id, zidentity_base_url) → (token, expires_at)
 _token_cache: dict = {}
 _token_lock = threading.Lock()
+
+# FedRAMP tiers, named as zscaler-sdk-python names them in its `cloud` config
+# key. "gov" is FedRAMP High (.net domains), "govus" is FedRAMP Moderate (.us).
+GOV_TIER_HIGH = "gov"
+GOV_TIER_MODERATE = "govus"
+GOV_TIERS = (GOV_TIER_HIGH, GOV_TIER_MODERATE)
+DEFAULT_GOV_TIER = GOV_TIER_MODERATE
 
 
 class ZscalerAuth:
@@ -16,11 +24,32 @@ class ZscalerAuth:
     Token acquisition and refresh are handled internally by zscaler-sdk-python.
     """
 
-    def __init__(self, zidentity_base_url: str, client_id: str, client_secret: str, govcloud: bool = False):
+    def __init__(
+        self,
+        zidentity_base_url: str,
+        client_id: str,
+        client_secret: str,
+        govcloud: bool = False,
+        gov_tier: Optional[str] = None,
+    ):
         self.zidentity_base_url = zidentity_base_url
         self.client_id = client_id
         self.client_secret = client_secret
         self.govcloud = govcloud
+        # Tenants created before the tier picker existed only recorded a
+        # boolean, and pointed at the .us endpoints — so they are govus.
+        self.gov_tier = (gov_tier or DEFAULT_GOV_TIER) if govcloud else None
+        if self.gov_tier is not None and self.gov_tier not in GOV_TIERS:
+            raise ValueError(f"Unknown GovCloud tier {self.gov_tier!r}; expected one of {GOV_TIERS}")
+
+    @property
+    def sdk_cloud(self) -> Optional[str]:
+        """Value for the SDK's `cloud` config key, or None for commercial.
+
+        The SDK derives both the ZIdentity OAuth host and the OneAPI gateway
+        from this, so setting it is all that GovCloud support requires.
+        """
+        return self.gov_tier
 
     @property
     def vanity_domain(self) -> str:

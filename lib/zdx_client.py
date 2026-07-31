@@ -49,11 +49,14 @@ class ZDXClient:
     """SDK-backed client for the Zscaler Digital Experience (ZDX) API."""
 
     def __init__(self, auth: ZscalerAuth):
-        self._sdk = ZscalerClient({
+        sdk_config = {
             "clientId": auth.client_id,
             "clientSecret": auth.client_secret,
             "vanityDomain": auth.vanity_domain,
-        })
+        }
+        if auth.sdk_cloud:
+            sdk_config["cloud"] = auth.sdk_cloud
+        self._sdk = ZscalerClient(sdk_config)
 
     # ------------------------------------------------------------------
     # Devices

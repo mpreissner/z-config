@@ -15,6 +15,8 @@ import {
   TenantCreate,
   TenantUpdate,
   ImportResult,
+  GovCloudTier,
+  DEFAULT_GOV_TIER,
 } from "../api/tenants";
 import { useJobStream } from "../hooks/useJobStream";
 import { useSystemInfo } from "../hooks/useSystemInfo";
@@ -100,9 +102,44 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   );
 }
 
-// ── Create Modal ─────────────────────────────────────────────────────────────
+// ── GovCloud tier ────────────────────────────────────────────────────────────
 
-const GOVCLOUD_ONEAPI_DEFAULT = "https://api.zscalergov.us";
+const GOV_TIERS: { value: GovCloudTier; label: string; hint: string }[] = [
+  { value: "govus", label: "FedRAMP Moderate", hint: "zidentitygov.us / api.zscalergov.us" },
+  { value: "gov", label: "FedRAMP High", hint: "zidentitygov.net / api.zscalergov.net" },
+];
+
+/** Tier picker. The SDK derives both the ZIdentity host and the OneAPI gateway
+ *  from this value, so there is no URL for the user to enter. */
+function GovTierField({ value, onChange }: { value: GovCloudTier; onChange: (v: GovCloudTier) => void }) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">FedRAMP Tier</label>
+      <div className="space-y-1">
+        {GOV_TIERS.map((t) => (
+          <label key={t.value} className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              name="gov_cloud_tier"
+              checked={value === t.value}
+              onChange={() => onChange(t.value)}
+              className="text-zs-500 focus:ring-zs-500"
+            />
+            <span>{t.label}</span>
+            <span className="text-xs text-gray-400 font-mono">{t.hint}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function zidentityHint(vanity: string, govcloud: boolean | undefined, tier: GovCloudTier): string {
+  const host = govcloud ? (tier === "gov" ? "zidentitygov.net" : "zidentitygov.us") : "zslogin.net";
+  return `→ https://${vanity || "acme"}.${host}`;
+}
+
+// ── Create Modal ─────────────────────────────────────────────────────────────
 
 function CreateModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
@@ -114,7 +151,7 @@ function CreateModal({ onClose }: { onClose: () => void }) {
     client_id: "",
     client_secret: "",
     govcloud: false,
-    govcloud_oneapi_url: GOVCLOUD_ONEAPI_DEFAULT,
+    gov_cloud_tier: DEFAULT_GOV_TIER,
     zpa_customer_id: "",
     notes: "",
   });
@@ -134,16 +171,18 @@ function CreateModal({ onClose }: { onClose: () => void }) {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  const vanityHint = form.govcloud
-    ? `→ https://${form.vanity_domain || "acme"}.zidentitygov.us`
-    : `→ https://${form.vanity_domain || "acme"}.zslogin.net`;
+  const vanityHint = zidentityHint(
+    form.vanity_domain,
+    form.govcloud,
+    form.gov_cloud_tier ?? DEFAULT_GOV_TIER,
+  );
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     mut.mutate({
       ...form,
-      govcloud_oneapi_url: form.govcloud ? (form.govcloud_oneapi_url || GOVCLOUD_ONEAPI_DEFAULT) : undefined,
+      gov_cloud_tier: form.govcloud ? (form.gov_cloud_tier ?? DEFAULT_GOV_TIER) : undefined,
       zpa_customer_id: form.zpa_customer_id || undefined,
       notes: form.notes || undefined,
     });
@@ -180,6 +219,12 @@ function CreateModal({ onClose }: { onClose: () => void }) {
         {govcloudEnabled && (
           <CheckboxField label="GovCloud" checked={form.govcloud ?? false} onChange={(v) => set("govcloud", v)} />
         )}
+        {govcloudEnabled && form.govcloud && (
+          <GovTierField
+            value={form.gov_cloud_tier ?? DEFAULT_GOV_TIER}
+            onChange={(v) => set("gov_cloud_tier", v)}
+          />
+        )}
         <div>
           <Field
             label="Vanity Domain"
@@ -190,14 +235,6 @@ function CreateModal({ onClose }: { onClose: () => void }) {
           />
           <p className="text-xs text-gray-400 mt-1 font-mono">{vanityHint}</p>
         </div>
-        {govcloudEnabled && form.govcloud && (
-          <Field
-            label="OneAPI Base URL"
-            value={form.govcloud_oneapi_url ?? GOVCLOUD_ONEAPI_DEFAULT}
-            onChange={(v) => set("govcloud_oneapi_url", v)}
-            placeholder={GOVCLOUD_ONEAPI_DEFAULT}
-          />
-        )}
         <Field label="Client ID" value={form.client_id} onChange={(v) => set("client_id", v)} required />
         <Field label="Client Secret" value={form.client_secret} onChange={(v) => set("client_secret", v)} type="password" required />
         <Field label="ZPA Customer ID" value={form.zpa_customer_id ?? ""} onChange={(v) => set("zpa_customer_id", v)} />
@@ -228,7 +265,7 @@ function EditModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void })
     client_id: tenant.client_id,
     client_secret: "",
     govcloud: tenant.govcloud,
-    govcloud_oneapi_url: tenant.govcloud ? tenant.oneapi_base_url : GOVCLOUD_ONEAPI_DEFAULT,
+    gov_cloud_tier: tenant.gov_cloud_tier ?? DEFAULT_GOV_TIER,
     zpa_customer_id: tenant.zpa_customer_id ?? "",
     notes: tenant.notes ?? "",
   });
@@ -247,9 +284,11 @@ function EditModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void })
     setForm((f) => ({ ...f, [key]: value }));
   }
 
-  const vanityHint = form.govcloud
-    ? `→ https://${form.vanity_domain || "acme"}.zidentitygov.us`
-    : `→ https://${form.vanity_domain || "acme"}.zslogin.net`;
+  const vanityHint = zidentityHint(
+    form.vanity_domain ?? "",
+    form.govcloud,
+    form.gov_cloud_tier ?? DEFAULT_GOV_TIER,
+  );
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -258,7 +297,7 @@ function EditModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void })
       vanity_domain: form.vanity_domain,
       client_id: form.client_id,
       govcloud: form.govcloud,
-      govcloud_oneapi_url: form.govcloud ? (form.govcloud_oneapi_url || GOVCLOUD_ONEAPI_DEFAULT) : undefined,
+      gov_cloud_tier: form.govcloud ? (form.gov_cloud_tier ?? DEFAULT_GOV_TIER) : undefined,
       zpa_customer_id: form.zpa_customer_id || undefined,
       notes: form.notes || undefined,
     };
@@ -273,18 +312,16 @@ function EditModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void })
         {govcloudEnabled && (
           <CheckboxField label="GovCloud" checked={form.govcloud ?? false} onChange={(v) => set("govcloud", v)} />
         )}
+        {govcloudEnabled && form.govcloud && (
+          <GovTierField
+            value={form.gov_cloud_tier ?? DEFAULT_GOV_TIER}
+            onChange={(v) => set("gov_cloud_tier", v)}
+          />
+        )}
         <div>
           <Field label="Vanity Domain" value={form.vanity_domain ?? ""} onChange={(v) => set("vanity_domain", v)} placeholder="acme" />
           <p className="text-xs text-gray-400 mt-1 font-mono">{vanityHint}</p>
         </div>
-        {govcloudEnabled && form.govcloud && (
-          <Field
-            label="OneAPI Base URL"
-            value={form.govcloud_oneapi_url ?? GOVCLOUD_ONEAPI_DEFAULT}
-            onChange={(v) => set("govcloud_oneapi_url", v)}
-            placeholder={GOVCLOUD_ONEAPI_DEFAULT}
-          />
-        )}
         <Field label="Client ID" value={form.client_id ?? ""} onChange={(v) => set("client_id", v)} />
         <Field label="Client Secret (leave blank to keep existing)" value={form.client_secret} onChange={(v) => set("client_secret", v)} type="password" placeholder="(unchanged)" />
         <Field label="ZPA Customer ID" value={form.zpa_customer_id ?? ""} onChange={(v) => set("zpa_customer_id", v)} />
@@ -436,7 +473,8 @@ function ImportModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void 
           importFn={importZIA}
           onDone={invalidate}
         />
-        {tenant.zpa_customer_id && !tenant.govcloud && (
+        {/* ZPA on GovCloud is handled natively by the SDK (config.zpagov.net/.us). */}
+        {tenant.zpa_customer_id && (
           <ImportProductRow
             label="ZPA Import"
             description="Pulls applications, segment groups, and other ZPA config"
@@ -776,7 +814,7 @@ export default function TenantsPage() {
                   <td className="whitespace-nowrap px-3 py-3 text-sm">
                     <ValidationBadge tenant={t} />
                   </td>
-                  <td className="whitespace-nowrap px-3 py-3 text-sm text-gray-500">{t.govcloud ? "Yes" : "No"}</td>
+                  <td className="whitespace-nowrap px-3 py-3 text-sm text-gray-500">{t.govcloud ? (t.gov_cloud_tier ?? "yes") : "No"}</td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm text-gray-500">
                     {formatDate(t.created_at)}
                   </td>

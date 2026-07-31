@@ -33,6 +33,7 @@ class TenantConfig(Base):
     last_validation_error = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     govcloud = Column(Boolean, default=False, nullable=False)
+    gov_cloud_tier = Column(String(16), nullable=True)      # 'gov' (FedRAMP High) | 'govus' (FedRAMP Moderate)
     zpa_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     zia_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     zcc_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401

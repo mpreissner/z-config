@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from lib.auth import DEFAULT_GOV_TIER, GOV_TIER_HIGH, GOV_TIER_MODERATE
+
 if sys.platform == "win32":
     DEFAULT_CONF_PATH = str(
         Path(os.environ.get("APPDATA", Path.home())) / "zs-config" / "zscaler-oneapi.conf"
@@ -17,13 +19,32 @@ if sys.platform == "win32":
 else:
     DEFAULT_CONF_PATH = "/etc/zscaler-oneapi.conf"
 DEFAULT_ONEAPI_URL = "https://api.zsapi.net"
-GOVCLOUD_ONEAPI_URL = "https://api.zscalergov.us"  # MOD tier confirmed; HIGH tier TBD
+
+# Per-tier GovCloud endpoints, mirroring ONEAPI_GOV_API_BASE_URLS and
+# ONEAPI_GOV_AUTH_DOMAINS in zscaler-sdk-python. The SDK derives these itself
+# from the `cloud` config key; we keep them here for the direct-HTTP token
+# fetch in ZscalerAuth and for the conf file.
+GOVCLOUD_ONEAPI_URLS = {
+    GOV_TIER_HIGH: "https://api.zscalergov.net",
+    GOV_TIER_MODERATE: "https://api.zscalergov.us",
+}
+GOVCLOUD_ZIDENTITY_DOMAINS = {
+    GOV_TIER_HIGH: "zidentitygov.net",
+    GOV_TIER_MODERATE: "zidentitygov.us",
+}
+# Back-compat alias: tenants predating the tier picker are all FedRAMP Moderate.
+GOVCLOUD_ONEAPI_URL = GOVCLOUD_ONEAPI_URLS[DEFAULT_GOV_TIER]
 
 
-def build_zidentity_url(subdomain: str, govcloud: bool = False) -> str:
+def govcloud_oneapi_url(gov_tier: Optional[str] = None) -> str:
+    """OneAPI gateway base URL for a GovCloud tier."""
+    return GOVCLOUD_ONEAPI_URLS[gov_tier or DEFAULT_GOV_TIER]
+
+
+def build_zidentity_url(subdomain: str, govcloud: bool = False, gov_tier: Optional[str] = None) -> str:
     sub = subdomain.strip().lower()
     if govcloud:
-        return f"https://{sub}.zidentitygov.us"
+        return f"https://{sub}.{GOVCLOUD_ZIDENTITY_DOMAINS[gov_tier or DEFAULT_GOV_TIER]}"
     return f"https://{sub}.zslogin.net"
 
 
@@ -35,13 +56,14 @@ def write_conf(
     zpa_customer_id: Optional[str] = None,
     oneapi_base_url: str = DEFAULT_ONEAPI_URL,
     govcloud: bool = False,
+    gov_tier: Optional[str] = None,
 ) -> str:
     """Write the conf file and set permissions to 600.
 
     Returns the resolved absolute path of the written file.
     Raises PermissionError if the path is not writable.
     """
-    zidentity_url = build_zidentity_url(vanity_subdomain, govcloud=govcloud)
+    zidentity_url = build_zidentity_url(vanity_subdomain, govcloud=govcloud, gov_tier=gov_tier)
 
     lines = [
         "# Zscaler OneAPI Configuration",
@@ -77,7 +99,13 @@ def write_conf(
     return str(p.resolve())
 
 
-def test_credentials(vanity_subdomain: str, client_id: str, client_secret: str, govcloud: bool = False) -> None:
+def test_credentials(
+    vanity_subdomain: str,
+    client_id: str,
+    client_secret: str,
+    govcloud: bool = False,
+    gov_tier: Optional[str] = None,
+) -> None:
     """Attempt an OAuth token request to verify the credentials are valid.
 
     Raises on failure — requests.HTTPError for API errors, or ConnectionError
@@ -85,5 +113,11 @@ def test_credentials(vanity_subdomain: str, client_id: str, client_secret: str, 
     """
     from lib.auth import ZscalerAuth
 
-    auth = ZscalerAuth(build_zidentity_url(vanity_subdomain, govcloud=govcloud), client_id, client_secret)
+    auth = ZscalerAuth(
+        build_zidentity_url(vanity_subdomain, govcloud=govcloud, gov_tier=gov_tier),
+        client_id,
+        client_secret,
+        govcloud=govcloud,
+        gov_tier=gov_tier,
+    )
     auth.get_token()

@@ -8692,7 +8692,8 @@ export default function TenantWorkspacePage() {
 
   if (!tenant) return null;
 
-  const hasZpa = !!tenant.zpa_customer_id && !tenant.govcloud;
+  // GovCloud ZPA is resolved by the SDK from the tenant's FedRAMP tier.
+  const hasZpa = !!tenant.zpa_customer_id;
 
   const tabs: { id: TabId; label: string; show: boolean }[] = [
     { id: "zia", label: "ZIA", show: true },
