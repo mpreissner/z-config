@@ -26,25 +26,26 @@ print(f'SSL bootstrapped from /certs for domain: {domain}')
 " || echo "WARNING: SSL bootstrap from /certs failed — check cert files and permissions"
 fi
 
-# Determine SSL mode from DB at startup
+# Determine SSL mode from DB at startup.
+# The set of modes that mean "serve TLS" and the cert paths both come from
+# ssl_service so this cannot drift out of step with the application.
 SSL_CMD=$(python -c "
-import os, sys
+import sys
 sys.path.insert(0, '.')
 from db.database import get_setting
+from services.ssl_service import _ACTIVE_MODES, CERT_PATH, KEY_PATH
 mode = get_setting('ssl_mode') or 'none'
-if mode == 'upload':
-    cert = '/data/db/ssl/cert.pem'
-    key  = '/data/db/ssl/key.pem'
-    import pathlib
-    if pathlib.Path(cert).exists() and pathlib.Path(key).exists():
+if mode in _ACTIVE_MODES:
+    if CERT_PATH.exists() and KEY_PATH.exists():
         domain = get_setting('ssl_domain') or 'localhost'
-        print(f'ssl_mode=upload cert={cert} key={key} domain={domain}')
+        print(f'ssl_mode=tls cert={CERT_PATH} key={KEY_PATH} domain={domain}')
         sys.exit(0)
+    print(f'WARNING: ssl_mode={mode} but no certificate on disk', file=sys.stderr)
 print('ssl_mode=none')
 " 2>/dev/null || echo "ssl_mode=none")
 
 case "$SSL_CMD" in
-  ssl_mode=upload*)
+  ssl_mode=tls*)
     CERT=$(echo "$SSL_CMD"   | grep -o 'cert=[^ ]*'   | cut -d= -f2)
     KEY=$(echo "$SSL_CMD"    | grep -o 'key=[^ ]*'    | cut -d= -f2)
     DOMAIN=$(echo "$SSL_CMD" | grep -o 'domain=[^ ]*' | cut -d= -f2)
