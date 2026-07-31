@@ -6,6 +6,21 @@ from zscaler import ZscalerClient
 
 from .auth import ZscalerAuth
 
+# The FedRAMP OneAPI gateways (api.zscalergov.us / .net) authenticate the token
+# but have no upstream for the /zcc service: every path under /zcc answers 500
+# with a zero-length body, valid or not, while /zia and /zpa behave normally.
+# There is nothing a client can do about it, so refuse to build one rather than
+# emit a wall of opaque 500s. Remove this guard once Zscaler routes ZCC on gov.
+ZCC_GOVCLOUD_UNAVAILABLE = (
+    "ZCC is not available on GovCloud tenants — the FedRAMP OneAPI gateway "
+    "does not serve the ZCC API. ZIA and ZPA are unaffected."
+)
+
+
+class ZCCUnavailableError(RuntimeError):
+    """ZCC cannot be reached for this tenant's cloud."""
+
+
 # Integer → human label (used by service layer and menus)
 OS_TYPE_LABELS: Dict[int, str] = {
     1: "iOS",
@@ -102,6 +117,8 @@ class ZCCClient:
         zia_cloud: Optional[str] = None,
         zia_tenant_id: Optional[str] = None,
     ):
+        if auth.govcloud:
+            raise ZCCUnavailableError(ZCC_GOVCLOUD_UNAVAILABLE)
         self.auth = auth
         sdk_config = {
             "clientId": auth.client_id,

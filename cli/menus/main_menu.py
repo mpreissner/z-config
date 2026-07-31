@@ -25,6 +25,19 @@ def _zia_label() -> str:
     return "  ZIA   Zscaler Internet Access"
 
 
+def _zcc_available() -> bool:
+    """False when the active tenant is GovCloud.
+
+    The FedRAMP OneAPI gateways do not route the /zcc service — every endpoint
+    answers 500 with an empty body — so the product is hidden rather than
+    offered as a menu full of failures. With no active tenant we leave it
+    visible; get_zcc_client() catches the case after the tenant is picked.
+    """
+    from cli.session import get_active_tenant
+    t = get_active_tenant()
+    return not (t and t.govcloud)
+
+
 def main_menu(tui_only: bool = False):
     while True:
         render_banner()
@@ -35,7 +48,10 @@ def main_menu(tui_only: bool = False):
         choices = [
             questionary.Choice(_zia_label(), value="zia"),
             questionary.Choice("  ZPA   Zscaler Private Access", value="zpa"),
-            questionary.Choice("  ZCC   Zscaler Client Connector", value="zcc"),
+        ]
+        if _zcc_available():
+            choices.append(questionary.Choice("  ZCC   Zscaler Client Connector", value="zcc"))
+        choices += [
             questionary.Choice("  ZDX   Zscaler Digital Experience", value="zdx"),
             questionary.Choice("  ZIdentity", value="zidentity"),
         ]

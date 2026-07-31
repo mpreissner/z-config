@@ -27,7 +27,6 @@ def system_info():
         "db_path": os.environ.get("ZSCALER_DB_PATH", "~/.local/share/zs-config/zscaler.db"),
         "plugin_dir": os.environ.get("ZS_PLUGIN_DIR", None),
         "idle_timeout_minutes": idle_minutes,
-        "govcloud_enabled": os.environ.get("ZS_ENABLE_GOVCLOUD", "0") == "1",
     }
 
 

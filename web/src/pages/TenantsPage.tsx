@@ -19,7 +19,6 @@ import {
   DEFAULT_GOV_TIER,
 } from "../api/tenants";
 import { useJobStream } from "../hooks/useJobStream";
-import { useSystemInfo } from "../hooks/useSystemInfo";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
 import { useAuth } from "../context/AuthContext";
@@ -143,8 +142,6 @@ function zidentityHint(vanity: string, govcloud: boolean | undefined, tier: GovC
 
 function CreateModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const { data: sysInfo } = useSystemInfo();
-  const govcloudEnabled = sysInfo?.govcloud_enabled ?? false;
   const [form, setForm] = useState<TenantCreate>({
     name: "",
     vanity_domain: "",
@@ -216,10 +213,8 @@ function CreateModal({ onClose }: { onClose: () => void }) {
     <Modal title="Add Tenant" onClose={onClose}>
       <form onSubmit={handleSubmit} className="space-y-3">
         <Field label="Name" value={form.name} onChange={(v) => set("name", v)} required />
-        {govcloudEnabled && (
-          <CheckboxField label="GovCloud" checked={form.govcloud ?? false} onChange={(v) => set("govcloud", v)} />
-        )}
-        {govcloudEnabled && form.govcloud && (
+        <CheckboxField label="GovCloud" checked={form.govcloud ?? false} onChange={(v) => set("govcloud", v)} />
+        {form.govcloud && (
           <GovTierField
             value={form.gov_cloud_tier ?? DEFAULT_GOV_TIER}
             onChange={(v) => set("gov_cloud_tier", v)}
@@ -258,8 +253,6 @@ function CreateModal({ onClose }: { onClose: () => void }) {
 
 function EditModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void }) {
   const qc = useQueryClient();
-  const { data: sysInfo } = useSystemInfo();
-  const govcloudEnabled = sysInfo?.govcloud_enabled ?? false;
   const [form, setForm] = useState<TenantUpdate & { client_secret: string }>({
     vanity_domain: tenant.vanity_domain,
     client_id: tenant.client_id,
@@ -309,10 +302,8 @@ function EditModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void })
     <Modal title={`Edit: ${tenant.name}`} onClose={onClose}>
       <form onSubmit={handleSubmit} className="space-y-3">
         <Field label="Name" value={tenant.name} onChange={() => {}} readOnly />
-        {govcloudEnabled && (
-          <CheckboxField label="GovCloud" checked={form.govcloud ?? false} onChange={(v) => set("govcloud", v)} />
-        )}
-        {govcloudEnabled && form.govcloud && (
+        <CheckboxField label="GovCloud" checked={form.govcloud ?? false} onChange={(v) => set("govcloud", v)} />
+        {form.govcloud && (
           <GovTierField
             value={form.gov_cloud_tier ?? DEFAULT_GOV_TIER}
             onChange={(v) => set("gov_cloud_tier", v)}
@@ -483,13 +474,25 @@ function ImportModal({ tenant, onClose }: { tenant: Tenant; onClose: () => void 
             onDone={invalidate}
           />
         )}
-        <ImportProductRow
-          label="ZCC Import"
-          description="Pulls app profiles, forwarding profiles, trusted networks, and other ZCC config"
-          tenantId={tenant.id}
-          importFn={importZCC}
-          onDone={invalidate}
-        />
+        {/* The GovCloud OneAPI gateways do not route the /zcc service — every
+            ZCC endpoint answers 500 with an empty body, so there is nothing
+            to import. ZIA and ZPA are unaffected. */}
+        {tenant.govcloud ? (
+          <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+            <p className="text-sm font-medium text-gray-500">ZCC Import</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Not available on GovCloud — the FedRAMP OneAPI gateway does not serve the ZCC API.
+            </p>
+          </div>
+        ) : (
+          <ImportProductRow
+            label="ZCC Import"
+            description="Pulls app profiles, forwarding profiles, trusted networks, and other ZCC config"
+            tenantId={tenant.id}
+            importFn={importZCC}
+            onDone={invalidate}
+          />
+        )}
       </div>
       <div className="flex justify-end mt-4">
         <button onClick={onClose} className="px-4 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50">Close</button>

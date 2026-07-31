@@ -8730,17 +8730,27 @@ export default function TenantWorkspacePage() {
 
   // GovCloud ZPA is resolved by the SDK from the tenant's FedRAMP tier.
   const hasZpa = !!tenant.zpa_customer_id;
+  // The GovCloud OneAPI gateways do not route the /zcc service — every ZCC
+  // endpoint answers 500 with an empty body, valid path or not. Hide the
+  // product rather than offer imports that cannot succeed.
+  const hasZcc = !tenant.govcloud;
 
   const tabs: { id: TabId; label: string; show: boolean }[] = [
     { id: "zia", label: "ZIA", show: true },
     { id: "zpa", label: "ZPA", show: !!tenant.zpa_customer_id },
     { id: "zdx", label: "ZDX", show: true },
-    { id: "zcc", label: "ZCC", show: true },
+    { id: "zcc", label: "ZCC", show: hasZcc },
     { id: "zid", label: "ZID", show: true },
   ];
 
   // If trying to view ZPA tab but no ZPA, redirect to ZIA
   if (activeTab === "zpa" && !tenant.zpa_customer_id) {
+    navigate(`/tenant/${id}/zia`, { replace: true });
+    return null;
+  }
+
+  // Same for a bookmarked ZCC tab on a GovCloud tenant.
+  if (activeTab === "zcc" && !hasZcc) {
     navigate(`/tenant/${id}/zia`, { replace: true });
     return null;
   }
@@ -8780,7 +8790,7 @@ export default function TenantWorkspacePage() {
             </span>
           )}
         </div>
-        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || activeTab === "zcc") && (
+        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || (activeTab === "zcc" && hasZcc)) && (
           <button
             onClick={() => setImportModal(importProduct)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white transition-colors"
