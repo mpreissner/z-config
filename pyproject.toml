@@ -32,6 +32,8 @@ api = [
     "python-multipart>=0.0.9",
     "apscheduler>=3.10.0,<4.0",
     "croniter>=1.4.0",
+    # SAML 2.0 SP. Needs libxmlsec1/libxml2 headers, already in the Dockerfile.
+    "python3-saml>=1.16.0",
 ]
 
 [project.scripts]

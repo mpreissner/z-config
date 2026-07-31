@@ -297,6 +297,12 @@ def _migrate(engine) -> None:
         # the .us endpoints exclusively, so they backfill to 'govus'.
         "ALTER TABLE tenant_configs ADD COLUMN gov_cloud_tier VARCHAR(16)",
         "UPDATE tenant_configs SET gov_cloud_tier = 'govus' WHERE govcloud = 1 AND gov_cloud_tier IS NULL",
+        # SCIM inbound provisioning. Existing accounts are local, so they
+        # backfill to scim_managed = 0.
+        "ALTER TABLE users ADD COLUMN scim_external_id VARCHAR(512)",
+        "ALTER TABLE users ADD COLUMN scim_managed BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN given_name VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN family_name VARCHAR(255)",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

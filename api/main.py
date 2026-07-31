@@ -43,6 +43,8 @@ from api.routers import jobs as jobs_router
 from api.routers import scheduled_tasks as scheduled_tasks_router
 from api.routers import templates as templates_router
 from api.routers import ssl as ssl_router
+from api.routers import sso as sso_router
+from api.routers import scim as scim_router
 from api.auth_utils import decode_token
 from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
@@ -205,6 +207,16 @@ app.include_router(admin_router.router)
 app.include_router(jobs_router.router)
 app.include_router(scheduled_tasks_router.router)
 app.include_router(templates_router.router)
+app.include_router(sso_router.router)
+# Mounted at its own /scim/v2 root — provisioning clients expect that path and
+# authenticate with an opaque bearer token rather than a session JWT.
+app.include_router(scim_router.router)
+
+
+@app.exception_handler(scim_router.ScimError)
+async def _scim_error_handler(request, exc: scim_router.ScimError):
+    """SCIM clients parse the SCIM error envelope, not FastAPI's {"detail": …}."""
+    return exc.response()
 
 
 @app.get("/health", tags=["System"])

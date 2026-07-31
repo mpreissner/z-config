@@ -8,6 +8,9 @@ export interface AdminUser {
   is_active: boolean;
   force_password_change: boolean;
   mfa_required: boolean;
+  /** True when an IdP owns this account over SCIM — local edits get overwritten. */
+  scim_managed: boolean;
+  sso_provider: string | null;
   created_at: string;
   last_login_at: string | null;
 }

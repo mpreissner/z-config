@@ -8,6 +8,11 @@ import {
   uploadSSLPfx, uploadSSLPemFile, uploadSSLPemPaste,
   removeSSL,
 } from "../api/ssl";
+import { testSso, ssoMetadataUrl } from "../api/sso";
+import {
+  fetchScimTokens, createScimToken, revokeScimToken,
+  fetchScimGroups, mapScimGroup,
+} from "../api/scim";
 import { ApiError } from "../api/client";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
@@ -41,14 +46,6 @@ function SectionCard({ title, badge, children, defaultOpen = false }: {
         <div className="px-6 py-5 space-y-4">{children}</div>
       </div>
     </div>
-  );
-}
-
-function ComingSoon() {
-  return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
-      Coming Soon
-    </span>
   );
 }
 
@@ -103,6 +100,84 @@ function TextInput({ value, onChange, placeholder, disabled }: {
       onChange={(e) => onChange(e.target.value)}
       className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:bg-gray-50 disabled:text-gray-400"
     />
+  );
+}
+
+function TextArea({ value, onChange, placeholder, rows = 5 }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  rows?: number;
+}) {
+  return (
+    <textarea
+      value={value}
+      rows={rows}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+    />
+  );
+}
+
+/**
+ * Write-only secret field. The API never returns the stored value, so the box
+ * starts blank and an empty submission means "leave what is on file alone".
+ */
+function SecretInput({ value, onChange, isSet, placeholder }: {
+  value: string;
+  onChange: (v: string) => void;
+  isSet: boolean;
+  placeholder?: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <input
+        type="password"
+        value={value}
+        placeholder={placeholder ?? (isSet ? "•••••••• (unchanged)" : "")}
+        autoComplete="new-password"
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+      />
+      {isSet && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-green-600">A value is stored.</span>
+          <button
+            type="button"
+            onClick={() => onChange("__CLEAR__")}
+            className="text-xs text-red-600 hover:underline"
+          >
+            Clear it
+          </button>
+          {value === "__CLEAR__" && (
+            <span className="text-xs text-red-600 font-medium">— will be cleared on save</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CopyField({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-center gap-2">
+      <code className="flex-1 truncate rounded bg-gray-50 border border-gray-200 px-2 py-1.5 text-xs text-gray-700">
+        {value}
+      </code>
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard?.writeText(value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+        className="text-xs px-2 py-1.5 rounded border border-gray-300 hover:bg-gray-50 text-gray-600"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
   );
 }
 
@@ -274,46 +349,10 @@ export default function AdminSettingsPage() {
       </SectionCard>
 
       {/* ── Identity Provider ─────────────────────────────────────────────── */}
-      <SectionCard title="Identity Provider (SSO)" badge={<ComingSoon />}>
-        <p className="text-xs text-gray-500">
-          OIDC and SAML integration is planned for a future release. These fields are saved
-          and will be activated when support is enabled.
-        </p>
-        <FieldRow label="Enable SSO">
-          <Toggle
-            checked={draft.idp_enabled}
-            onChange={(v) => set("idp_enabled", v)}
-            disabled
-          />
-        </FieldRow>
-        <FieldRow label="Provider" hint="oidc or saml">
-          <SelectInput
-            value={draft.idp_provider || "oidc"}
-            onChange={(v) => set("idp_provider", v)}
-            options={[
-              { value: "oidc", label: "OIDC" },
-              { value: "saml", label: "SAML" },
-            ]}
-            disabled
-          />
-        </FieldRow>
-        <FieldRow label="Issuer URL">
-          <TextInput
-            value={draft.idp_issuer_url}
-            onChange={(v) => set("idp_issuer_url", v)}
-            placeholder="https://accounts.example.com"
-            disabled
-          />
-        </FieldRow>
-        <FieldRow label="Client ID">
-          <TextInput
-            value={draft.idp_client_id}
-            onChange={(v) => set("idp_client_id", v)}
-            placeholder="your-client-id"
-            disabled
-          />
-        </FieldRow>
-      </SectionCard>
+      <IdentityProviderSection draft={draft} set={set} />
+
+      {/* ── SCIM Provisioning ─────────────────────────────────────────────── */}
+      <ScimSection baseUrl={draft.sso_base_url} />
 
       {/* ── SSL / TLS ─────────────────────────────────────────────────────── */}
       {sysInfo?.container_mode && <SSLTlsSection />}
@@ -1227,5 +1266,375 @@ function EncryptionSection({
       )}
       {rotateError && <p className="text-xs text-red-600">{rotateError}</p>}
     </div>
+  );
+}
+
+// ── Identity Provider (SSO) ───────────────────────────────────────────────────
+
+type SetFn = <K extends keyof SystemSettings>(key: K, value: SystemSettings[K]) => void;
+
+function IdentityProviderSection({ draft, set }: { draft: SystemSettings; set: SetFn }) {
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+
+  const test = useMutation({
+    mutationFn: testSso,
+    onSuccess: (res) => {
+      setTestError(null);
+      const { ok: _ok, provider, ...rest } = res;
+      setTestResult(
+        [`provider: ${provider}`, ...Object.entries(rest).map(([k, v]) => `${k}: ${v}`)].join("\n"),
+      );
+    },
+    onError: (err: unknown) => {
+      setTestResult(null);
+      setTestError(err instanceof Error ? err.message : "Connection test failed");
+    },
+  });
+
+  const provider = draft.idp_provider || "oidc";
+  const base = draft.sso_base_url || window.location.origin;
+
+  return (
+    <SectionCard title="Identity Provider (SSO)">
+      <FieldRow label="Enable SSO" hint="Adds a 'Sign in with SSO' button to the login page.">
+        <Toggle checked={draft.idp_enabled} onChange={(v) => set("idp_enabled", v)} />
+      </FieldRow>
+      <FieldRow label="Protocol">
+        <SelectInput
+          value={provider}
+          onChange={(v) => set("idp_provider", v)}
+          options={[
+            { value: "oidc", label: "OIDC" },
+            { value: "saml", label: "SAML 2.0" },
+          ]}
+        />
+      </FieldRow>
+      <FieldRow
+        label="Public base URL"
+        hint="How browsers and the IdP reach this install. Used to build redirect, ACS and metadata URLs."
+      >
+        <TextInput
+          value={draft.sso_base_url}
+          onChange={(v) => set("sso_base_url", v)}
+          placeholder="https://zs-config.example.com"
+        />
+      </FieldRow>
+
+      {provider === "oidc" ? (
+        <>
+          <FieldRow label="Issuer URL" hint="Discovery is read from {issuer}/.well-known/openid-configuration.">
+            <TextInput
+              value={draft.idp_issuer_url}
+              onChange={(v) => set("idp_issuer_url", v)}
+              placeholder="https://login.example.com/oauth2/default"
+            />
+          </FieldRow>
+          <FieldRow label="Client ID">
+            <TextInput
+              value={draft.idp_client_id}
+              onChange={(v) => set("idp_client_id", v)}
+              placeholder="0oa1b2c3d4e5f6g7h8i9"
+            />
+          </FieldRow>
+          <FieldRow label="Client secret">
+            <SecretInput
+              value={draft.idp_client_secret ?? ""}
+              onChange={(v) => set("idp_client_secret", v)}
+              isSet={draft.idp_client_secret_set}
+            />
+          </FieldRow>
+          <FieldRow label="Scopes">
+            <TextInput
+              value={draft.idp_scopes}
+              onChange={(v) => set("idp_scopes", v)}
+              placeholder="openid profile email groups"
+            />
+          </FieldRow>
+          <FieldRow label="Redirect URI" hint="Register this exact value with your IdP.">
+            <CopyField value={`${base}/api/v1/auth/sso/callback`} />
+          </FieldRow>
+        </>
+      ) : (
+        <>
+          <FieldRow
+            label="IdP metadata URL"
+            hint="Preferred — the metadata is re-read on each request. Leave blank to paste XML instead."
+          >
+            <TextInput
+              value={draft.saml_idp_metadata_url}
+              onChange={(v) => set("saml_idp_metadata_url", v)}
+              placeholder="https://login.example.com/app/exk1234/sso/saml/metadata"
+            />
+          </FieldRow>
+          <FieldRow label="IdP metadata XML" hint="Used when no metadata URL is set.">
+            <TextArea
+              value={draft.saml_idp_metadata_xml}
+              onChange={(v) => set("saml_idp_metadata_xml", v)}
+              placeholder="<EntityDescriptor …>"
+              rows={6}
+            />
+          </FieldRow>
+          <FieldRow label="SP entity ID" hint="Defaults to the metadata URL below if left blank.">
+            <TextInput
+              value={draft.saml_sp_entity_id}
+              onChange={(v) => set("saml_sp_entity_id", v)}
+              placeholder={`${base}/api/v1/auth/sso/metadata`}
+            />
+          </FieldRow>
+          <FieldRow
+            label="SP certificate"
+            hint="Optional. Only needed if your IdP requires signed AuthnRequests."
+          >
+            <TextArea
+              value={draft.saml_sp_cert}
+              onChange={(v) => set("saml_sp_cert", v)}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              rows={4}
+            />
+          </FieldRow>
+          <FieldRow label="SP private key">
+            <SecretInput
+              value={draft.saml_sp_key ?? ""}
+              onChange={(v) => set("saml_sp_key", v)}
+              isSet={draft.saml_sp_key_set}
+            />
+          </FieldRow>
+          <FieldRow label="ACS URL" hint="Register this exact value with your IdP.">
+            <CopyField value={`${base}/api/v1/auth/sso/acs`} />
+          </FieldRow>
+          <FieldRow label="SP metadata">
+            <a
+              href={ssoMetadataUrl()}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-zs-600 hover:underline"
+            >
+              Download SP metadata XML
+            </a>
+          </FieldRow>
+        </>
+      )}
+
+      <FieldRow
+        label="Auto-provision users"
+        hint="Create a local account the first time an unknown user signs in through the IdP."
+      >
+        <Toggle
+          checked={draft.idp_auto_provision}
+          onChange={(v) => set("idp_auto_provision", v)}
+        />
+      </FieldRow>
+      <FieldRow label="Default role" hint="Applied when no SCIM group mapping matches.">
+        <SelectInput
+          value={draft.idp_default_role || "user"}
+          onChange={(v) => set("idp_default_role", v)}
+          options={[
+            { value: "user", label: "User" },
+            { value: "admin", label: "Admin" },
+          ]}
+        />
+      </FieldRow>
+      <FieldRow
+        label="Group claim"
+        hint="Claim or SAML attribute carrying group names, matched against SCIM group mappings."
+      >
+        <TextInput
+          value={draft.idp_group_claim}
+          onChange={(v) => set("idp_group_claim", v)}
+          placeholder="groups"
+        />
+      </FieldRow>
+
+      <div className="pt-2 border-t border-gray-100 space-y-2">
+        <button
+          type="button"
+          onClick={() => test.mutate()}
+          disabled={test.isPending}
+          className="px-3 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700"
+        >
+          {test.isPending ? "Testing…" : "Test connection"}
+        </button>
+        <p className="text-xs text-gray-400">
+          Tests the configuration that is already saved — save your changes first.
+        </p>
+        {testError && <ErrorMessage message={testError} />}
+        {testResult && (
+          <pre className="rounded bg-green-50 border border-green-200 px-3 py-2 text-xs text-green-800 whitespace-pre-wrap">
+            {testResult}
+          </pre>
+        )}
+      </div>
+    </SectionCard>
+  );
+}
+
+// ── SCIM provisioning ─────────────────────────────────────────────────────────
+
+function ScimSection({ baseUrl }: { baseUrl: string }) {
+  const qc = useQueryClient();
+  const [label, setLabel] = useState("");
+  // Shown once, right after creation — the plaintext is never stored server-side.
+  const [newToken, setNewToken] = useState<string | null>(null);
+
+  const { data: tokens } = useQuery({ queryKey: ["scim-tokens"], queryFn: fetchScimTokens });
+  const { data: groups } = useQuery({ queryKey: ["scim-groups"], queryFn: fetchScimGroups });
+
+  const create = useMutation({
+    mutationFn: () => createScimToken(label.trim() || undefined),
+    onSuccess: (res) => {
+      setNewToken(res.token);
+      setLabel("");
+      qc.invalidateQueries({ queryKey: ["scim-tokens"] });
+    },
+  });
+
+  const revoke = useMutation({
+    mutationFn: revokeScimToken,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["scim-tokens"] }),
+  });
+
+  const map = useMutation({
+    mutationFn: ({ id, role }: { id: number; role: string | null }) => mapScimGroup(id, role),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["scim-groups"] });
+      // A remapped group can change roles, so the user list is stale too.
+      qc.invalidateQueries({ queryKey: ["admin-users"] });
+    },
+  });
+
+  const base = baseUrl || window.location.origin;
+
+  return (
+    <SectionCard title="SCIM Provisioning">
+      <p className="text-xs text-gray-500">
+        Point your identity provider at these values to provision and deprovision zs-config
+        web users automatically. This manages application accounts only — it does not touch
+        Zscaler tenants.
+      </p>
+
+      <FieldRow label="SCIM base URL">
+        <CopyField value={`${base}/scim/v2`} />
+      </FieldRow>
+
+      <div className="pt-3 border-t border-gray-100 space-y-3">
+        <p className="text-sm font-medium text-gray-700">Bearer tokens</p>
+
+        {newToken && (
+          <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 space-y-2">
+            <p className="text-xs text-amber-800 font-medium">
+              Copy this token now — it is not shown again.
+            </p>
+            <CopyField value={newToken} />
+            <button
+              type="button"
+              onClick={() => setNewToken(null)}
+              className="text-xs text-amber-700 hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={label}
+            placeholder="Label (e.g. Okta production)"
+            onChange={(e) => setLabel(e.target.value)}
+            className="flex-1 border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+          />
+          <button
+            type="button"
+            onClick={() => create.mutate()}
+            disabled={create.isPending}
+            className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50"
+          >
+            {create.isPending ? "Generating…" : "Generate token"}
+          </button>
+        </div>
+        {create.isError && (
+          <ErrorMessage message={create.error instanceof Error ? create.error.message : "Failed to generate token"} />
+        )}
+
+        {tokens && tokens.length > 0 ? (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-500 border-b border-gray-200">
+                <th className="py-1.5 font-medium">Label</th>
+                <th className="py-1.5 font-medium">Prefix</th>
+                <th className="py-1.5 font-medium">Last used</th>
+                <th className="py-1.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.map((t) => (
+                <tr key={t.id} className="border-b border-gray-100">
+                  <td className="py-1.5 text-gray-700">{t.label || <span className="text-gray-400">—</span>}</td>
+                  <td className="py-1.5 font-mono text-gray-500">{t.token_prefix}…</td>
+                  <td className="py-1.5 text-gray-500">
+                    {t.last_used_at ? new Date(t.last_used_at).toLocaleString() : "never"}
+                  </td>
+                  <td className="py-1.5 text-right">
+                    <button
+                      type="button"
+                      onClick={() => revoke.mutate(t.id)}
+                      className="text-red-600 hover:underline"
+                    >
+                      Revoke
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="text-xs text-gray-400">No tokens issued yet.</p>
+        )}
+      </div>
+
+      <div className="pt-3 border-t border-gray-100 space-y-3">
+        <p className="text-sm font-medium text-gray-700">Group role mapping</p>
+        <p className="text-xs text-gray-500">
+          Groups appear here once your IdP pushes them. Mapping one to a role applies it to
+          its members immediately. Unmapped groups leave members on the default role.
+        </p>
+        {groups && groups.length > 0 ? (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-500 border-b border-gray-200">
+                <th className="py-1.5 font-medium">Group</th>
+                <th className="py-1.5 font-medium">Members</th>
+                <th className="py-1.5 font-medium">Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => (
+                <tr key={g.id} className="border-b border-gray-100">
+                  <td className="py-1.5 text-gray-700">{g.display_name}</td>
+                  <td className="py-1.5 text-gray-500">{g.member_count}</td>
+                  <td className="py-1.5">
+                    <select
+                      value={g.mapped_role ?? ""}
+                      onChange={(e) => map.mutate({ id: g.id, role: e.target.value || null })}
+                      className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-zs-500"
+                    >
+                      <option value="">Not mapped</option>
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="text-xs text-gray-400">No groups have been provisioned yet.</p>
+        )}
+        {map.isError && (
+          <ErrorMessage message={map.error instanceof Error ? map.error.message : "Failed to update mapping"} />
+        )}
+      </div>
+    </SectionCard>
   );
 }

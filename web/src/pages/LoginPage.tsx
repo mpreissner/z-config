@@ -1,19 +1,34 @@
 import { useState, FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { startAuthentication } from "@simplewebauthn/browser";
 import { useAuth } from "../context/AuthContext";
 import { login } from "../api/auth";
 import { beginAuthentication, completeAuthentication } from "../api/webauthn";
+import { fetchSsoStatus, ssoLoginUrl } from "../api/sso";
 import zLogo from "../assets/z-logo.jpg";
 
 export default function LoginPage() {
   const { login: setToken, logoutReason } = useAuth();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [keyLoading, setKeyLoading] = useState(false);
+
+  // A failed SSO round trip bounces back here with the reason in the query
+  // string, since there is no React state left after the full-page redirect.
+  const ssoError = params.get("sso_error");
+
+  const { data: sso } = useQuery({
+    queryKey: ["sso-status"],
+    queryFn: fetchSsoStatus,
+    // Public endpoint, but a config change should not require a hard reload.
+    staleTime: 60_000,
+    retry: false,
+  });
 
   function postLogin(accessToken: string, forcePasswordChange: boolean, mfaEnrollRequired?: boolean) {
     setToken(accessToken);
@@ -83,6 +98,11 @@ export default function LoginPage() {
                 : "Your session is no longer valid. Please sign in again."}
             </div>
           )}
+          {ssoError && (
+            <div className="mb-4 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+              {ssoError}
+            </div>
+          )}
           <h2 className="text-gray-700 font-semibold mb-4">Sign in</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
@@ -133,6 +153,22 @@ export default function LoginPage() {
             </svg>
             {keyLoading ? "Touch your key…" : "Sign in with Security Key"}
           </button>
+
+          {sso?.enabled && (
+            <button
+              type="button"
+              // Full navigation, not fetch — the IdP redirect has to happen in
+              // the top-level browsing context.
+              onClick={() => { window.location.href = ssoLoginUrl(); }}
+              disabled={loading || keyLoading}
+              className="mt-3 w-full border border-gray-300 hover:border-gray-400 disabled:opacity-60 text-gray-700 font-medium py-2 rounded-md text-sm transition-colors flex items-center justify-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 11c0-1.105.895-2 2-2h4a2 2 0 012 2v2a2 2 0 01-2 2h-4a2 2 0 01-2-2m-2-6H6a2 2 0 00-2 2v8a2 2 0 002 2h4" />
+              </svg>
+              Sign in with SSO
+            </button>
+          )}
         </div>
       </div>
     </div>
