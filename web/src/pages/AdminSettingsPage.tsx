@@ -1930,10 +1930,19 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
                   <td className="py-1.5 text-right">
                     <button
                       type="button"
-                      onClick={() => revoke.mutate(t.id)}
-                      className="text-red-600 hover:underline"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Revoke token ${t.token_prefix}…? Any identity provider using it stops provisioning immediately.`,
+                          )
+                        ) {
+                          revoke.mutate(t.id);
+                        }
+                      }}
+                      disabled={revoke.isPending}
+                      className="text-red-600 hover:underline disabled:opacity-50 disabled:no-underline"
                     >
-                      Revoke
+                      {revoke.isPending && revoke.variables === t.id ? "Revoking…" : "Revoke"}
                     </button>
                   </td>
                 </tr>
@@ -1942,6 +1951,12 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
           </table>
         ) : (
           <p className="text-xs text-gray-400">No tokens issued yet.</p>
+        )}
+        {/* Without this the button looked inert on failure: the row stayed put
+            and nothing said why. A WAF in front of the app rejecting DELETE is
+            enough to trigger it, and that is invisible from here. */}
+        {revoke.isError && (
+          <ErrorMessage message={revoke.error instanceof Error ? revoke.error.message : "Failed to revoke token"} />
         )}
       </div>
 
