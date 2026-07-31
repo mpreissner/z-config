@@ -387,6 +387,12 @@ class User(Base):
     force_password_change = Column(Boolean, nullable=False, default=False)
     sso_provider          = Column(String(64), nullable=True)
     sso_subject           = Column(String(512), nullable=True)
+    # SCIM-provisioned accounts. scim_managed marks the IdP as the source of
+    # truth, which the admin UI honours by disabling local username/role edits.
+    scim_external_id      = Column(String(512), nullable=True)
+    scim_managed          = Column(Boolean, nullable=False, default=False)
+    given_name            = Column(String(255), nullable=True)
+    family_name           = Column(String(255), nullable=True)
     is_active             = Column(Boolean, nullable=False, default=True)
     mfa_required          = Column(Boolean, nullable=False, default=False)
     created_at            = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -445,6 +451,68 @@ class UserTenantEntitlement(Base):
 
     def __repr__(self) -> str:
         return f"<UserTenantEntitlement user_id={self.user_id} tenant_id={self.tenant_id}>"
+
+
+class ScimToken(Base):
+    """Bearer credential an IdP presents to the inbound SCIM 2.0 server.
+
+    Only the sha256 hash is stored; the plaintext is shown once at generation
+    and is unrecoverable afterwards. token_prefix exists purely so the admin UI
+    can tell two tokens apart in a list.
+    """
+
+    __tablename__ = "scim_tokens"
+
+    id           = Column(Integer, primary_key=True)
+    label        = Column(String(255), nullable=True)
+    token_hash   = Column(String(64), nullable=False, unique=True)
+    token_prefix = Column(String(16), nullable=False)
+    created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by   = Column(String(255), nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    is_active    = Column(Boolean, nullable=False, default=True)
+
+    def __repr__(self) -> str:
+        return f"<ScimToken label={self.label!r} prefix={self.token_prefix!r}>"
+
+
+class ScimGroup(Base):
+    """A group pushed by the IdP over SCIM.
+
+    mapped_role turns group membership into a zs-config role. Null means the
+    group carries no role and members fall back to the idp_default_role setting.
+    """
+
+    __tablename__ = "scim_groups"
+
+    id           = Column(Integer, primary_key=True)
+    external_id  = Column(String(512), nullable=True)
+    display_name = Column(String(255), nullable=False, unique=True)
+    mapped_role  = Column(String(32), nullable=True)  # 'admin' | 'user' | None
+    created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ScimGroup display_name={self.display_name!r} mapped_role={self.mapped_role!r}>"
+
+
+class ScimGroupMember(Base):
+    """Join between a SCIM group and a zs-config user."""
+
+    __tablename__ = "scim_group_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_scim_group_member"),
+    )
+
+    id       = Column(Integer, primary_key=True)
+    group_id = Column(Integer, ForeignKey("scim_groups.id", ondelete="CASCADE"), nullable=False)
+    user_id  = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    group = relationship("ScimGroup", backref="members")
+    user  = relationship("User", backref="scim_group_memberships")
+
+    def __repr__(self) -> str:
+        return f"<ScimGroupMember group_id={self.group_id} user_id={self.user_id}>"
 
 
 class ScheduledTask(Base):

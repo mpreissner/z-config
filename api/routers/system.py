@@ -39,10 +39,22 @@ _DEFAULTS = {
     "idle_timeout_minutes":       "15",
     "max_login_attempts":         "0",
     "audit_log_retention_days":   "90",
+    # ── Identity provider (SSO) ──
     "idp_enabled":                "false",
     "idp_provider":               "",
+    "idp_auto_provision":         "true",
+    "idp_default_role":           "user",
+    "idp_group_claim":            "groups",
     "idp_issuer_url":             "",
     "idp_client_id":              "",
+    "idp_client_secret":          "",   # encrypted at rest, never returned
+    "idp_scopes":                 "openid profile email",
+    "saml_idp_metadata_xml":      "",
+    "saml_idp_metadata_url":      "",
+    "saml_sp_entity_id":          "",
+    "saml_sp_cert":               "",
+    "saml_sp_key":                "",   # encrypted at rest, never returned
+    "sso_base_url":               "",
     "ssl_mode":                   "none",
     "ssl_domain":                 "",
     "encryption_algorithm":       "fernet",
@@ -76,8 +88,21 @@ def _coerce(raw: dict) -> dict:
         "audit_log_retention_days":   int(raw["audit_log_retention_days"]),
         "idp_enabled":                raw["idp_enabled"] == "true",
         "idp_provider":               raw["idp_provider"],
+        "idp_auto_provision":         raw["idp_auto_provision"] == "true",
+        "idp_default_role":           raw["idp_default_role"],
+        "idp_group_claim":            raw["idp_group_claim"],
         "idp_issuer_url":             raw["idp_issuer_url"],
         "idp_client_id":              raw["idp_client_id"],
+        # Secrets are write-only: the UI needs to know whether one is on file,
+        # never what it is.
+        "idp_client_secret_set":      bool(raw["idp_client_secret"]),
+        "idp_scopes":                 raw["idp_scopes"],
+        "saml_idp_metadata_xml":      raw["saml_idp_metadata_xml"],
+        "saml_idp_metadata_url":      raw["saml_idp_metadata_url"],
+        "saml_sp_entity_id":          raw["saml_sp_entity_id"],
+        "saml_sp_cert":               raw["saml_sp_cert"],
+        "saml_sp_key_set":            bool(raw["saml_sp_key"]),
+        "sso_base_url":               raw["sso_base_url"],
         "ssl_mode":                   raw["ssl_mode"],
         "ssl_domain":                 raw["ssl_domain"],
         "encryption_algorithm":       raw["encryption_algorithm"],
@@ -107,8 +132,19 @@ class SettingsPatch(BaseModel):
     audit_log_retention_days:   Optional[int] = None
     idp_enabled:                Optional[bool] = None
     idp_provider:               Optional[str] = None
+    idp_auto_provision:         Optional[bool] = None
+    idp_default_role:           Optional[str] = None
+    idp_group_claim:            Optional[str] = None
     idp_issuer_url:             Optional[str] = None
     idp_client_id:              Optional[str] = None
+    idp_client_secret:          Optional[str] = None
+    idp_scopes:                 Optional[str] = None
+    saml_idp_metadata_xml:      Optional[str] = None
+    saml_idp_metadata_url:      Optional[str] = None
+    saml_sp_entity_id:          Optional[str] = None
+    saml_sp_cert:               Optional[str] = None
+    saml_sp_key:                Optional[str] = None
+    sso_base_url:               Optional[str] = None
     ssl_mode:                   Optional[str] = None
     ssl_domain:                 Optional[str] = None
     encryption_algorithm:       Optional[str] = None
@@ -129,11 +165,37 @@ def get_settings(_: AuthUser = Depends(require_admin)):
     return _coerce(_load())
 
 
+# Settings whose value is encrypted before it hits the DB and is never read back
+# out through the API.
+_SECRET_KEYS = {"idp_client_secret", "saml_sp_key"}
+
+
 @router.patch("/api/v1/system/settings", tags=["System"])
 def patch_settings(body: SettingsPatch, _: AuthUser = Depends(require_admin)):
-    for k, v in body.model_dump(exclude_none=True).items():
-        if k in _KEYS:
-            set_setting(k, str(v).lower() if isinstance(v, bool) else str(v))
+    from fastapi import HTTPException
+    from services.config_service import encrypt_secret
+
+    patch = body.model_dump(exclude_none=True)
+
+    provider = patch.get("idp_provider")
+    if provider is not None and provider not in ("", "oidc", "saml"):
+        raise HTTPException(status_code=400, detail="idp_provider must be 'oidc' or 'saml'")
+    role = patch.get("idp_default_role")
+    if role is not None and role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="idp_default_role must be 'admin' or 'user'")
+
+    for k, v in patch.items():
+        if k not in _KEYS:
+            continue
+        if k in _SECRET_KEYS:
+            # An empty string means "leave what is on file alone" — the UI sends
+            # a blank box when the admin did not retype the secret. Clearing is
+            # done with the explicit sentinel below.
+            if v == "":
+                continue
+            set_setting(k, "" if v == "__CLEAR__" else encrypt_secret(str(v)))
+            continue
+        set_setting(k, str(v).lower() if isinstance(v, bool) else str(v))
     return _coerce(_load())
 
 
