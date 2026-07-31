@@ -9,6 +9,8 @@ export interface JobProgressEvent {
   status?: string;
   done: number;
   total?: number;
+  /** Jobs whose progress is a narrative rather than a resource count use this. */
+  message?: string;
 }
 
 export type JobStreamStatus = "idle" | "running" | "done" | "error" | "cancelled";

@@ -57,6 +57,48 @@ export function removeSSL(): Promise<SSLRemoveResult> {
   return apiFetch<SSLRemoveResult>("/api/v1/system/ssl", { method: "DELETE" });
 }
 
+// ── Let's Encrypt ─────────────────────────────────────────────────────────────
+
+export interface LetsEncryptConfig {
+  domain: string;
+  email: string;
+  staging: boolean;
+  auto_renew: boolean;
+  token_set: boolean;
+  last_issued: string | null;
+  last_error: string | null;
+}
+
+/** What the form posts. A blank token keeps the one already on file. */
+export interface LetsEncryptRequest {
+  domain: string;
+  email: string;
+  staging: boolean;
+  auto_renew: boolean;
+  cf_api_token: string;
+}
+
+export function fetchLetsEncryptConfig(): Promise<LetsEncryptConfig> {
+  return apiFetch<LetsEncryptConfig>("/api/v1/system/ssl/letsencrypt");
+}
+
+/** Pre-flights the Cloudflare token and zone without spending an issuance attempt. */
+export function verifyLetsEncrypt(body: LetsEncryptRequest): Promise<{ ok: boolean; zone: string }> {
+  return apiFetch("/api/v1/system/ssl/letsencrypt/verify", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function issueLetsEncrypt(
+  body: LetsEncryptRequest
+): Promise<{ job_id: string; already_running: boolean }> {
+  return apiFetch("/api/v1/system/ssl/letsencrypt/issue", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export async function pollSSLHealthy(
   timeoutMs = 30_000,
   intervalMs = 1_000

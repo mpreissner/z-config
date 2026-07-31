@@ -105,6 +105,33 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         next_run_time=datetime.now() + timedelta(hours=24),
     )
+
+    def _renew_certificate() -> None:
+        """Daily Let's Encrypt renewal check.
+
+        Restarts the process on success because uvicorn reads the certificate
+        once at startup; the container's restart policy brings it straight back.
+        """
+        import os
+        import signal
+        from services.acme_service import renew_if_due
+
+        try:
+            renewed = renew_if_due()
+        except Exception as exc:
+            print(f"[zs-config] Certificate renewal check failed: {exc}", flush=True)
+            return
+        if renewed:
+            print("[zs-config] Certificate renewed — restarting to load it.", flush=True)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    _update_scheduler.add_job(
+        _renew_certificate,
+        IntervalTrigger(hours=24),
+        id="letsencrypt_renew_daily",
+        replace_existing=True,
+        next_run_time=datetime.now() + timedelta(minutes=10),
+    )
     _update_scheduler.start()
 
     yield

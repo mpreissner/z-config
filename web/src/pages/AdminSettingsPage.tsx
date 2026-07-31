@@ -7,7 +7,10 @@ import {
   fetchSSLStatus, SSLStatus,
   uploadSSLPfx, uploadSSLPemFile, uploadSSLPemPaste,
   removeSSL,
+  fetchLetsEncryptConfig, verifyLetsEncrypt, issueLetsEncrypt,
+  LetsEncryptConfig, LetsEncryptRequest,
 } from "../api/ssl";
+import { useJobStream } from "../hooks/useJobStream";
 import { testSso, ssoMetadataUrl } from "../api/sso";
 import {
   fetchScimTokens, createScimToken, revokeScimToken,
@@ -411,6 +414,244 @@ function ExpiryBadge({ days }: { days: number }) {
   );
 }
 
+interface IssueResult {
+  domain: string;
+  staging: boolean;
+  not_after: string;
+}
+
+/**
+ * Let's Encrypt issuance over the ACME dns-01 challenge.
+ *
+ * dns-01 is the only challenge offered because this app usually sits on an
+ * internal network, where http-01 could never be answered — Let's Encrypt has
+ * to reach the host inbound from the internet for that one.
+ */
+function LetsEncryptPanel({ activeDomain }: { activeDomain: string | null }) {
+  const qc = useQueryClient();
+  const { data: cfg } = useQuery<LetsEncryptConfig>({
+    queryKey: ["le-config"],
+    queryFn: fetchLetsEncryptConfig,
+  });
+
+  const [domain, setDomain] = useState("");
+  const [email, setEmail] = useState("");
+  const [cfToken, setCfToken] = useState("");
+  const [staging, setStaging] = useState(false);
+  const [autoRenew, setAutoRenew] = useState(true);
+  const [seeded, setSeeded] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [verified, setVerified] = useState<string | null>(null);
+  const [showFido2Confirm, setShowFido2Confirm] = useState(false);
+
+  // Seed once from what is stored — re-seeding on every refetch would fight
+  // with whatever the admin is currently typing.
+  useEffect(() => {
+    if (!cfg || seeded) return;
+    setDomain(cfg.domain);
+    setEmail(cfg.email);
+    setStaging(cfg.staging);
+    setAutoRenew(cfg.auto_renew);
+    setSeeded(true);
+  }, [cfg, seeded]);
+
+  const { progressEvents, jobStatus, result, streamError } = useJobStream<IssueResult>(jobId);
+
+  function body(): LetsEncryptRequest {
+    return {
+      domain: domain.trim(),
+      email: email.trim(),
+      staging,
+      auto_renew: autoRenew,
+      cf_api_token: cfToken,
+    };
+  }
+
+  const verify = useMutation({
+    mutationFn: () => verifyLetsEncrypt(body()),
+    onSuccess: (res) => {
+      setError(null);
+      setVerified(res.zone);
+      setCfToken("");
+      qc.invalidateQueries({ queryKey: ["le-config"] });
+    },
+    onError: (e: unknown) => {
+      setVerified(null);
+      setError(e instanceof Error ? e.message : "Verification failed");
+    },
+  });
+
+  const issue = useMutation({
+    mutationFn: () => issueLetsEncrypt(body()),
+    onSuccess: (res) => {
+      setError(null);
+      setCfToken("");
+      setJobId(res.job_id);
+    },
+    onError: (e: unknown) => {
+      setError(e instanceof Error ? e.message : "Could not start issuance");
+    },
+  });
+
+  const running = jobStatus === "running" || issue.isPending;
+  const originChanging = !activeDomain || activeDomain !== domain.trim();
+  const canSubmit =
+    !!domain.trim() && !!email.trim() && (cfg?.token_set || !!cfToken.trim()) && !running;
+
+  if (jobStatus === "done" && result) {
+    return (
+      <div className="rounded-lg border border-green-300 bg-green-50 p-4 space-y-3">
+        <p className="text-sm font-semibold text-green-800">
+          Certificate issued for {result.domain}. The container is restarting with HTTPS.
+        </p>
+        <p className="text-xs text-green-900">
+          Valid until {new Date(result.not_after).toLocaleDateString()}. Renewal runs automatically
+          once the certificate is inside 30 days of expiry.
+        </p>
+        {result.staging && (
+          <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <strong>This is a staging certificate.</strong> It is not publicly trusted — browsers
+            will still warn. Clear the staging checkbox and issue again for a real one.
+          </div>
+        )}
+        <div className="flex gap-2">
+          <a
+            href={`https://${result.domain}:8443`}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-1.5 text-sm font-medium rounded-md bg-green-600 hover:bg-green-700 text-white transition-colors"
+          >
+            Open in new tab
+          </a>
+          <button
+            type="button"
+            onClick={() => { setJobId(null); qc.invalidateQueries({ queryKey: ["ssl-status"] }); }}
+            className="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600">
+        Issues a publicly trusted certificate using the ACME <strong>dns-01</strong> challenge, so
+        this app never has to be reachable from the internet. Requires the domain to be hosted on
+        Cloudflare and an API token with <strong>Zone:Read</strong> and <strong>DNS:Edit</strong> on
+        that zone.
+      </div>
+
+      {cfg?.last_error && !error && !running && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+          <strong>Last attempt failed:</strong> {cfg.last_error}
+        </div>
+      )}
+
+      <FieldRow label="Domain" hint="The hostname this app is reached at. Wildcards are not supported.">
+        <TextInput value={domain} onChange={(v) => { setDomain(v); setVerified(null); }} placeholder="zs-config.example.com" />
+      </FieldRow>
+
+      <FieldRow label="Contact email" hint="Let's Encrypt sends expiry warnings here.">
+        <TextInput value={email} onChange={setEmail} placeholder="admin@example.com" />
+      </FieldRow>
+
+      <FieldRow
+        label="Cloudflare API token"
+        hint={cfg?.token_set ? "A token is stored. Leave blank to keep it." : "Scoped token, not a global API key."}
+      >
+        <input
+          type="password"
+          value={cfToken}
+          onChange={(e) => { setCfToken(e.target.value); setVerified(null); }}
+          placeholder={cfg?.token_set ? "•••••••• (unchanged)" : ""}
+          autoComplete="new-password"
+          className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+        />
+      </FieldRow>
+
+      <FieldRow label="Auto-renew" hint="Checks daily and re-issues at 30 days remaining, then restarts.">
+        <Toggle checked={autoRenew} onChange={setAutoRenew} />
+      </FieldRow>
+
+      <FieldRow
+        label="Use staging directory"
+        hint="Staging has far looser rate limits. Use it to prove the DNS plumbing works, then re-issue against production."
+      >
+        <Toggle checked={staging} onChange={(v) => { setStaging(v); setVerified(null); }} />
+      </FieldRow>
+
+      {verified && (
+        <p className="text-xs text-green-700">
+          Cloudflare token is valid and zone <span className="font-mono">{verified}</span> covers this domain.
+        </p>
+      )}
+      {(error || streamError) && (
+        <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800">
+          {error || streamError}
+        </div>
+      )}
+
+      {running && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-1.5">
+          <div className="flex items-center gap-3 text-sm text-gray-600">
+            <LoadingSpinner />
+            <span>Requesting certificate — this usually takes under a minute.</span>
+          </div>
+          {progressEvents.length > 0 && (
+            <ul className="text-xs text-gray-500 font-mono space-y-0.5 pl-8">
+              {progressEvents.map((ev, i) => <li key={i}>{ev.message}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {showFido2Confirm ? (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 space-y-3">
+          <p className="text-sm font-semibold text-amber-800">Security key re-registration required</p>
+          <p className="text-xs text-amber-700">
+            Enabling HTTPS on a new hostname changes the WebAuthn origin, so all existing passkeys
+            and hardware security key registrations will be <strong>permanently invalidated</strong>.
+            Every user must re-register at next login.
+          </p>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setShowFido2Confirm(false)}
+              className="px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 transition-colors">
+              Cancel
+            </button>
+            <button type="button" onClick={() => { setShowFido2Confirm(false); issue.mutate(); }}
+              className="px-3 py-1.5 text-xs font-medium rounded-md bg-amber-600 hover:bg-amber-700 text-white transition-colors">
+              I understand, continue
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={!canSubmit || verify.isPending}
+            onClick={() => verify.mutate()}
+            className="px-3 py-2 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          >
+            {verify.isPending ? "Checking…" : "Verify DNS access"}
+          </button>
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={() => { if (originChanging) setShowFido2Confirm(true); else issue.mutate(); }}
+            className="px-4 py-2 text-sm font-medium rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50 transition-colors"
+          >
+            Request certificate
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SSLTlsSection() {
   const qc = useQueryClient();
   const { data: sslStatus, isLoading: statusLoading } = useQuery<SSLStatus>({
@@ -419,6 +660,7 @@ function SSLTlsSection() {
   });
 
   const [phase, setPhase] = useState<SSLPhase>({ kind: "idle" });
+  const [source, setSource] = useState<"letsencrypt" | "upload">("letsencrypt");
   const [selectedTab, setSelectedTab] = useState<"pfx" | "pem_file" | "pem_paste">("pfx");
   const [domain, setDomain] = useState("");
   const [pfxFile, setPfxFile] = useState<File | null>(null);
@@ -496,7 +738,7 @@ function SSLTlsSection() {
   }
 
   const busy = phase.kind === "uploading" || phase.kind === "removing";
-  const hasActiveCert = sslStatus?.active && sslStatus?.mode === "upload";
+  const hasActiveCert = !!sslStatus?.active;
 
   return (
     <SectionCard title="SSL / TLS" defaultOpen={hasActiveCert}>
@@ -512,6 +754,10 @@ function SSLTlsSection() {
       {hasActiveCert && sslStatus && (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 space-y-1.5 text-xs text-gray-700">
           <p className="text-sm font-semibold text-gray-800 mb-2">Current certificate</p>
+          <div className="flex gap-2">
+            <span className="w-20 text-gray-500">Source</span>
+            <span>{sslStatus.mode === "letsencrypt" ? "Let's Encrypt (auto-renewing)" : "Uploaded"}</span>
+          </div>
           {sslStatus.subject && (
             <div className="flex gap-2"><span className="w-20 text-gray-500">Subject</span><span className="font-mono">{sslStatus.subject}</span></div>
           )}
@@ -617,8 +863,34 @@ function SSLTlsSection() {
         </div>
       )}
 
-      {/* Upload form (shown in idle state) */}
+      {/* Certificate source (shown in idle state) */}
       {phase.kind === "idle" && (
+        <div className="space-y-4">
+          <div className="flex gap-1 border-b border-gray-200">
+            {(["letsencrypt", "upload"] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSource(s)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  source === s
+                    ? "border-zs-500 text-zs-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                {s === "letsencrypt" ? "Let's Encrypt" : "Upload certificate"}
+              </button>
+            ))}
+          </div>
+
+          {source === "letsencrypt" && (
+            <LetsEncryptPanel activeDomain={sslStatus?.active ? sslStatus.domain : null} />
+          )}
+        </div>
+      )}
+
+      {/* Upload form */}
+      {phase.kind === "idle" && source === "upload" && (
         <div className="space-y-4">
           {/* Tab bar */}
           <div className="flex gap-1 border-b border-gray-200">

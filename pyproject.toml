@@ -34,6 +34,8 @@ api = [
     "croniter>=1.4.0",
     # SAML 2.0 SP. Needs libxmlsec1/libxml2 headers, already in the Dockerfile.
     "python3-saml>=1.16.0",
+    # ACME client for Let's Encrypt issuance (dns-01 only). Pure Python.
+    "acme>=2.9.0",
 ]
 
 [project.scripts]
