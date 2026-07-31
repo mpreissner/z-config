@@ -344,6 +344,45 @@ def sso_exchange(body: ExchangeRequest, response: Response):
     }
 
 
+# ── Admin-only discovery helper ───────────────────────────────────────────────
+
+
+class DiscoverRequest(BaseModel):
+    url: str
+
+
+@router.post("/discover")
+def sso_discover(body: DiscoverRequest, _: AuthUser = Depends(require_admin)):
+    """Read an IdP's discovery document so the form can fill itself in.
+
+    Takes either the issuer or the full .well-known URL — IdP consoles publish
+    the latter far more often. Nothing is saved; the admin still reviews the
+    values and presses Save.
+    """
+    issuer = sso_service.issuer_from_url(body.url)
+    if not issuer:
+        raise HTTPException(status_code=400, detail="Enter a discovery or issuer URL")
+    if not issuer.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+
+    try:
+        doc = sso_service.discover(issuer, force=True)
+    except SsoError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    scopes = doc.get("scopes_supported") or []
+    return {
+        # The issuer the IdP reports wins over the one that was pasted — they
+        # differ often enough (trailing paths, tenant aliases) that trusting the
+        # document avoids a token-validation failure later.
+        "issuer_url": doc.get("issuer") or issuer,
+        "authorization_endpoint": doc.get("authorization_endpoint"),
+        "token_endpoint": doc.get("token_endpoint"),
+        "jwks_uri": doc.get("jwks_uri"),
+        "scopes_supported": [s for s in scopes if isinstance(s, str)],
+    }
+
+
 # ── Admin-only connection test ────────────────────────────────────────────────
 
 
