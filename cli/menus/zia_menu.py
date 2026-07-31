@@ -5175,6 +5175,7 @@ def _template_apply(tmpl):
     from db.database import get_session
     from services.config_service import list_tenants
     from services.encryption_service import decrypt_secret
+    from lib.auth import ZscalerAuth
     from lib.zia_client import ZIAClient
     from services.zia_push_service import ZIAPushService
     from services.zia_import_service import ZIAImportService
@@ -5226,14 +5227,14 @@ def _template_apply(tmpl):
         questionary.press_any_key_to_continue("Press any key to continue...").ask()
         return
 
-    tgt_client = ZIAClient(
-        client_id=target_tenant.client_id,
-        client_secret=target_secret,
-        cloud=target_tenant.zia_cloud,
-        govcloud=target_tenant.govcloud,
-        oneapi_base_url=target_tenant.oneapi_base_url,
-        zidentity_base_url=target_tenant.zidentity_base_url,
+    tgt_auth = ZscalerAuth(
+        target_tenant.zidentity_base_url,
+        target_tenant.client_id,
+        target_secret,
+        govcloud=bool(target_tenant.govcloud),
+        gov_tier=target_tenant.gov_cloud_tier,
     )
+    tgt_client = ZIAClient(tgt_auth, target_tenant.oneapi_base_url)
 
     snap_resources = tmpl.snapshot or {}
     baseline = {"product": "ZIA", "resources": snap_resources}
@@ -5615,6 +5616,7 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None, fu
     fc_push_records: list = []
     if full_clone and source_tenant is not None:
         from services.encryption_service import decrypt_secret
+        from lib.auth import ZscalerAuth
         from lib.zia_client import ZIAClient
         from services.zia_import_service import ZIAImportService
 
@@ -5627,14 +5629,14 @@ def apply_baseline_menu(client, tenant, *, baseline=None, baseline_path=None, fu
             questionary.press_any_key_to_continue("Press any key to continue...").ask()
             return
 
-        src_client = ZIAClient(
-            client_id=source_tenant.client_id,
-            client_secret=src_secret,
-            cloud=source_tenant.zia_cloud,
-            govcloud=source_tenant.govcloud,
-            oneapi_base_url=source_tenant.oneapi_base_url,
-            zidentity_base_url=source_tenant.zidentity_base_url,
+        src_auth = ZscalerAuth(
+            source_tenant.zidentity_base_url,
+            source_tenant.client_id,
+            src_secret,
+            govcloud=bool(source_tenant.govcloud),
+            gov_tier=source_tenant.gov_cloud_tier,
         )
+        src_client = ZIAClient(src_auth, source_tenant.oneapi_base_url)
         src_import_svc = ZIAImportService(src_client, tenant_id=source_tenant.id)
 
         with console.status(f"[cyan]Fetching clone resources from {source_tenant.name}...[/cyan]") as status:

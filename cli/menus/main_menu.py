@@ -1,3 +1,5 @@
+from typing import Optional
+
 import questionary
 from rich.console import Console
 from rich.panel import Panel
@@ -341,8 +343,27 @@ def _fetch_and_apply_org_info(
     return True, subscriptions_changed
 
 
+def _pick_gov_tier(default: Optional[str] = None) -> Optional[str]:
+    """Prompt for a FedRAMP tier. Returns 'gov', 'govus', or None if cancelled."""
+    from lib.auth import DEFAULT_GOV_TIER, GOV_TIER_HIGH, GOV_TIER_MODERATE
+
+    labels = {
+        GOV_TIER_MODERATE: "FedRAMP Moderate  (govus — *.zidentitygov.us)",
+        GOV_TIER_HIGH: "FedRAMP High      (gov   — *.zidentitygov.net)",
+    }
+    current = default or DEFAULT_GOV_TIER
+    choice = questionary.select(
+        "FedRAMP tier:",
+        choices=[labels[GOV_TIER_MODERATE], labels[GOV_TIER_HIGH]],
+        default=labels.get(current, labels[DEFAULT_GOV_TIER]),
+    ).ask()
+    if choice is None:
+        return None
+    return GOV_TIER_HIGH if choice == labels[GOV_TIER_HIGH] else GOV_TIER_MODERATE
+
+
 def _add_tenant():
-    from lib.conf_writer import build_zidentity_url, GOVCLOUD_ONEAPI_URL
+    from lib.conf_writer import build_zidentity_url, govcloud_oneapi_url
 
     console.print("\n[bold]Add Tenant[/bold]")
     name = questionary.text("Friendly name (e.g. prod, staging):").ask()
@@ -353,8 +374,14 @@ def _add_tenant():
     if is_govcloud is None:
         return
 
+    gov_tier = None
+    if is_govcloud:
+        gov_tier = _pick_gov_tier()
+        if gov_tier is None:
+            return
+
     subdomain_hint = (
-        "e.g.  acme  →  https://acme.zidentitygov.us"
+        f"e.g.  acme  →  {build_zidentity_url('acme', govcloud=True, gov_tier=gov_tier)}"
         if is_govcloud else
         "e.g.  acme  →  https://acme.zslogin.net"
     )
@@ -362,20 +389,13 @@ def _add_tenant():
     if not subdomain:
         return
     subdomain = subdomain.strip().lower()
-    zidentity_url = build_zidentity_url(subdomain, govcloud=is_govcloud)
+    zidentity_url = build_zidentity_url(subdomain, govcloud=is_govcloud, gov_tier=gov_tier)
     console.print(f"  [dim]ZIdentity URL: {zidentity_url}[/dim]")
 
+    # The SDK derives both endpoints from the tier, so there is nothing to prompt for.
+    oneapi_base_url = govcloud_oneapi_url(gov_tier) if is_govcloud else "https://api.zsapi.net"
     if is_govcloud:
-        oneapi_base_url = questionary.text(
-            "OneAPI base URL:",
-            default=GOVCLOUD_ONEAPI_URL,
-            instruction="MOD tier default shown; HIGH tier may differ",
-        ).ask()
-        if not oneapi_base_url:
-            return
-        oneapi_base_url = oneapi_base_url.strip()
-    else:
-        oneapi_base_url = "https://api.zsapi.net"
+        console.print(f"  [dim]OneAPI URL:    {oneapi_base_url}[/dim]")
 
     client_id = questionary.text("Client ID:").ask()
     client_secret = questionary.password("Client Secret:").ask()
@@ -394,6 +414,7 @@ def _add_tenant():
             client_secret=client_secret,
             oneapi_base_url=oneapi_base_url,
             govcloud=is_govcloud,
+            gov_tier=gov_tier,
             notes=notes or None,
         )
         console.print(f"[green]✓ Tenant '[bold]{name}[/bold]' added.[/green]")
@@ -434,7 +455,7 @@ def _pick_and_edit_tenant():
 
 
 def _edit_tenant_credentials(tenant_name: str):
-    from lib.conf_writer import build_zidentity_url, GOVCLOUD_ONEAPI_URL
+    from lib.conf_writer import build_zidentity_url, govcloud_oneapi_url
     from services.config_service import decrypt_secret, get_tenant, update_tenant
 
     tenant = get_tenant(tenant_name)
@@ -448,12 +469,18 @@ def _edit_tenant_credentials(tenant_name: str):
     console.print(f"  [dim]Current ZIdentity URL: {tenant.zidentity_base_url}[/dim]")
     console.print(f"  [dim]Current Client ID:     {tenant.client_id}[/dim]")
     if tenant.govcloud:
-        console.print("  [cyan]GovCloud tenant[/cyan]")
+        console.print(f"  [cyan]GovCloud tenant[/cyan] [dim](tier: {tenant.gov_cloud_tier or '—'})[/dim]")
     console.print("[dim]Press Enter to keep the current value for each field.[/dim]\n")
 
     is_govcloud = questionary.confirm("GovCloud tenant?", default=bool(tenant.govcloud)).ask()
     if is_govcloud is None:
         return
+
+    gov_tier = None
+    if is_govcloud:
+        gov_tier = _pick_gov_tier(tenant.gov_cloud_tier)
+        if gov_tier is None:
+            return
 
     subdomain = questionary.text(
         "Vanity subdomain:",
@@ -462,20 +489,12 @@ def _edit_tenant_credentials(tenant_name: str):
     if subdomain is None:
         return
     subdomain = subdomain.strip().lower() or current_subdomain
-    zidentity_url = build_zidentity_url(subdomain, govcloud=is_govcloud)
+    zidentity_url = build_zidentity_url(subdomain, govcloud=is_govcloud, gov_tier=gov_tier)
 
-    if is_govcloud:
-        current_oneapi = tenant.oneapi_base_url if tenant.govcloud else GOVCLOUD_ONEAPI_URL
-        oneapi_base_url = questionary.text(
-            "OneAPI base URL:",
-            default=current_oneapi,
-            instruction="MOD tier default shown; HIGH tier may differ",
-        ).ask()
-        if oneapi_base_url is None:
-            return
-        oneapi_base_url = oneapi_base_url.strip() or current_oneapi
-    else:
-        oneapi_base_url = "https://api.zsapi.net"
+    # Both endpoints follow from the tier — no free-text URL to keep in sync.
+    oneapi_base_url = govcloud_oneapi_url(gov_tier) if is_govcloud else "https://api.zsapi.net"
+    console.print(f"  [dim]ZIdentity URL: {zidentity_url}[/dim]")
+    console.print(f"  [dim]OneAPI URL:    {oneapi_base_url}[/dim]")
 
     client_id = questionary.text("Client ID:", default=tenant.client_id).ask()
     if client_id is None:
@@ -505,6 +524,7 @@ def _edit_tenant_credentials(tenant_name: str):
         client_id=client_id,
         client_secret=client_secret if client_secret else None,
         govcloud=is_govcloud,
+        gov_tier=gov_tier,
     )
     console.print(f"[green]✓ Credentials updated for '[bold]{tenant_name}[/bold]'.[/green]")
 
@@ -606,7 +626,9 @@ def _list_tenants():
     for t in tenants:
         # zia_tenant_id is stored as the numeric prefix; guard against legacy full-domain values
         zia_id = (t.zia_tenant_id or "").split(".")[0] or None
-        govcloud_label = "[cyan]Gov[/cyan]" if t.govcloud else "[dim]—[/dim]"
+        govcloud_label = (
+            f"[cyan]{t.gov_cloud_tier or 'gov'}[/cyan]" if t.govcloud else "[dim]—[/dim]"
+        )
         table.add_row(
             t.name,
             govcloud_label,

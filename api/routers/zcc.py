@@ -437,6 +437,7 @@ def _get_service(tenant_name: str, user: AuthUser):
         tenant.client_id,
         decrypt_secret(tenant.client_secret_enc),
         govcloud=bool(tenant.govcloud),
+        gov_tier=tenant.gov_cloud_tier,
     )
     client = ZCCClient(auth, tenant.oneapi_base_url, tenant.zia_cloud, tenant.zia_tenant_id)
     return ZCCService(client, tenant_id=tenant.id)
@@ -459,6 +460,7 @@ def _get_snapshot_service(tenant_name: str, user: AuthUser):
         tenant.client_id,
         decrypt_secret(tenant.client_secret_enc),
         govcloud=bool(tenant.govcloud),
+        gov_tier=tenant.gov_cloud_tier,
     )
     client = ZCCClient(auth, tenant.oneapi_base_url, tenant.zia_cloud, tenant.zia_tenant_id)
     return ZCCSnapshotService(client, tenant_id=tenant.id)
@@ -863,6 +865,7 @@ def restore_snapshot(
             tgt.client_id,
             decrypt_secret(tgt.client_secret_enc),
             govcloud=bool(tgt.govcloud),
+            gov_tier=tgt.gov_cloud_tier,
         )
         target_client = ZCCClient(tgt_auth, tgt.oneapi_base_url, tgt.zia_cloud, tgt.zia_tenant_id)
         target_tenant_id = tgt.id

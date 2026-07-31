@@ -52,26 +52,24 @@ def _zid_list(result) -> list:
 class ZIdentityClient:
     """SDK adapter for the Zscaler Identity (ZIdentity) API.
 
-    Most operations use zscaler-sdk-python. Endpoints not yet in the SDK,
-    and all operations for GovCloud tenants, use direct HTTP with a cached
-    OAuth2 token acquired via the client_credentials flow.
-
-    GovCloud note: the ZscalerClient SDK constructs the token URL as
-    {vanityDomain}.zslogin.net, which fails for GovCloud tenants whose
-    ZIdentity URL is {vanityDomain}.zidentitygov.us. When self._govcloud
-    is True, all SDK-backed methods fall back to direct HTTP using
-    _direct_get/_direct_post/_direct_put/_direct_delete.
+    Most operations use zscaler-sdk-python; endpoints not yet in the SDK use
+    direct HTTP with a cached OAuth2 token acquired via the client_credentials
+    flow. GovCloud tenants take the same path as commercial ones — the SDK
+    resolves the token host and API gateway from the `cloud` config key
+    (zscaler-sdk-python >= 1.9.33).
     """
 
     def __init__(self, auth: ZscalerAuth, oneapi_base_url: str = "https://api.zsapi.net"):
         self.auth = auth
         self._direct_base = f"{oneapi_base_url}/ziam/admin/api/v1"
-        self._govcloud = auth.govcloud
-        self._sdk = ZscalerClient({
+        sdk_config = {
             "clientId": auth.client_id,
             "clientSecret": auth.client_secret,
             "vanityDomain": auth.vanity_domain,
-        })
+        }
+        if auth.sdk_cloud:
+            sdk_config["cloud"] = auth.sdk_cloud
+        self._sdk = ZscalerClient(sdk_config)
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
 
@@ -156,32 +154,22 @@ class ZIdentityClient:
             params["primaryemail[like]"] = primary_email
         if domain_name:
             params["domainname"] = domain_name
-        if self._govcloud:
-            return _zid_list(self._direct_get("users", params=params))
         result, resp, err = self._sdk.zidentity.users.list_users(query_params=params)
         return _zid_list(_unwrap(result, resp, err))
 
     def get_user(self, user_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_get(f"users/{user_id}")
         result, resp, err = self._sdk.zidentity.users.get_user(user_id)
         return _to_dict(_unwrap(result, resp, err))
 
     def list_user_groups(self, user_id: str) -> List[Dict]:
-        if self._govcloud:
-            return _zid_list(self._direct_get(f"users/{user_id}/groups"))
         result, resp, err = self._sdk.zidentity.users.list_user_group_details(user_id)
         return _zid_list(_unwrap(result, resp, err))
 
     def get_admin_entitlement(self, user_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_get(f"users/{user_id}/entitlements/admin")
         result, resp, err = self._sdk.zidentity.user_entitlement.get_admin_entitlement(user_id)
         return _to_dict(_unwrap(result, resp, err))
 
     def get_service_entitlement(self, user_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_get(f"users/{user_id}/entitlements/service")
         result, resp, err = self._sdk.zidentity.user_entitlement.get_service_entitlement(user_id)
         return _to_dict(_unwrap(result, resp, err))
 
@@ -227,35 +215,24 @@ class ZIdentityClient:
             params["name[like]"] = name
         if exclude_dynamic:
             params["excludedynamicgroups"] = "true"
-        if self._govcloud:
-            return _zid_list(self._direct_get("groups", params=params))
         result, resp, err = self._sdk.zidentity.groups.list_groups(query_params=params)
         return _zid_list(_unwrap(result, resp, err))
 
     def get_group(self, group_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_get(f"groups/{group_id}")
         result, resp, err = self._sdk.zidentity.groups.get_group(int(group_id))
         return _to_dict(_unwrap(result, resp, err))
 
     def list_group_members(self, group_id: str, limit: int = 500) -> List[Dict]:
-        if self._govcloud:
-            return _zid_list(self._direct_get(f"groups/{group_id}/users", params={"limit": limit}))
         result, resp, err = self._sdk.zidentity.groups.list_group_users_details(
             group_id, query_params={"limit": limit}
         )
         return _zid_list(_unwrap(result, resp, err))
 
     def add_user_to_group(self, group_id: str, user_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_put(f"groups/{group_id}/users/{user_id}")
         result, resp, err = self._sdk.zidentity.groups.add_user_to_group(group_id, user_id)
         return _to_dict(_unwrap(result, resp, err))
 
     def remove_user_from_group(self, group_id: str, user_id: str) -> Dict:
-        if self._govcloud:
-            self._direct_delete(f"groups/{group_id}/users/{user_id}")
-            return {}
         result, resp, err = self._sdk.zidentity.groups.remove_user_from_group(group_id, user_id)
         return _to_dict(_unwrap(result, resp, err))
 
@@ -269,29 +246,20 @@ class ZIdentityClient:
         params: Dict = {"limit": limit}
         if name:
             params["name[like]"] = name
-        if self._govcloud:
-            return _zid_list(self._direct_get("apiclients", params=params))
         result, resp, err = self._sdk.zidentity.api_client.list_api_clients(query_params=params)
         return _zid_list(_unwrap(result, resp, err))
 
     def get_api_client(self, client_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_get(f"apiclients/{client_id}")
         result, resp, err = self._sdk.zidentity.api_client.get_api_client(client_id)
         return _to_dict(_unwrap(result, resp, err))
 
     def get_api_client_secrets(self, client_id: str) -> Dict:
-        if self._govcloud:
-            return self._direct_get(f"apiclients/{client_id}/secrets")
         result, resp, err = self._sdk.zidentity.api_client.get_api_client_secret(client_id)
         return _to_dict(_unwrap(result, resp, err))
 
     def add_api_client_secret(
         self, client_id: str, expires_at: Optional[str] = None
     ) -> Dict:
-        if self._govcloud:
-            body = {"expiresAt": expires_at} if expires_at else {}
-            return self._direct_post(f"apiclients/{client_id}/secrets", json=body)
         kwargs = {}
         if expires_at:
             kwargs["expiresAt"] = expires_at
@@ -301,9 +269,6 @@ class ZIdentityClient:
         return _to_dict(_unwrap(result, resp, err))
 
     def delete_api_client_secret(self, client_id: str, secret_id: str) -> bool:
-        if self._govcloud:
-            self._direct_delete(f"apiclients/{client_id}/secrets/{secret_id}")
-            return True
         result, resp, err = self._sdk.zidentity.api_client.delete_api_client_secret(
             client_id, secret_id
         )
@@ -311,9 +276,6 @@ class ZIdentityClient:
         return True
 
     def delete_api_client(self, client_id: str) -> bool:
-        if self._govcloud:
-            self._direct_delete(f"apiclients/{client_id}")
-            return True
         result, resp, err = self._sdk.zidentity.api_client.delete_api_client(client_id)
         _unwrap(result, resp, err)
         return True

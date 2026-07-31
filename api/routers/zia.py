@@ -28,6 +28,7 @@ def _get_service(tenant_name: str, user: AuthUser):
         tenant.client_id,
         decrypt_secret(tenant.client_secret_enc),
         govcloud=bool(tenant.govcloud),
+        gov_tier=tenant.gov_cloud_tier,
     )
     client = ZIAClient(auth, tenant.oneapi_base_url)
     return ZIAService(client, tenant_id=tenant.id)
@@ -391,6 +392,7 @@ def sync_firewall_rules_csv(
             t.client_id,
             decrypt_secret(t.client_secret_enc),
             govcloud=bool(t.govcloud),
+            gov_tier=t.gov_cloud_tier,
         )
         client = ZIAClient(auth, t.oneapi_base_url)
 
