@@ -109,6 +109,49 @@ _jwks_cache: Dict[str, Tuple[float, dict]] = {}
 
 _WELL_KNOWN_SUFFIX = "/.well-known/openid-configuration"
 
+# (connect, read). An IdP that resolves in DNS but is blocked on the network is
+# the most common misconfiguration here, and every second of the connect budget
+# is a second the admin spends staring at a button that looks stuck. The read
+# budget stays generous — a reachable but slow IdP is worth waiting for.
+_HTTP_TIMEOUT = (5, 10)
+
+
+def _get_json(url: str, what: str) -> Any:
+    """GET a JSON document, translating transport failures into plain English.
+
+    The raw urllib3 exception is a wall of nested repr that tells an admin
+    nothing they can act on, and "timed out" / "refused" / "bad certificate"
+    point at three completely different fixes.
+    """
+    try:
+        resp = requests.get(url, timeout=_HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.ConnectTimeout:
+        raise SsoError(
+            f"{what}: no response from {url} within {_HTTP_TIMEOUT[0]}s. The host "
+            "resolves but nothing accepted the connection — check routing and "
+            "firewall rules between this server and the IdP."
+        ) from None
+    except requests.exceptions.SSLError:
+        raise SsoError(
+            f"{what}: TLS handshake with {url} failed. The IdP's certificate is "
+            "not trusted by this server."
+        ) from None
+    except requests.exceptions.ConnectionError:
+        raise SsoError(
+            f"{what}: could not reach {url}. Check the URL, DNS, and that the "
+            "IdP is listening on that port."
+        ) from None
+    except requests.exceptions.ReadTimeout:
+        raise SsoError(f"{what}: {url} accepted the connection but sent no reply.") from None
+    except requests.exceptions.HTTPError as exc:
+        raise SsoError(f"{what}: {url} returned HTTP {exc.response.status_code}.") from None
+    except ValueError:
+        raise SsoError(f"{what}: {url} did not return JSON.") from None
+    except requests.exceptions.RequestException as exc:
+        raise SsoError(f"{what} failed at {url}: {exc}") from None
+
 
 def issuer_from_url(url: str) -> str:
     """Reduce anything an admin might paste to a bare issuer URL.
@@ -131,12 +174,9 @@ def discover(issuer_url: str, *, force: bool = False) -> dict:
     if hit and not force and now - hit[0] < _DISCOVERY_TTL:
         return hit[1]
     url = f"{issuer_url.rstrip('/')}/.well-known/openid-configuration"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        doc = resp.json()
-    except Exception as exc:
-        raise SsoError(f"OIDC discovery failed at {url}: {exc}") from exc
+    doc = _get_json(url, "OIDC discovery")
+    if not isinstance(doc, dict):
+        raise SsoError(f"OIDC discovery: {url} did not return a discovery document.")
     for required in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
         if required not in doc:
             raise SsoError(f"Discovery document is missing {required}")
@@ -149,12 +189,7 @@ def _jwks(jwks_uri: str) -> dict:
     hit = _jwks_cache.get(jwks_uri)
     if hit and now - hit[0] < _DISCOVERY_TTL:
         return hit[1]
-    try:
-        resp = requests.get(jwks_uri, timeout=10)
-        resp.raise_for_status()
-        keys = resp.json()
-    except Exception as exc:
-        raise SsoError(f"Could not fetch JWKS: {exc}") from exc
+    keys = _get_json(jwks_uri, "JWKS fetch")
     _jwks_cache[jwks_uri] = (now, keys)
     return keys
 
