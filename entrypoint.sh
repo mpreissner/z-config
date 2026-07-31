@@ -12,6 +12,7 @@ if [ -n "${ZS_SSL_DOMAIN:-}" ] && [ -f "/certs/cert.pem" ] && [ -f "/certs/key.p
 import os, shutil, pathlib, sys
 sys.path.insert(0, '.')
 from db.database import set_setting
+from services.ssl_service import public_origin
 ssl_dir = pathlib.Path('/data/db/ssl')
 ssl_dir.mkdir(parents=True, exist_ok=True)
 shutil.copy('/certs/cert.pem', str(ssl_dir / 'cert.pem'))
@@ -20,7 +21,7 @@ os.chmod(str(ssl_dir / 'key.pem'), 0o600)
 domain = os.environ['ZS_SSL_DOMAIN']
 set_setting('ssl_mode', 'upload')
 set_setting('ssl_domain', domain)
-set_setting('webauthn_origin', f'https://{domain}:8443')
+set_setting('webauthn_origin', public_origin(domain))
 set_setting('webauthn_rp_id', domain)
 print(f'SSL bootstrapped from /certs for domain: {domain}')
 " || echo "WARNING: SSL bootstrap from /certs failed — check cert files and permissions"

@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -141,13 +142,18 @@ async def lifespan(app: FastAPI):
 
 
 class HSTSMiddleware(BaseHTTPMiddleware):
-    """Add Strict-Transport-Security on HTTPS responses (port 8443 only).
+    """Add Strict-Transport-Security on HTTPS responses.
+
     Tells browsers to go directly to HTTPS on future visits, skipping the
-    HTTP→HTTPS redirect on port 8000 entirely."""
+    HTTP→HTTPS redirect on port 8000 entirely. Keyed off the scheme rather
+    than the port: behind a reverse proxy or ZPA Browser Access the browser
+    reaches us on 443, so a port==8443 test would never fire for exactly the
+    users who most need the header."""
 
     async def dispatch(self, request, call_next):
         response = await call_next(request)
-        if request.url.port == 8443:
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        if (forwarded or request.url.scheme) == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
@@ -211,6 +217,11 @@ app = FastAPI(
 app.add_middleware(HSTSMiddleware)
 app.add_middleware(MfaEnrollMiddleware)
 app.add_middleware(ForcePasswordChangeMiddleware)
+
+# Compress responses. On a LAN this is invisible, but the JS bundle is ~650 KB
+# and users reaching the app through ZPA Browser Access pay for every byte over
+# a proxied WAN path — gzip cuts the cold-load payload by roughly 70%.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Allow the future GUI (any origin in dev, lock down in production)
 app.add_middleware(
