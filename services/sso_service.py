@@ -184,14 +184,46 @@ def discover(issuer_url: str, *, force: bool = False) -> dict:
     return doc
 
 
-def _jwks(jwks_uri: str) -> dict:
+def _jwks(jwks_uri: str, *, force: bool = False) -> dict:
     now = time.time()
     hit = _jwks_cache.get(jwks_uri)
-    if hit and now - hit[0] < _DISCOVERY_TTL:
+    if hit and not force and now - hit[0] < _DISCOVERY_TTL:
         return hit[1]
     keys = _get_json(jwks_uri, "JWKS fetch")
     _jwks_cache[jwks_uri] = (now, keys)
     return keys
+
+
+def jwks_empty_message(doc: dict) -> str:
+    """Explain an empty JWKS in terms of the setting that causes it.
+
+    An IdP with no signing key assigned falls back to HS256 and publishes an
+    empty key set, which is legal OIDC but unusable here — there is nothing to
+    verify the ID token against. Authentik in particular ships providers this
+    way by default, so the empty document is a configuration state, not a fault.
+    """
+    algs = doc.get("id_token_signing_alg_values_supported") or []
+    tail = (
+        " It advertises only HS256, which means no signing certificate is "
+        "assigned to the application on the IdP."
+        if algs == ["HS256"]
+        else f" It advertises {', '.join(algs)}." if algs else ""
+    )
+    return (
+        f"The IdP published an empty key set at {doc.get('jwks_uri')}, so ID "
+        f"tokens cannot be verified.{tail} Assign an RSA signing key to the "
+        "application on the IdP and test again."
+    )
+
+
+def jwks_key_count(doc: dict) -> int:
+    """How many verification keys the IdP publishes. Raises SsoError if unreachable.
+
+    Always re-reads: an admin who has just fixed the IdP will press Test again
+    within the cache TTL and must not be shown the stale answer.
+    """
+    keys = _jwks(doc["jwks_uri"], force=True)
+    return len(keys.get("keys", [])) if isinstance(keys, dict) else 0
 
 
 def pkce_pair() -> Tuple[str, str]:
@@ -255,10 +287,13 @@ def exchange_code(cfg: SsoConfig, code: str, verifier: str, nonce: str) -> dict:
 
 
 def verify_id_token(cfg: SsoConfig, id_token: str, nonce: str, doc: Optional[dict] = None) -> dict:
-    from jose import jwt as jose_jwt, JWTError
+    from jose import jwt as jose_jwt
+    from jose.exceptions import JOSEError
 
     doc = doc or discover(cfg.issuer_url)
     keys = _jwks(doc["jwks_uri"])
+    if not (isinstance(keys, dict) and keys.get("keys")):
+        raise SsoError(jwks_empty_message(doc))
     try:
         claims = jose_jwt.decode(
             id_token,
@@ -267,7 +302,9 @@ def verify_id_token(cfg: SsoConfig, id_token: str, nonce: str, doc: Optional[dic
             issuer=doc.get("issuer") or cfg.issuer_url,
             options={"verify_at_hash": False},
         )
-    except JWTError as exc:
+    # JWKError is a sibling of JWTError, not a subclass — catching only the
+    # latter let key-material problems escape as a 500 with a traceback.
+    except JOSEError as exc:
         raise SsoError(f"ID token verification failed: {exc}") from exc
     if nonce and claims.get("nonce") != nonce:
         raise SsoError("ID token nonce mismatch")
