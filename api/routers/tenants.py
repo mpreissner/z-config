@@ -346,12 +346,16 @@ def _get_import_client(tenant_id: int):
 @router.post("/{tenant_id}/import/zia", status_code=202)
 def import_zia(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
-    from api.jobs import store
+    from api.jobs import store, import_job_key
 
     if user.role != "admin":
         check_tenant_access(tenant_id, user)
+    # Build the client first: it raises for an unknown tenant, and we must not
+    # register a job that never runs (it would block imports until it expires).
     client, tenant_name = _get_import_client(tenant_id)
-    job_id = store.create()
+    job_id, created = store.create_unique(import_job_key(tenant_id, "ZIA"))
+    if not created:
+        return {"job_id": job_id, "already_running": True}
 
     def run():
         from services.zia_import_service import ZIAImportService
@@ -394,7 +398,7 @@ def import_zia(tenant_id: int, user: AuthUser = Depends(require_auth)):
 @router.post("/{tenant_id}/import/zpa", status_code=202)
 def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
-    from api.jobs import store
+    from api.jobs import store, import_job_key
     from db.database import get_session
     from db.models import TenantConfig
     from lib.auth import ZscalerAuth
@@ -420,7 +424,9 @@ def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
 
     auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
     zpa_client = ZPAClient(auth, customer_id, oneapi_base_url=oneapi, govcloud_cloud=govcloud_cloud)
-    job_id = store.create()
+    job_id, created = store.create_unique(import_job_key(tenant_id, "ZPA"))
+    if not created:
+        return {"job_id": job_id, "already_running": True}
 
     def run():
         from services.zpa_import_service import ZPAImportService
@@ -463,12 +469,14 @@ def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
 @router.post("/{tenant_id}/import/zcc", status_code=202)
 def import_zcc(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
-    from api.jobs import store
+    from api.jobs import store, import_job_key
 
     if user.role != "admin":
         check_tenant_access(tenant_id, user)
     client, tenant_name = _get_zcc_import_client(tenant_id)
-    job_id = store.create()
+    job_id, created = store.create_unique(import_job_key(tenant_id, "ZCC"))
+    if not created:
+        return {"job_id": job_id, "already_running": True}
 
     def run():
         from services.zcc_import_service import ZCCImportService
