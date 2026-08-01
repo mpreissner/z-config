@@ -4,7 +4,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
@@ -66,6 +66,11 @@ class EntitlementOut(BaseModel):
 class EntitlementCreate(BaseModel):
     user_id: int
     tenant_id: int
+
+
+class EntitlementBulkCreate(BaseModel):
+    user_id: int
+    tenant_ids: List[int]
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -202,6 +207,69 @@ def create_entitlement(body: EntitlementCreate, _: AuthUser = Depends(require_ad
         session.flush()
         session.refresh(ent)
         return _ent_out(ent)
+
+
+@router.post("/entitlements/bulk", status_code=201)
+def create_entitlements_bulk(
+    body: EntitlementBulkCreate, _: AuthUser = Depends(require_admin)
+):
+    """Grant one user access to several tenants in a single transaction.
+
+    The UI multi-select used to POST to /entitlements once per tenant, in
+    parallel. Those requests are handled on separate threads that share one
+    database connection, so they landed in each other's transactions and the
+    grant failed outright. Doing the whole set here keeps it to one request on
+    one thread, and makes the grant atomic: either every tenant is granted or
+    none is, rather than leaving the user half-entitled with one error message
+    standing in for several different outcomes.
+    """
+    tenant_ids = list(dict.fromkeys(body.tenant_ids))  # de-dupe, keep order
+    if not tenant_ids:
+        raise HTTPException(status_code=400, detail="No tenants selected")
+
+    with get_session() as session:
+        user = session.query(User).filter_by(id=body.user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        found = {
+            t.id: t
+            for t in session.query(TenantConfig).filter(TenantConfig.id.in_(tenant_ids)).all()
+        }
+        missing = [tid for tid in tenant_ids if tid not in found]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tenant not found: {', '.join(str(t) for t in missing)}",
+            )
+
+        # Already-granted tenants are skipped rather than rejected. The modal
+        # filters them out of the picker, so one arriving here means the list
+        # went stale between opening the form and submitting it — not something
+        # the admin should have to resolve by hand.
+        already = {
+            e.tenant_id
+            for e in session.query(UserTenantEntitlement)
+            .filter(
+                UserTenantEntitlement.user_id == body.user_id,
+                UserTenantEntitlement.tenant_id.in_(tenant_ids),
+            )
+            .all()
+        }
+
+        created = []
+        for tid in tenant_ids:
+            if tid in already:
+                continue
+            ent = UserTenantEntitlement(user_id=body.user_id, tenant_id=tid)
+            session.add(ent)
+            created.append(ent)
+
+        session.flush()
+        return {
+            "granted": [_ent_out(e) for e in created],
+            "skipped": sorted(already),
+        }
 
 
 @router.delete("/entitlements/{entitlement_id}", status_code=204)
