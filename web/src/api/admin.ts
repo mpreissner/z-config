@@ -74,6 +74,25 @@ export function createEntitlement(user_id: number, tenant_id: number): Promise<E
   });
 }
 
+export interface BulkGrantResult {
+  granted: Entitlement[];
+  /** Tenant ids the user already had, skipped rather than treated as an error. */
+  skipped: number[];
+}
+
+/** Grant several tenants at once. One request, one transaction — see
+ *  create_entitlements_bulk in api/routers/admin.py for why this is not a
+ *  client-side loop. */
+export function createEntitlementsBulk(
+  user_id: number,
+  tenant_ids: number[],
+): Promise<BulkGrantResult> {
+  return apiFetch("/api/v1/admin/entitlements/bulk", {
+    method: "POST",
+    body: JSON.stringify({ user_id, tenant_ids }),
+  });
+}
+
 export function deleteEntitlement(id: number): Promise<void> {
   return apiFetch(`/api/v1/admin/entitlements/${id}`, { method: "DELETE" });
 }

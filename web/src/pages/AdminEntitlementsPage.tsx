@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchEntitlements,
-  createEntitlement,
+  createEntitlementsBulk,
   deleteEntitlement,
   fetchAdminUsers,
   AdminUser,
@@ -53,9 +53,9 @@ function GrantModal({
     setError(null);
     setIsPending(true);
     try {
-      await Promise.all(
-        Array.from(selectedTenantIds).map((tid) => createEntitlement(userId as number, tid))
-      );
+      // One request for the whole selection. Sending these in parallel put the
+      // concurrent writes into each other's transactions and failed the grant.
+      await createEntitlementsBulk(userId as number, Array.from(selectedTenantIds));
       qc.invalidateQueries({ queryKey: ["entitlements"] });
       onClose();
     } catch (err) {
