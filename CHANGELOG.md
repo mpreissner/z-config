@@ -40,6 +40,10 @@ All notable changes to this project will be documented in this file.
 - **`deploy.sh` on hosts without Docker socket permissions** — the script now falls back to `sudo docker` rather than failing.
 - **`deploy.sh` image pulls over broken IPv6** — cloud VMs and corporate-proxy hosts often have a non-functional IPv6 route, and Docker's puller has no IPv4 fallback, so pulls time out resolving `registry-1.docker.io`. Known Docker Hub hosts are pinned to IPv4 in `/etc/hosts` for the duration of the build and the pin is removed on exit.
 
+### Deprecated
+
+- **The TUI will be formally deprecated in v4.0.0.** New features are now built for the web interface only, and the TUI is no longer kept at feature parity — several capabilities added in this release (SSO, SCIM provisioning, Let's Encrypt issuance) are web-only, as scheduled tasks and SSL configuration already were. Nothing is being removed in the 3.x line: the TUI continues to work, and the service layer it calls is the same code the web API uses, so no backend functionality is lost either way. If you rely on a TUI-only workflow, now is the time to say so.
+
 ### Known limitations
 
 - The database engine uses a single shared connection, so concurrent writes from any source can still interleave transactions. The bulk entitlement endpoint removes the application's only deliberate parallel writes, but the underlying connection sharing is untouched.

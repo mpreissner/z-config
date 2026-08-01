@@ -18,6 +18,9 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 - **Reverse proxy and ZPA Browser Access** — HSTS, health probes, passkey origins, and the HTTP→HTTPS redirect no longer assume port 8443, so the app works correctly when published on 443 through a proxy. Set `ZS_PUBLIC_ORIGIN` to pin the external origin. Responses are now gzipped, cutting the frontend bundle from ~700 KB to ~160 KB over the wire.
 - **Import job resume** — closing the import modal no longer loses the run. Reopening reattaches to the in-flight job and replays buffered progress, and duplicate import requests return the running job instead of starting a second one.
 
+> [!NOTE]
+> **Heads-up:** the TUI will be formally deprecated in **v4.0.0**. It keeps working throughout 3.x, but new features are web-only from here — see [TUI Features](#tui-features).
+
 ---
 
 ## Screenshots
@@ -155,6 +158,9 @@ User Management, Tenant Entitlements (multi-select grant), **Single Sign-On** (S
 ---
 
 ## TUI Features
+
+> [!IMPORTANT]
+> **The TUI will be formally deprecated in v4.0.0.** New functionality is being built for the web interface only, and the TUI is no longer kept at feature parity — SSO, SCIM provisioning, Let's Encrypt issuance, SSL configuration, and scheduled tasks are web-only. Nothing is removed in the 3.x line and the TUI keeps working; both interfaces call the same service layer, so no backend capability is exclusive to the terminal. If a TUI-only workflow matters to you, please open an issue.
 
 - **ZPA** — App Connectors & Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), Segment Groups, Access Policy (export/import-sync from CSV with dry-run and bulk reorder), PRA Portals & Consoles, Service Edges, Certificate Management, Identity & Directory (SAML, SCIM), reference exports
 - **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4/DNS/IPS — list/search/enable-disable/CSV export/sync), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), Config Snapshots, Apply Snapshot from Another Tenant, IP Group Management (full CRUD + CSV), Activation
