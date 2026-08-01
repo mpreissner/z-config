@@ -200,6 +200,24 @@ def init_db(db_url: Optional[str] = None) -> None:
     _secure_db_file()
 
 
+def dispose_engine() -> None:
+    """Close pooled connections and drop the engine.
+
+    Call this before replacing the underlying database file so no handle is
+    left open on the old inode — a stale SQLCipher connection can otherwise
+    checkpoint its WAL over the incoming database. init_db() rebuilds both
+    the engine and the session factory.
+    """
+    global _engine, _SessionFactory
+    if _engine is not None:
+        try:
+            _engine.dispose()
+        except Exception:
+            pass
+    _engine = None
+    _SessionFactory = None
+
+
 def _secure_db_file() -> None:
     """Ensure the SQLite database file is owner-readable only (chmod 600).
 
@@ -293,6 +311,16 @@ def _migrate(engine) -> None:
         "ALTER TABLE scheduled_tasks ADD COLUMN import_products JSON",
         "ALTER TABLE task_run_history ADD COLUMN parent_run_id INTEGER REFERENCES task_run_history(id) ON DELETE SET NULL",
         "ALTER TABLE task_run_history ADD COLUMN target_tenant_id INTEGER",
+        # GovCloud FedRAMP tier. Tenants created before the picker existed used
+        # the .us endpoints exclusively, so they backfill to 'govus'.
+        "ALTER TABLE tenant_configs ADD COLUMN gov_cloud_tier VARCHAR(16)",
+        "UPDATE tenant_configs SET gov_cloud_tier = 'govus' WHERE govcloud = 1 AND gov_cloud_tier IS NULL",
+        # SCIM inbound provisioning. Existing accounts are local, so they
+        # backfill to scim_managed = 0.
+        "ALTER TABLE users ADD COLUMN scim_external_id VARCHAR(512)",
+        "ALTER TABLE users ADD COLUMN scim_managed BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN given_name VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN family_name VARCHAR(255)",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

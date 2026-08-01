@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { apiFetch, setTokenGetter, setOnUnauthorized } from "../api/client";
 import { fetchSystemInfo } from "../api/system";
 import { useIdleLogout } from "../hooks/useIdleLogout";
@@ -82,14 +82,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [idleMinutes, setIdleMinutes] = useState(15);
   const [logoutReason, setLogoutReason] = useState<string | null>(null);
 
+  // An expired token 401s every in-flight query at once and each one calls
+  // back here. Without this latch that becomes one logout POST per query —
+  // six round trips on the dashboard, which is slow enough to notice over a
+  // proxied WAN path. Cleared on the next successful login.
+  const loggingOut = useRef(false);
+
   const login = useCallback((token: string) => {
     const user = parseToken(token);
+    loggingOut.current = false;
     setTokenGetter(() => token);
     setAuth({ token, user });
     setLogoutReason(null);
   }, []);
 
   const logout = useCallback(async () => {
+    if (loggingOut.current) return;
+    loggingOut.current = true;
     setTokenGetter(() => null);
     try { await apiFetch("/api/v1/auth/logout", { method: "POST" }); } catch { /* ignore */ }
     setAuth({ token: null, user: null });

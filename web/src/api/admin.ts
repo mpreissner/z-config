@@ -8,6 +8,9 @@ export interface AdminUser {
   is_active: boolean;
   force_password_change: boolean;
   mfa_required: boolean;
+  /** True when an IdP owns this account over SCIM — local edits get overwritten. */
+  scim_managed: boolean;
+  sso_provider: string | null;
   created_at: string;
   last_login_at: string | null;
 }
@@ -68,6 +71,25 @@ export function createEntitlement(user_id: number, tenant_id: number): Promise<E
   return apiFetch("/api/v1/admin/entitlements", {
     method: "POST",
     body: JSON.stringify({ user_id, tenant_id }),
+  });
+}
+
+export interface BulkGrantResult {
+  granted: Entitlement[];
+  /** Tenant ids the user already had, skipped rather than treated as an error. */
+  skipped: number[];
+}
+
+/** Grant several tenants at once. One request, one transaction — see
+ *  create_entitlements_bulk in api/routers/admin.py for why this is not a
+ *  client-side loop. */
+export function createEntitlementsBulk(
+  user_id: number,
+  tenant_ids: number[],
+): Promise<BulkGrantResult> {
+  return apiFetch("/api/v1/admin/entitlements/bulk", {
+    method: "POST",
+    body: JSON.stringify({ user_id, tenant_ids }),
   });
 }
 

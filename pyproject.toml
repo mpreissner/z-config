@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zs-config"
-version = "3.3.3"
+version = "3.4.0"
 description = "Interactive TUI for Zscaler OneAPI automation"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.33.0",
     "truststore>=0.9.0",
-    "zscaler-sdk-python>=1.9.25",
+    "zscaler-sdk-python>=1.9.39",
     "rich>=13.7.0",
     "questionary>=2.0.0",
     "pyfiglet>=1.0.2",
@@ -32,6 +32,10 @@ api = [
     "python-multipart>=0.0.9",
     "apscheduler>=3.10.0,<4.0",
     "croniter>=1.4.0",
+    # SAML 2.0 SP. Needs libxmlsec1/libxml2 headers, already in the Dockerfile.
+    "python3-saml>=1.16.0",
+    # ACME client for Let's Encrypt issuance (dns-01 only). Pure Python.
+    "acme>=2.9.0",
 ]
 
 [project.scripts]

@@ -9,6 +9,7 @@ import ScheduledTasksPage from "./pages/ScheduledTasksPage";
 import TemplatesPage from "./pages/TemplatesPage";
 import LoginPage from "./pages/LoginPage";
 import ChangePasswordPage from "./pages/ChangePasswordPage";
+import SsoCompletePage from "./pages/SsoCompletePage";
 import MfaEnrollModal from "./components/MfaEnrollModal";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import AdminEntitlementsPage from "./pages/AdminEntitlementsPage";
@@ -45,6 +46,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/change-password" element={<ChangePasswordPage />} />
+        <Route path="/sso/complete" element={<SsoCompletePage />} />
         <Route
           path="/*"
           element={

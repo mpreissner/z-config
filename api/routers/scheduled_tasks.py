@@ -133,6 +133,25 @@ def _next_run(cron_expression: str) -> Optional[str]:
         return None
 
 
+def _reject_zcc_on_govcloud(source_tenant_id: Optional[int], products: Optional[List[str]]) -> None:
+    """400 if an import task asks for ZCC against a GovCloud source tenant.
+
+    The FedRAMP OneAPI gateway does not serve the ZCC API, so such a task could
+    only ever produce a wall of 500s on every run.
+    """
+    from db.database import get_session
+    from db.models import TenantConfig
+    from lib.zcc_client import ZCC_GOVCLOUD_UNAVAILABLE
+
+    if source_tenant_id is None or not products or "ZCC" not in products:
+        return
+    with get_session() as session:
+        t = session.get(TenantConfig, source_tenant_id)
+        is_gov = bool(t and t.govcloud)
+    if is_gov:
+        raise HTTPException(status_code=400, detail=ZCC_GOVCLOUD_UNAVAILABLE)
+
+
 def _serialize_task(task, last_run=None) -> Dict[str, Any]:
     """Build the API response dict for a ScheduledTask.
 
@@ -318,6 +337,7 @@ def create_task(
                 label_resource_types=body.label_resource_types,
             )
         else:  # ImportTaskCreate
+            _reject_zcc_on_govcloud(body.source_tenant_id, body.import_products)
             task = _create(
                 name=body.name,
                 source_tenant_id=body.source_tenant_id,
@@ -366,6 +386,13 @@ def update_task(task_id: int, body: ScheduledTaskUpdate, user: AuthUser = Depend
     if body.target_tenant_ids is not None:
         for tid in body.target_tenant_ids:
             check_tenant_access(tid, user)
+
+    eff_type = body.task_type if body.task_type is not None else (existing.task_type or "sync")
+    if eff_type == "import":
+        _reject_zcc_on_govcloud(
+            body.source_tenant_id if body.source_tenant_id is not None else existing.source_tenant_id,
+            body.import_products if body.import_products is not None else existing.import_products,
+        )
 
     try:
         updated = _update(

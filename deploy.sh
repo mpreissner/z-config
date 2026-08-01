@@ -61,7 +61,21 @@ if ! command -v docker &>/dev/null; then
     sudo systemctl enable --now docker 2>/dev/null || true
 fi
 
-if ! docker compose version &>/dev/null; then
+DOCKER="docker"
+if ! docker info &>/dev/null; then
+    if sudo docker info &>/dev/null; then
+        echo "Current user ($USER) cannot access the Docker daemon socket — using sudo for docker commands this run."
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+        echo "Added $USER to the docker group — log out/in (or run 'newgrp docker') so future runs don't need sudo."
+        DOCKER="sudo docker"
+    else
+        echo "ERROR: Cannot connect to the Docker daemon, even with sudo. Is the Docker service running?" >&2
+        echo "  Try: sudo systemctl enable --now docker" >&2
+        exit 1
+    fi
+fi
+
+if ! $DOCKER compose version &>/dev/null; then
     echo "ERROR: docker compose (v2) is required. Install Docker Engine 20.10+ or add the Compose plugin." >&2
     exit 1
 fi
@@ -243,9 +257,9 @@ mkdir -p "$REPO_DIR/certs"
 # ── Ensure persistent Docker volumes exist ────────────────────────────────────
 
 for vol in zs-config_zs-db zs-config_zs-plugins; do
-    if ! docker volume inspect "$vol" &>/dev/null; then
+    if ! $DOCKER volume inspect "$vol" &>/dev/null; then
         echo "Creating Docker volume: $vol"
-        docker volume create "$vol"
+        $DOCKER volume create "$vol"
     fi
 done
 
@@ -255,9 +269,42 @@ done
 # so the file is never committed with real cert content.
 
 BUNDLE="$REPO_DIR/docker/ca-bundle.pem"
+
+# ── Force IPv4 for Docker Hub pulls ───────────────────────────────────────────
+# Some hosts have an IPv6 route that's configured but not actually functional
+# (common on cloud VMs and behind corporate proxies). Docker's image puller
+# does a single dial with no IPv4 fallback, so a broken IPv6 path shows up as
+# "dial tcp [ipv6]:443: i/o timeout" resolving registry-1.docker.io — instead
+# of failing over. Pin the known Docker Hub hosts to their IPv4 address in
+# /etc/hosts for the duration of the build only; removed on exit.
+DOCKER_HUB_HOSTS=(registry-1.docker.io auth.docker.io production.cloudflare.docker.com)
+HOSTS_MARKER="# added by zs-config deploy.sh (IPv4 pin, build-time only)"
+_pinned_ipv4=0
+
+_pin_ipv4_hosts() {
+    [[ "$(uname)" == "Darwin" ]] && return 0
+    command -v getent &>/dev/null || return 0
+
+    local h ip
+    for h in "${DOCKER_HUB_HOSTS[@]}"; do
+        grep -qE "[[:space:]]${h}\$" /etc/hosts 2>/dev/null && continue
+        ip="$(getent ahostsv4 "$h" 2>/dev/null | awk '{print $1; exit}')"
+        [[ -n "$ip" ]] || continue
+        echo "$ip	$h	$HOSTS_MARKER" | sudo tee -a /etc/hosts >/dev/null
+        _pinned_ipv4=1
+    done
+    [[ "$_pinned_ipv4" -eq 1 ]] && echo "Pinned Docker Hub hosts to IPv4 in /etc/hosts (build-time only) to avoid broken-IPv6 pull timeouts."
+}
+
+_unpin_ipv4_hosts() {
+    [[ "$_pinned_ipv4" -eq 1 ]] || return 0
+    sudo sed -i.bak "/${HOSTS_MARKER//\//\\/}\$/d" /etc/hosts 2>/dev/null && sudo rm -f /etc/hosts.bak
+}
+
 cleanup_bundle() {
     : > "$BUNDLE"
     [[ -n "$DC_BACKUP" ]] && rm -f "$DC_BACKUP"
+    _unpin_ipv4_hosts
 }
 trap cleanup_bundle EXIT
 
@@ -283,16 +330,18 @@ fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
+_pin_ipv4_hosts
+
 echo "Building image..."
-docker compose build
+$DOCKER compose build
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
 echo "Stopping existing container..."
-docker compose down
+$DOCKER compose down
 
 echo "Starting container..."
-docker compose up -d
+$DOCKER compose up -d
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
@@ -307,7 +356,7 @@ for i in $(seq 1 15); do
             echo "zs-config is running at http://localhost:8000"
         fi
         echo ""
-        docker compose logs --tail=5
+        $DOCKER compose logs --tail=5
         exit 0
     fi
     printf "."

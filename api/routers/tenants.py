@@ -1,9 +1,12 @@
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Literal, Optional, List
 from api.dependencies import require_admin, require_auth, check_tenant_access, AuthUser
-from lib.conf_writer import build_zidentity_url, GOVCLOUD_ONEAPI_URL
+from lib.auth import DEFAULT_GOV_TIER
+from lib.conf_writer import build_zidentity_url, govcloud_oneapi_url
+
+GovTier = Literal["gov", "govus"]
 
 COMMERCIAL_ONEAPI_URL = "https://api.zsapi.net"
 
@@ -25,6 +28,7 @@ def _serialize(t) -> dict:
         "client_id": t.client_id,
         "has_credentials": bool(t.client_secret_enc),
         "govcloud": t.govcloud,
+        "gov_cloud_tier": t.gov_cloud_tier,
         "zpa_customer_id": t.zpa_customer_id,
         "zia_tenant_id": t.zia_tenant_id,
         "zia_cloud": t.zia_cloud,
@@ -51,7 +55,8 @@ class TenantCreate(BaseModel):
     client_id: str
     client_secret: str
     govcloud: bool = False
-    govcloud_oneapi_url: Optional[str] = None  # only used for GovCloud; defaults to GOVCLOUD_ONEAPI_URL
+    # FedRAMP tier; ignored unless govcloud is set. Defaults to FedRAMP Moderate.
+    gov_cloud_tier: Optional[GovTier] = None
     zpa_customer_id: Optional[str] = None
     notes: Optional[str] = None
 
@@ -61,7 +66,7 @@ class TenantUpdate(BaseModel):
     client_id: Optional[str] = None
     client_secret: Optional[str] = None
     govcloud: Optional[bool] = None
-    govcloud_oneapi_url: Optional[str] = None
+    gov_cloud_tier: Optional[GovTier] = None
     zpa_customer_id: Optional[str] = None
     notes: Optional[str] = None
 
@@ -100,11 +105,11 @@ def create_tenant(body: TenantCreate, user: AuthUser = Depends(require_admin)):
     from db.database import get_session
     from db.models import TenantConfig
 
-    zidentity_base_url = build_zidentity_url(body.vanity_domain, govcloud=body.govcloud)
-    if body.govcloud:
-        oneapi_base_url = (body.govcloud_oneapi_url or GOVCLOUD_ONEAPI_URL).rstrip("/")
-    else:
-        oneapi_base_url = COMMERCIAL_ONEAPI_URL
+    gov_tier = (body.gov_cloud_tier or DEFAULT_GOV_TIER) if body.govcloud else None
+    zidentity_base_url = build_zidentity_url(
+        body.vanity_domain, govcloud=body.govcloud, gov_tier=gov_tier
+    )
+    oneapi_base_url = govcloud_oneapi_url(gov_tier) if body.govcloud else COMMERCIAL_ONEAPI_URL
 
     try:
         t = add_tenant(
@@ -114,6 +119,7 @@ def create_tenant(body: TenantCreate, user: AuthUser = Depends(require_admin)):
             client_secret=body.client_secret,
             oneapi_base_url=oneapi_base_url,
             govcloud=body.govcloud,
+            gov_tier=gov_tier,
             zpa_customer_id=body.zpa_customer_id,
             notes=body.notes,
         )
@@ -182,16 +188,22 @@ def update_tenant(tenant_id: int, body: TenantUpdate, user: AuthUser = Depends(r
         if not t:
             raise HTTPException(status_code=404, detail="Tenant not found")
         name = t.name
+        cur_govcloud = bool(t.govcloud)
+        cur_gov_tier = t.gov_cloud_tier
     # Rebuild URLs from vanity if provided; otherwise leave existing values in place.
-    new_govcloud = body.govcloud  # may be None (no change)
+    # Fall back to the stored values so changing only the vanity domain does not
+    # silently rewrite a GovCloud tenant's URLs to the commercial endpoints.
+    eff_govcloud = cur_govcloud if body.govcloud is None else body.govcloud
+    eff_gov_tier = (
+        (body.gov_cloud_tier or cur_gov_tier or DEFAULT_GOV_TIER) if eff_govcloud else None
+    )
     new_zidentity = (
-        build_zidentity_url(body.vanity_domain, govcloud=bool(new_govcloud))
+        build_zidentity_url(body.vanity_domain, govcloud=eff_govcloud, gov_tier=eff_gov_tier)
         if body.vanity_domain else None
     )
-    if new_govcloud is True:
-        new_oneapi = (body.govcloud_oneapi_url or GOVCLOUD_ONEAPI_URL).rstrip("/")
-    elif new_govcloud is False:
-        new_oneapi = COMMERCIAL_ONEAPI_URL
+    tier_changed = body.gov_cloud_tier is not None and body.gov_cloud_tier != cur_gov_tier
+    if body.govcloud is not None or tier_changed:
+        new_oneapi = govcloud_oneapi_url(eff_gov_tier) if eff_govcloud else COMMERCIAL_ONEAPI_URL
     else:
         new_oneapi = None  # no change
 
@@ -202,6 +214,7 @@ def update_tenant(tenant_id: int, body: TenantUpdate, user: AuthUser = Depends(r
         client_secret=body.client_secret,
         oneapi_base_url=new_oneapi,
         govcloud=body.govcloud,
+        gov_tier=body.gov_cloud_tier,
         zpa_customer_id=body.zpa_customer_id,
         notes=body.notes,
     )
@@ -221,7 +234,7 @@ def update_tenant(tenant_id: int, body: TenantUpdate, user: AuthUser = Depends(r
 
     # Re-validate whenever something that affects auth was changed.
     creds_changed = any([body.client_secret, body.client_id, body.vanity_domain,
-                         body.govcloud is not None])
+                         body.govcloud is not None, tier_changed])
     if creds_changed:
         err = None
         org_info = None
@@ -310,11 +323,12 @@ def _get_zcc_import_client(tenant_id: int):
         secret = decrypt_secret(t.client_secret_enc)
         oneapi = t.oneapi_base_url
         govcloud = t.govcloud
+        gov_tier = t.gov_cloud_tier
         zia_cloud = t.zia_cloud
         zia_tenant_id = t.zia_tenant_id
         name = t.name
 
-    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
+    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud, gov_tier=gov_tier)
     client = ZCCClient(auth, oneapi, zia_cloud, zia_tenant_id)
     return client, name
 
@@ -336,9 +350,10 @@ def _get_import_client(tenant_id: int):
         secret = decrypt_secret(t.client_secret_enc)
         oneapi = t.oneapi_base_url
         govcloud = t.govcloud
+        gov_tier = t.gov_cloud_tier
         name = t.name
 
-    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
+    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud, gov_tier=gov_tier)
     client = ZIAClient(auth, oneapi)
     return client, name
 
@@ -346,12 +361,16 @@ def _get_import_client(tenant_id: int):
 @router.post("/{tenant_id}/import/zia", status_code=202)
 def import_zia(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
-    from api.jobs import store
+    from api.jobs import store, import_job_key
 
     if user.role != "admin":
         check_tenant_access(tenant_id, user)
+    # Build the client first: it raises for an unknown tenant, and we must not
+    # register a job that never runs (it would block imports until it expires).
     client, tenant_name = _get_import_client(tenant_id)
-    job_id = store.create()
+    job_id, created = store.create_unique(import_job_key(tenant_id, "ZIA"))
+    if not created:
+        return {"job_id": job_id, "already_running": True}
 
     def run():
         from services.zia_import_service import ZIAImportService
@@ -394,7 +413,7 @@ def import_zia(tenant_id: int, user: AuthUser = Depends(require_auth)):
 @router.post("/{tenant_id}/import/zpa", status_code=202)
 def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
-    from api.jobs import store
+    from api.jobs import store, import_job_key
     from db.database import get_session
     from db.models import TenantConfig
     from lib.auth import ZscalerAuth
@@ -414,13 +433,15 @@ def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
         secret = decrypt_secret(t.client_secret_enc)
         oneapi = t.oneapi_base_url
         govcloud = t.govcloud
-        govcloud_cloud = t.zpa_tenant_cloud if t.govcloud else None
+        gov_tier = t.gov_cloud_tier
         customer_id = t.zpa_customer_id
         tenant_name = t.name
 
-    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud)
-    zpa_client = ZPAClient(auth, customer_id, oneapi_base_url=oneapi, govcloud_cloud=govcloud_cloud)
-    job_id = store.create()
+    auth = ZscalerAuth(zidentity, client_id, secret, govcloud=govcloud, gov_tier=gov_tier)
+    zpa_client = ZPAClient(auth, customer_id, oneapi_base_url=oneapi)
+    job_id, created = store.create_unique(import_job_key(tenant_id, "ZPA"))
+    if not created:
+        return {"job_id": job_id, "already_running": True}
 
     def run():
         from services.zpa_import_service import ZPAImportService
@@ -463,12 +484,21 @@ def import_zpa(tenant_id: int, user: AuthUser = Depends(require_auth)):
 @router.post("/{tenant_id}/import/zcc", status_code=202)
 def import_zcc(tenant_id: int, user: AuthUser = Depends(require_auth)):
     import threading
-    from api.jobs import store
+    from api.jobs import store, import_job_key
+
+    from lib.zcc_client import ZCCUnavailableError
 
     if user.role != "admin":
         check_tenant_access(tenant_id, user)
-    client, tenant_name = _get_zcc_import_client(tenant_id)
-    job_id = store.create()
+    try:
+        client, tenant_name = _get_zcc_import_client(tenant_id)
+    except ZCCUnavailableError as exc:
+        # GovCloud tenant — nothing to import, so say so instead of starting a
+        # job that can only fail.
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_id, created = store.create_unique(import_job_key(tenant_id, "ZCC"))
+    if not created:
+        return {"job_id": job_id, "already_running": True}
 
     def run():
         from services.zcc_import_service import ZCCImportService

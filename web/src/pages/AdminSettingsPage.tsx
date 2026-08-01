@@ -7,7 +7,15 @@ import {
   fetchSSLStatus, SSLStatus,
   uploadSSLPfx, uploadSSLPemFile, uploadSSLPemPaste,
   removeSSL,
+  fetchLetsEncryptConfig, verifyLetsEncrypt, issueLetsEncrypt,
+  LetsEncryptConfig, LetsEncryptRequest,
 } from "../api/ssl";
+import { useJobStream } from "../hooks/useJobStream";
+import { testSso, ssoMetadataUrl, discoverSso } from "../api/sso";
+import {
+  fetchScimTokens, createScimToken, revokeScimToken,
+  fetchScimGroups, mapScimGroup,
+} from "../api/scim";
 import { ApiError } from "../api/client";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
@@ -44,14 +52,6 @@ function SectionCard({ title, badge, children, defaultOpen = false }: {
   );
 }
 
-function ComingSoon() {
-  return (
-    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
-      Coming Soon
-    </span>
-  );
-}
-
 function FieldRow({ label, hint, children }: {
   label: string;
   hint?: string;
@@ -63,7 +63,9 @@ function FieldRow({ label, hint, children }: {
         <p className="text-sm font-medium text-gray-700">{label}</p>
         {hint && <p className="text-xs text-gray-400 mt-0.5">{hint}</p>}
       </div>
-      <div className="flex-1">{children}</div>
+      {/* min-w-0 lets long values (callback URLs, tokens) shrink and truncate
+          instead of forcing the row wider than the card it sits in. */}
+      <div className="flex-1 min-w-0">{children}</div>
     </div>
   );
 }
@@ -103,6 +105,84 @@ function TextInput({ value, onChange, placeholder, disabled }: {
       onChange={(e) => onChange(e.target.value)}
       className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:bg-gray-50 disabled:text-gray-400"
     />
+  );
+}
+
+function TextArea({ value, onChange, placeholder, rows = 5 }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  rows?: number;
+}) {
+  return (
+    <textarea
+      value={value}
+      rows={rows}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-zs-500"
+    />
+  );
+}
+
+/**
+ * Write-only secret field. The API never returns the stored value, so the box
+ * starts blank and an empty submission means "leave what is on file alone".
+ */
+function SecretInput({ value, onChange, isSet, placeholder }: {
+  value: string;
+  onChange: (v: string) => void;
+  isSet: boolean;
+  placeholder?: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <input
+        type="password"
+        value={value}
+        placeholder={placeholder ?? (isSet ? "•••••••• (unchanged)" : "")}
+        autoComplete="new-password"
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+      />
+      {isSet && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-green-600">A value is stored.</span>
+          <button
+            type="button"
+            onClick={() => onChange("__CLEAR__")}
+            className="text-xs text-red-600 hover:underline"
+          >
+            Clear it
+          </button>
+          {value === "__CLEAR__" && (
+            <span className="text-xs text-red-600 font-medium">— will be cleared on save</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CopyField({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-center gap-2">
+      <code className="flex-1 truncate rounded bg-gray-50 border border-gray-200 px-2 py-1.5 text-xs text-gray-700">
+        {value}
+      </code>
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard?.writeText(value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+        className="text-xs px-2 py-1.5 rounded border border-gray-300 hover:bg-gray-50 text-gray-600"
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
   );
 }
 
@@ -197,6 +277,15 @@ export default function AdminSettingsPage() {
     for (const k of Object.keys(draft) as (keyof SystemSettings)[]) {
       if (draft[k] !== settings[k]) (patch as Record<string, unknown>)[k] = draft[k];
     }
+    // The Protocol dropdown shows OIDC when nothing is stored, but that is only
+    // a display fallback — an admin who fills in the OIDC fields without ever
+    // touching the dropdown would otherwise save a config with no provider,
+    // which silently disables SSO and makes Test connection report that no
+    // provider is selected. Persist what the form is showing them.
+    const touchesSso = Object.keys(patch).some(
+      (k) => k.startsWith("idp_") || k.startsWith("saml_") || k === "sso_base_url",
+    );
+    if (touchesSso && !draft.idp_provider) patch.idp_provider = "oidc";
     if (Object.keys(patch).length > 0) mut.mutate(patch);
   }
 
@@ -274,46 +363,10 @@ export default function AdminSettingsPage() {
       </SectionCard>
 
       {/* ── Identity Provider ─────────────────────────────────────────────── */}
-      <SectionCard title="Identity Provider (SSO)" badge={<ComingSoon />}>
-        <p className="text-xs text-gray-500">
-          OIDC and SAML integration is planned for a future release. These fields are saved
-          and will be activated when support is enabled.
-        </p>
-        <FieldRow label="Enable SSO">
-          <Toggle
-            checked={draft.idp_enabled}
-            onChange={(v) => set("idp_enabled", v)}
-            disabled
-          />
-        </FieldRow>
-        <FieldRow label="Provider" hint="oidc or saml">
-          <SelectInput
-            value={draft.idp_provider || "oidc"}
-            onChange={(v) => set("idp_provider", v)}
-            options={[
-              { value: "oidc", label: "OIDC" },
-              { value: "saml", label: "SAML" },
-            ]}
-            disabled
-          />
-        </FieldRow>
-        <FieldRow label="Issuer URL">
-          <TextInput
-            value={draft.idp_issuer_url}
-            onChange={(v) => set("idp_issuer_url", v)}
-            placeholder="https://accounts.example.com"
-            disabled
-          />
-        </FieldRow>
-        <FieldRow label="Client ID">
-          <TextInput
-            value={draft.idp_client_id}
-            onChange={(v) => set("idp_client_id", v)}
-            placeholder="your-client-id"
-            disabled
-          />
-        </FieldRow>
-      </SectionCard>
+      <IdentityProviderSection draft={draft} set={set} />
+
+      {/* ── SCIM Provisioning ─────────────────────────────────────────────── */}
+      <ScimSection baseUrl={draft.sso_base_url} />
 
       {/* ── SSL / TLS ─────────────────────────────────────────────────────── */}
       {sysInfo?.container_mode && <SSLTlsSection />}
@@ -372,6 +425,244 @@ function ExpiryBadge({ days }: { days: number }) {
   );
 }
 
+interface IssueResult {
+  domain: string;
+  staging: boolean;
+  not_after: string;
+}
+
+/**
+ * Let's Encrypt issuance over the ACME dns-01 challenge.
+ *
+ * dns-01 is the only challenge offered because this app usually sits on an
+ * internal network, where http-01 could never be answered — Let's Encrypt has
+ * to reach the host inbound from the internet for that one.
+ */
+function LetsEncryptPanel({ activeDomain }: { activeDomain: string | null }) {
+  const qc = useQueryClient();
+  const { data: cfg } = useQuery<LetsEncryptConfig>({
+    queryKey: ["le-config"],
+    queryFn: fetchLetsEncryptConfig,
+  });
+
+  const [domain, setDomain] = useState("");
+  const [email, setEmail] = useState("");
+  const [cfToken, setCfToken] = useState("");
+  const [staging, setStaging] = useState(false);
+  const [autoRenew, setAutoRenew] = useState(true);
+  const [seeded, setSeeded] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [verified, setVerified] = useState<string | null>(null);
+  const [showFido2Confirm, setShowFido2Confirm] = useState(false);
+
+  // Seed once from what is stored — re-seeding on every refetch would fight
+  // with whatever the admin is currently typing.
+  useEffect(() => {
+    if (!cfg || seeded) return;
+    setDomain(cfg.domain);
+    setEmail(cfg.email);
+    setStaging(cfg.staging);
+    setAutoRenew(cfg.auto_renew);
+    setSeeded(true);
+  }, [cfg, seeded]);
+
+  const { progressEvents, jobStatus, result, streamError } = useJobStream<IssueResult>(jobId);
+
+  function body(): LetsEncryptRequest {
+    return {
+      domain: domain.trim(),
+      email: email.trim(),
+      staging,
+      auto_renew: autoRenew,
+      cf_api_token: cfToken,
+    };
+  }
+
+  const verify = useMutation({
+    mutationFn: () => verifyLetsEncrypt(body()),
+    onSuccess: (res) => {
+      setError(null);
+      setVerified(res.zone);
+      setCfToken("");
+      qc.invalidateQueries({ queryKey: ["le-config"] });
+    },
+    onError: (e: unknown) => {
+      setVerified(null);
+      setError(e instanceof Error ? e.message : "Verification failed");
+    },
+  });
+
+  const issue = useMutation({
+    mutationFn: () => issueLetsEncrypt(body()),
+    onSuccess: (res) => {
+      setError(null);
+      setCfToken("");
+      setJobId(res.job_id);
+    },
+    onError: (e: unknown) => {
+      setError(e instanceof Error ? e.message : "Could not start issuance");
+    },
+  });
+
+  const running = jobStatus === "running" || issue.isPending;
+  const originChanging = !activeDomain || activeDomain !== domain.trim();
+  const canSubmit =
+    !!domain.trim() && !!email.trim() && (cfg?.token_set || !!cfToken.trim()) && !running;
+
+  if (jobStatus === "done" && result) {
+    return (
+      <div className="rounded-lg border border-green-300 bg-green-50 p-4 space-y-3">
+        <p className="text-sm font-semibold text-green-800">
+          Certificate issued for {result.domain}. The container is restarting with HTTPS.
+        </p>
+        <p className="text-xs text-green-900">
+          Valid until {new Date(result.not_after).toLocaleDateString()}. Renewal runs automatically
+          once the certificate is inside 30 days of expiry.
+        </p>
+        {result.staging && (
+          <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <strong>This is a staging certificate.</strong> It is not publicly trusted — browsers
+            will still warn. Clear the staging checkbox and issue again for a real one.
+          </div>
+        )}
+        <div className="flex gap-2">
+          <a
+            href={`https://${result.domain}:8443`}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-1.5 text-sm font-medium rounded-md bg-green-600 hover:bg-green-700 text-white transition-colors"
+          >
+            Open in new tab
+          </a>
+          <button
+            type="button"
+            onClick={() => { setJobId(null); qc.invalidateQueries({ queryKey: ["ssl-status"] }); }}
+            className="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600">
+        Issues a publicly trusted certificate using the ACME <strong>dns-01</strong> challenge, so
+        this app never has to be reachable from the internet. Requires the domain to be hosted on
+        Cloudflare and an API token with <strong>Zone:Read</strong> and <strong>DNS:Edit</strong> on
+        that zone.
+      </div>
+
+      {cfg?.last_error && !error && !running && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+          <strong>Last attempt failed:</strong> {cfg.last_error}
+        </div>
+      )}
+
+      <FieldRow label="Domain" hint="The hostname this app is reached at. Wildcards are not supported.">
+        <TextInput value={domain} onChange={(v) => { setDomain(v); setVerified(null); }} placeholder="zs-config.example.com" />
+      </FieldRow>
+
+      <FieldRow label="Contact email" hint="Let's Encrypt sends expiry warnings here.">
+        <TextInput value={email} onChange={setEmail} placeholder="admin@example.com" />
+      </FieldRow>
+
+      <FieldRow
+        label="Cloudflare API token"
+        hint={cfg?.token_set ? "A token is stored. Leave blank to keep it." : "Scoped token, not a global API key."}
+      >
+        <input
+          type="password"
+          value={cfToken}
+          onChange={(e) => { setCfToken(e.target.value); setVerified(null); }}
+          placeholder={cfg?.token_set ? "•••••••• (unchanged)" : ""}
+          autoComplete="new-password"
+          className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+        />
+      </FieldRow>
+
+      <FieldRow label="Auto-renew" hint="Checks daily and re-issues at 30 days remaining, then restarts.">
+        <Toggle checked={autoRenew} onChange={setAutoRenew} />
+      </FieldRow>
+
+      <FieldRow
+        label="Use staging directory"
+        hint="Staging has far looser rate limits. Use it to prove the DNS plumbing works, then re-issue against production."
+      >
+        <Toggle checked={staging} onChange={(v) => { setStaging(v); setVerified(null); }} />
+      </FieldRow>
+
+      {verified && (
+        <p className="text-xs text-green-700">
+          Cloudflare token is valid and zone <span className="font-mono">{verified}</span> covers this domain.
+        </p>
+      )}
+      {(error || streamError) && (
+        <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800">
+          {error || streamError}
+        </div>
+      )}
+
+      {running && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-1.5">
+          <div className="flex items-center gap-3 text-sm text-gray-600">
+            <LoadingSpinner />
+            <span>Requesting certificate — this usually takes under a minute.</span>
+          </div>
+          {progressEvents.length > 0 && (
+            <ul className="text-xs text-gray-500 font-mono space-y-0.5 pl-8">
+              {progressEvents.map((ev, i) => <li key={i}>{ev.message}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {showFido2Confirm ? (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 space-y-3">
+          <p className="text-sm font-semibold text-amber-800">Security key re-registration required</p>
+          <p className="text-xs text-amber-700">
+            Enabling HTTPS on a new hostname changes the WebAuthn origin, so all existing passkeys
+            and hardware security key registrations will be <strong>permanently invalidated</strong>.
+            Every user must re-register at next login.
+          </p>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setShowFido2Confirm(false)}
+              className="px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100 transition-colors">
+              Cancel
+            </button>
+            <button type="button" onClick={() => { setShowFido2Confirm(false); issue.mutate(); }}
+              className="px-3 py-1.5 text-xs font-medium rounded-md bg-amber-600 hover:bg-amber-700 text-white transition-colors">
+              I understand, continue
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={!canSubmit || verify.isPending}
+            onClick={() => verify.mutate()}
+            className="px-3 py-2 text-sm font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          >
+            {verify.isPending ? "Checking…" : "Verify DNS access"}
+          </button>
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={() => { if (originChanging) setShowFido2Confirm(true); else issue.mutate(); }}
+            className="px-4 py-2 text-sm font-medium rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50 transition-colors"
+          >
+            Request certificate
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SSLTlsSection() {
   const qc = useQueryClient();
   const { data: sslStatus, isLoading: statusLoading } = useQuery<SSLStatus>({
@@ -380,6 +671,7 @@ function SSLTlsSection() {
   });
 
   const [phase, setPhase] = useState<SSLPhase>({ kind: "idle" });
+  const [source, setSource] = useState<"letsencrypt" | "upload">("letsencrypt");
   const [selectedTab, setSelectedTab] = useState<"pfx" | "pem_file" | "pem_paste">("pfx");
   const [domain, setDomain] = useState("");
   const [pfxFile, setPfxFile] = useState<File | null>(null);
@@ -438,11 +730,22 @@ function SSLTlsSection() {
     }
     const deadline = Date.now() + 30_000;
     let recovered = false;
+    // Removing the cert drops the app back to plain HTTP on 8000, so that is
+    // where a directly-reached container reappears. Someone coming in through
+    // ZPA or a reverse proxy never sees port 8000 at all, so probe the origin
+    // they actually used as well and take whichever answers first.
+    const probes = [
+      `${window.location.origin}/health`,
+      `http://${window.location.hostname}:8000/health`,
+    ];
     while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`http://${window.location.hostname}:8000/health`);
-        if (res.ok) { recovered = true; break; }
-      } catch { /* not yet up */ }
+      const results = await Promise.allSettled(
+        probes.map((url) => fetch(url, { mode: "no-cors" })),
+      );
+      if (results.some((r) => r.status === "fulfilled" && (r.value.ok || r.value.type === "opaque"))) {
+        recovered = true;
+        break;
+      }
       await new Promise((r) => setTimeout(r, 1_000));
     }
     if (recovered) {
@@ -457,7 +760,7 @@ function SSLTlsSection() {
   }
 
   const busy = phase.kind === "uploading" || phase.kind === "removing";
-  const hasActiveCert = sslStatus?.active && sslStatus?.mode === "upload";
+  const hasActiveCert = !!sslStatus?.active;
 
   return (
     <SectionCard title="SSL / TLS" defaultOpen={hasActiveCert}>
@@ -473,6 +776,10 @@ function SSLTlsSection() {
       {hasActiveCert && sslStatus && (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 space-y-1.5 text-xs text-gray-700">
           <p className="text-sm font-semibold text-gray-800 mb-2">Current certificate</p>
+          <div className="flex gap-2">
+            <span className="w-20 text-gray-500">Source</span>
+            <span>{sslStatus.mode === "letsencrypt" ? "Let's Encrypt (auto-renewing)" : "Uploaded"}</span>
+          </div>
           {sslStatus.subject && (
             <div className="flex gap-2"><span className="w-20 text-gray-500">Subject</span><span className="font-mono">{sslStatus.subject}</span></div>
           )}
@@ -578,8 +885,34 @@ function SSLTlsSection() {
         </div>
       )}
 
-      {/* Upload form (shown in idle state) */}
+      {/* Certificate source (shown in idle state) */}
       {phase.kind === "idle" && (
+        <div className="space-y-4">
+          <div className="flex gap-1 border-b border-gray-200">
+            {(["letsencrypt", "upload"] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSource(s)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  source === s
+                    ? "border-zs-500 text-zs-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                {s === "letsencrypt" ? "Let's Encrypt" : "Upload certificate"}
+              </button>
+            ))}
+          </div>
+
+          {source === "letsencrypt" && (
+            <LetsEncryptPanel activeDomain={sslStatus?.active ? sslStatus.domain : null} />
+          )}
+        </div>
+      )}
+
+      {/* Upload form */}
+      {phase.kind === "idle" && source === "upload" && (
         <div className="space-y-4">
           {/* Tab bar */}
           <div className="flex gap-1 border-b border-gray-200">
@@ -909,13 +1242,15 @@ function ImportDatabaseSection() {
   return (
     <div className="space-y-4">
       <p className="text-xs text-gray-500">
-        Replace the running database with one exported from a local TUI-based zs-config install.
+        Replace the running database with one exported from another zs-config install.
+        Encrypted (SQLCipher) databases are accepted — upload the matching{" "}
+        <code className="bg-gray-100 px-1 rounded text-xs font-mono">secret.key</code> with them.
         Use the <code className="bg-gray-100 px-1 rounded text-xs font-mono">scripts/export_tui_db.sh</code> script
         to export the database and encryption key from a local install.
       </p>
       <FieldRow
         label="Database file"
-        hint="SQLite .db file exported from a local install."
+        hint="zscaler.db from another install — plaintext SQLite or SQLCipher-encrypted."
       >
         <input
           ref={dbRef}
@@ -928,7 +1263,7 @@ function ImportDatabaseSection() {
       </FieldRow>
       <FieldRow
         label="Encryption key"
-        hint="secret.key file — required if the exported database contains encrypted tenant credentials."
+        hint="secret.key file — required for an encrypted database, or if it holds encrypted tenant credentials."
       >
         <input
           ref={keyRef}
@@ -1227,5 +1562,446 @@ function EncryptionSection({
       )}
       {rotateError && <p className="text-xs text-red-600">{rotateError}</p>}
     </div>
+  );
+}
+
+// ── Identity Provider (SSO) ───────────────────────────────────────────────────
+
+type SetFn = <K extends keyof SystemSettings>(key: K, value: SystemSettings[K]) => void;
+
+function IdentityProviderSection({ draft, set }: { draft: SystemSettings; set: SetFn }) {
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [discoveryUrl, setDiscoveryUrl] = useState("");
+  const [discoverNote, setDiscoverNote] = useState<string | null>(null);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+
+  const discover = useMutation({
+    mutationFn: () => discoverSso(discoveryUrl),
+    onSuccess: (res) => {
+      setDiscoverError(null);
+      set("idp_issuer_url", res.issuer_url);
+      // Only narrow the scopes if the IdP actually advertises the ones we need;
+      // an incomplete scopes_supported list is common and not worth trusting.
+      const wanted = ["openid", "profile", "email"];
+      if (wanted.every((s) => res.scopes_supported.includes(s))) {
+        set("idp_scopes", wanted.join(" "));
+      }
+      setDiscoverNote(
+        `Issuer: ${res.issuer_url}\nAuthorization: ${res.authorization_endpoint ?? "—"}\n` +
+        `Token: ${res.token_endpoint ?? "—"}\nJWKS: ${res.jwks_uri ?? "—"}\n\n` +
+        "Fields updated below. Add your client ID and secret, then Save.",
+      );
+    },
+    onError: (err: unknown) => {
+      setDiscoverNote(null);
+      setDiscoverError(err instanceof Error ? err.message : "Discovery failed");
+    },
+  });
+
+  const test = useMutation({
+    mutationFn: testSso,
+    onSuccess: (res) => {
+      setTestError(null);
+      const { ok: _ok, provider, ...rest } = res;
+      setTestResult(
+        [`provider: ${provider}`, ...Object.entries(rest).map(([k, v]) => `${k}: ${v}`)].join("\n"),
+      );
+    },
+    onError: (err: unknown) => {
+      setTestResult(null);
+      setTestError(err instanceof Error ? err.message : "Connection test failed");
+    },
+  });
+
+  const provider = draft.idp_provider || "oidc";
+  const base = draft.sso_base_url || window.location.origin;
+
+  return (
+    <SectionCard title="Identity Provider (SSO)">
+      <FieldRow label="Enable SSO" hint="Adds a 'Sign in with SSO' button to the login page.">
+        <Toggle checked={draft.idp_enabled} onChange={(v) => set("idp_enabled", v)} />
+      </FieldRow>
+      <FieldRow label="Protocol">
+        <SelectInput
+          value={provider}
+          onChange={(v) => set("idp_provider", v)}
+          options={[
+            { value: "oidc", label: "OIDC" },
+            { value: "saml", label: "SAML 2.0" },
+          ]}
+        />
+      </FieldRow>
+      <FieldRow
+        label="Public base URL"
+        hint="How browsers and the IdP reach this install. Used to build redirect, ACS and metadata URLs."
+      >
+        <TextInput
+          value={draft.sso_base_url}
+          onChange={(v) => set("sso_base_url", v)}
+          placeholder="https://zs-config.example.com"
+        />
+      </FieldRow>
+
+      {provider === "oidc" ? (
+        <>
+          <FieldRow
+            label="Discovery URL"
+            hint="Paste the .well-known URL from your IdP to fill in the fields below. Nothing is saved until you press Save."
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <TextInput
+                    value={discoveryUrl}
+                    onChange={setDiscoveryUrl}
+                    placeholder="https://login.example.com/.well-known/openid-configuration"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => discover.mutate()}
+                  disabled={discover.isPending || !discoveryUrl.trim()}
+                  className="px-3 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700 flex-shrink-0"
+                >
+                  {discover.isPending ? "Fetching…" : "Fetch"}
+                </button>
+              </div>
+              {discoverError && <ErrorMessage message={discoverError} />}
+              {discoverNote && (
+                <pre className="rounded bg-green-50 border border-green-200 px-3 py-2 text-xs text-green-800 whitespace-pre-wrap break-all">
+                  {discoverNote}
+                </pre>
+              )}
+            </div>
+          </FieldRow>
+          <FieldRow label="Issuer URL" hint="Discovery is read from {issuer}/.well-known/openid-configuration. A full .well-known URL is accepted here too.">
+            <TextInput
+              value={draft.idp_issuer_url}
+              onChange={(v) => set("idp_issuer_url", v)}
+              placeholder="https://login.example.com/oauth2/default"
+            />
+          </FieldRow>
+          <FieldRow label="Client ID">
+            <TextInput
+              value={draft.idp_client_id}
+              onChange={(v) => set("idp_client_id", v)}
+              placeholder="0oa1b2c3d4e5f6g7h8i9"
+            />
+          </FieldRow>
+          <FieldRow label="Client secret">
+            <SecretInput
+              value={draft.idp_client_secret ?? ""}
+              onChange={(v) => set("idp_client_secret", v)}
+              isSet={draft.idp_client_secret_set}
+            />
+          </FieldRow>
+          <FieldRow label="Scopes">
+            <TextInput
+              value={draft.idp_scopes}
+              onChange={(v) => set("idp_scopes", v)}
+              placeholder="openid profile email groups"
+            />
+          </FieldRow>
+          <FieldRow label="Redirect URI" hint="Register this exact value with your IdP.">
+            <CopyField value={`${base}/api/v1/auth/sso/callback`} />
+          </FieldRow>
+        </>
+      ) : (
+        <>
+          <FieldRow
+            label="IdP metadata URL"
+            hint="Preferred — the metadata is re-read on each request. Leave blank to paste XML instead."
+          >
+            <TextInput
+              value={draft.saml_idp_metadata_url}
+              onChange={(v) => set("saml_idp_metadata_url", v)}
+              placeholder="https://login.example.com/app/exk1234/sso/saml/metadata"
+            />
+          </FieldRow>
+          <FieldRow label="IdP metadata XML" hint="Used when no metadata URL is set.">
+            <TextArea
+              value={draft.saml_idp_metadata_xml}
+              onChange={(v) => set("saml_idp_metadata_xml", v)}
+              placeholder="<EntityDescriptor …>"
+              rows={6}
+            />
+          </FieldRow>
+          <FieldRow label="SP entity ID" hint="Defaults to the metadata URL below if left blank.">
+            <TextInput
+              value={draft.saml_sp_entity_id}
+              onChange={(v) => set("saml_sp_entity_id", v)}
+              placeholder={`${base}/api/v1/auth/sso/metadata`}
+            />
+          </FieldRow>
+          <FieldRow
+            label="SP certificate"
+            hint="Optional. Only needed if your IdP requires signed AuthnRequests."
+          >
+            <TextArea
+              value={draft.saml_sp_cert}
+              onChange={(v) => set("saml_sp_cert", v)}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              rows={4}
+            />
+          </FieldRow>
+          <FieldRow label="SP private key">
+            <SecretInput
+              value={draft.saml_sp_key ?? ""}
+              onChange={(v) => set("saml_sp_key", v)}
+              isSet={draft.saml_sp_key_set}
+            />
+          </FieldRow>
+          <FieldRow label="ACS URL" hint="Register this exact value with your IdP.">
+            <CopyField value={`${base}/api/v1/auth/sso/acs`} />
+          </FieldRow>
+          <FieldRow label="SP metadata">
+            <a
+              href={ssoMetadataUrl()}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-zs-600 hover:underline"
+            >
+              Download SP metadata XML
+            </a>
+          </FieldRow>
+        </>
+      )}
+
+      <FieldRow
+        label="Auto-provision users"
+        hint="Create a local account the first time an unknown user signs in through the IdP."
+      >
+        <Toggle
+          checked={draft.idp_auto_provision}
+          onChange={(v) => set("idp_auto_provision", v)}
+        />
+      </FieldRow>
+      <FieldRow label="Default role" hint="Applied when no SCIM group mapping matches.">
+        <SelectInput
+          value={draft.idp_default_role || "user"}
+          onChange={(v) => set("idp_default_role", v)}
+          options={[
+            { value: "user", label: "User" },
+            { value: "admin", label: "Admin" },
+          ]}
+        />
+      </FieldRow>
+      <FieldRow
+        label="Group claim"
+        hint="Claim or SAML attribute carrying group names, matched against SCIM group mappings."
+      >
+        <TextInput
+          value={draft.idp_group_claim}
+          onChange={(v) => set("idp_group_claim", v)}
+          placeholder="groups"
+        />
+      </FieldRow>
+
+      <div className="pt-2 border-t border-gray-100 space-y-2">
+        <button
+          type="button"
+          onClick={() => test.mutate()}
+          disabled={test.isPending}
+          className="px-3 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700"
+        >
+          {test.isPending ? "Testing…" : "Test connection"}
+        </button>
+        <p className="text-xs text-gray-400">
+          Tests the configuration that is already saved — save your changes first.
+        </p>
+        {testError && <ErrorMessage message={testError} />}
+        {testResult && (
+          <pre className="rounded bg-green-50 border border-green-200 px-3 py-2 text-xs text-green-800 whitespace-pre-wrap">
+            {testResult}
+          </pre>
+        )}
+      </div>
+    </SectionCard>
+  );
+}
+
+// ── SCIM provisioning ─────────────────────────────────────────────────────────
+
+function ScimSection({ baseUrl }: { baseUrl: string }) {
+  const qc = useQueryClient();
+  const [label, setLabel] = useState("");
+  // Shown once, right after creation — the plaintext is never stored server-side.
+  const [newToken, setNewToken] = useState<string | null>(null);
+
+  const { data: tokens } = useQuery({ queryKey: ["scim-tokens"], queryFn: fetchScimTokens });
+  const { data: groups } = useQuery({ queryKey: ["scim-groups"], queryFn: fetchScimGroups });
+
+  const create = useMutation({
+    mutationFn: () => createScimToken(label.trim() || undefined),
+    onSuccess: (res) => {
+      setNewToken(res.token);
+      setLabel("");
+      qc.invalidateQueries({ queryKey: ["scim-tokens"] });
+    },
+  });
+
+  const revoke = useMutation({
+    mutationFn: revokeScimToken,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["scim-tokens"] }),
+  });
+
+  const map = useMutation({
+    mutationFn: ({ id, role }: { id: number; role: string | null }) => mapScimGroup(id, role),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["scim-groups"] });
+      // A remapped group can change roles, so the user list is stale too.
+      qc.invalidateQueries({ queryKey: ["admin-users"] });
+    },
+  });
+
+  const base = baseUrl || window.location.origin;
+
+  return (
+    <SectionCard title="SCIM Provisioning">
+      <p className="text-xs text-gray-500">
+        Point your identity provider at these values to provision and deprovision zs-config
+        web users automatically. This manages application accounts only — it does not touch
+        Zscaler tenants.
+      </p>
+
+      <FieldRow label="SCIM base URL">
+        <CopyField value={`${base}/scim/v2`} />
+      </FieldRow>
+
+      <div className="pt-3 border-t border-gray-100 space-y-3">
+        <p className="text-sm font-medium text-gray-700">Bearer tokens</p>
+
+        {newToken && (
+          <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 space-y-2">
+            <p className="text-xs text-amber-800 font-medium">
+              Copy this token now — it is not shown again.
+            </p>
+            <CopyField value={newToken} />
+            <button
+              type="button"
+              onClick={() => setNewToken(null)}
+              className="text-xs text-amber-700 hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={label}
+            placeholder="Label (e.g. Okta production)"
+            onChange={(e) => setLabel(e.target.value)}
+            className="flex-1 border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
+          />
+          <button
+            type="button"
+            onClick={() => create.mutate()}
+            disabled={create.isPending}
+            className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50"
+          >
+            {create.isPending ? "Generating…" : "Generate token"}
+          </button>
+        </div>
+        {create.isError && (
+          <ErrorMessage message={create.error instanceof Error ? create.error.message : "Failed to generate token"} />
+        )}
+
+        {tokens && tokens.length > 0 ? (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-500 border-b border-gray-200">
+                <th className="py-1.5 font-medium">Label</th>
+                <th className="py-1.5 font-medium">Prefix</th>
+                <th className="py-1.5 font-medium">Last used</th>
+                <th className="py-1.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.map((t) => (
+                <tr key={t.id} className="border-b border-gray-100">
+                  <td className="py-1.5 text-gray-700">{t.label || <span className="text-gray-400">—</span>}</td>
+                  <td className="py-1.5 font-mono text-gray-500">{t.token_prefix}…</td>
+                  <td className="py-1.5 text-gray-500">
+                    {t.last_used_at ? new Date(t.last_used_at).toLocaleString() : "never"}
+                  </td>
+                  <td className="py-1.5 text-right">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Revoke token ${t.token_prefix}…? Any identity provider using it stops provisioning immediately.`,
+                          )
+                        ) {
+                          revoke.mutate(t.id);
+                        }
+                      }}
+                      disabled={revoke.isPending}
+                      className="text-red-600 hover:underline disabled:opacity-50 disabled:no-underline"
+                    >
+                      {revoke.isPending && revoke.variables === t.id ? "Revoking…" : "Revoke"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="text-xs text-gray-400">No tokens issued yet.</p>
+        )}
+        {/* Without this the button looked inert on failure: the row stayed put
+            and nothing said why. A WAF in front of the app rejecting DELETE is
+            enough to trigger it, and that is invisible from here. */}
+        {revoke.isError && (
+          <ErrorMessage message={revoke.error instanceof Error ? revoke.error.message : "Failed to revoke token"} />
+        )}
+      </div>
+
+      <div className="pt-3 border-t border-gray-100 space-y-3">
+        <p className="text-sm font-medium text-gray-700">Group role mapping</p>
+        <p className="text-xs text-gray-500">
+          Groups appear here once your IdP pushes them. Mapping one to a role applies it to
+          its members immediately. Unmapped groups leave members on the default role.
+        </p>
+        {groups && groups.length > 0 ? (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-500 border-b border-gray-200">
+                <th className="py-1.5 font-medium">Group</th>
+                <th className="py-1.5 font-medium">Members</th>
+                <th className="py-1.5 font-medium">Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => (
+                <tr key={g.id} className="border-b border-gray-100">
+                  <td className="py-1.5 text-gray-700">{g.display_name}</td>
+                  <td className="py-1.5 text-gray-500">{g.member_count}</td>
+                  <td className="py-1.5">
+                    <select
+                      value={g.mapped_role ?? ""}
+                      onChange={(e) => map.mutate({ id: g.id, role: e.target.value || null })}
+                      className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-zs-500"
+                    >
+                      <option value="">Not mapped</option>
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="text-xs text-gray-400">No groups have been provisioned yet.</p>
+        )}
+        {map.isError && (
+          <ErrorMessage message={map.error instanceof Error ? map.error.message : "Failed to update mapping"} />
+        )}
+      </div>
+    </SectionCard>
   );
 }

@@ -194,7 +194,7 @@ import {
   ZidApiClient,
   ZidApiClientSecret,
 } from "../api/zid";
-import { cancelJob } from "../api/jobs";
+import { cancelJob, fetchActiveImportJob } from "../api/jobs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
 import Accordion from "../components/Accordion";
@@ -5652,18 +5652,46 @@ function ImportProductModal({
   const qc = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
   const [mutErr, setMutErr] = useState<string | null>(null);
+  // True when we attached to an import that was already running when the modal
+  // opened, rather than one started from this modal.
+  const [resumed, setResumed] = useState(false);
+
+  // An import keeps running after the modal is closed, so on open we ask the
+  // server whether one is already in flight and reattach to it instead of
+  // showing the start prompt. Not cached: a stale hit would stream a job that
+  // has since finished.
+  const active = useQuery({
+    queryKey: ["activeImportJob", tenant.id, product],
+    queryFn: () => fetchActiveImportJob(tenant.id, product),
+    enabled: jobId === null,
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (jobId === null && active.data?.job_id) {
+      setJobId(active.data.job_id);
+      setResumed(true);
+    }
+  }, [active.data, jobId]);
 
   const mut = useMutation({
     mutationFn: () =>
       product === "ZIA" ? importZIA(tenant.id) :
       product === "ZPA" ? importZPA(tenant.id) :
       importZCC(tenant.id),
-    onSuccess: (data) => setJobId(data.job_id),
+    onSuccess: (data) => {
+      setJobId(data.job_id);
+      if (data.already_running) setResumed(true);
+    },
     onError: (e: Error) => setMutErr(e.message),
   });
 
   const { latestByPhase, jobStatus, result, streamError } = useJobStream<ImportResult>(jobId);
   const importProgress = latestByPhase["import"];
+  const checking = jobId === null && active.isLoading;
   const isRunning = mut.isPending || jobStatus === "running";
   const isDone = jobStatus === "done";
 
@@ -5681,13 +5709,21 @@ function ImportProductModal({
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
         <div className="px-6 py-4 space-y-4">
-          {!isDone && !isRunning && !err && (
+          {checking && (
+            <p className="text-sm text-gray-600">Checking for an import already in progress…</p>
+          )}
+          {!checking && !isDone && !isRunning && !err && (
             <p className="text-sm text-gray-600">
               Pull the latest {product} configuration from Zscaler into the local database.
             </p>
           )}
           {isRunning && (
             <div className="space-y-2">
+              {resumed && (
+                <p className="text-xs text-gray-500">
+                  An import for this tenant is already running — showing its progress.
+                </p>
+              )}
               <p className="text-sm text-gray-600">
                 {importProgress
                   ? `Importing ${importProgress.resource_type}… ${importProgress.done}${importProgress.total ? `/${importProgress.total}` : ""}`
@@ -5725,10 +5761,10 @@ function ImportProductModal({
             {!isDone && (
               <button
                 onClick={() => mut.mutate()}
-                disabled={isRunning}
+                disabled={isRunning || checking}
                 className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
               >
-                {isRunning ? "Importing…" : `Import ${product}`}
+                {checking ? "Checking…" : isRunning ? "Importing…" : `Import ${product}`}
               </button>
             )}
             <button onClick={onClose} className="px-4 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50">
@@ -8692,18 +8728,29 @@ export default function TenantWorkspacePage() {
 
   if (!tenant) return null;
 
-  const hasZpa = !!tenant.zpa_customer_id && !tenant.govcloud;
+  // GovCloud ZPA is resolved by the SDK from the tenant's FedRAMP tier.
+  const hasZpa = !!tenant.zpa_customer_id;
+  // The GovCloud OneAPI gateways do not route the /zcc service — every ZCC
+  // endpoint answers 500 with an empty body, valid path or not. Hide the
+  // product rather than offer imports that cannot succeed.
+  const hasZcc = !tenant.govcloud;
 
   const tabs: { id: TabId; label: string; show: boolean }[] = [
     { id: "zia", label: "ZIA", show: true },
     { id: "zpa", label: "ZPA", show: !!tenant.zpa_customer_id },
     { id: "zdx", label: "ZDX", show: true },
-    { id: "zcc", label: "ZCC", show: true },
+    { id: "zcc", label: "ZCC", show: hasZcc },
     { id: "zid", label: "ZID", show: true },
   ];
 
   // If trying to view ZPA tab but no ZPA, redirect to ZIA
   if (activeTab === "zpa" && !tenant.zpa_customer_id) {
+    navigate(`/tenant/${id}/zia`, { replace: true });
+    return null;
+  }
+
+  // Same for a bookmarked ZCC tab on a GovCloud tenant.
+  if (activeTab === "zcc" && !hasZcc) {
     navigate(`/tenant/${id}/zia`, { replace: true });
     return null;
   }
@@ -8743,7 +8790,7 @@ export default function TenantWorkspacePage() {
             </span>
           )}
         </div>
-        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || activeTab === "zcc") && (
+        {(activeTab === "zia" || (activeTab === "zpa" && hasZpa) || (activeTab === "zcc" && hasZcc)) && (
           <button
             onClick={() => setImportModal(importProduct)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white transition-colors"

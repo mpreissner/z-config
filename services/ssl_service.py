@@ -19,6 +19,21 @@ SSL_DIR  = Path(os.environ.get("ZSCALER_DB_PATH", "/data/db/zscaler.db")).parent
 CERT_PATH = SSL_DIR / "cert.pem"
 KEY_PATH  = SSL_DIR / "key.pem"
 
+# ssl_mode values that mean "a certificate is installed"; anything else is HTTP.
+_ACTIVE_MODES = ("upload", "letsencrypt")
+
+
+def public_origin(domain: str) -> str:
+    """The origin browsers actually use to reach this instance.
+
+    Direct access lands on 8443, but behind ZPA Browser Access or a reverse
+    proxy the browser sees port 443 and a WebAuthn assertion signed for
+    ':8443' is rejected on origin mismatch. Deployments that publish on a
+    different port set ZS_PUBLIC_ORIGIN (e.g. https://zs.example.com).
+    """
+    override = os.environ.get("ZS_PUBLIC_ORIGIN", "").strip().rstrip("/")
+    return override or f"https://{domain}:8443"
+
 
 class SSLValidationError(Exception):
     def __init__(self, code: str, message: str):
@@ -205,11 +220,14 @@ def process_pem_text(pem_text: str, domain: str) -> ParsedCertBundle:
     return process_pem_bytes(pem_text.encode(), domain)
 
 
-def save_bundle(bundle: ParsedCertBundle, domain: str) -> None:
+def save_bundle(bundle: ParsedCertBundle, domain: str, mode: str = "upload") -> None:
     # Read before write so we can decide whether credentials need invalidating.
     old_mode   = get_setting("ssl_mode") or "none"
     old_domain = get_setting("ssl_domain") or ""
-    origin_changing = old_mode != "upload" or old_domain != domain
+    # A Let's Encrypt renewal keeps the same origin, so it must not wipe
+    # anyone's passkeys — only a genuine change of host or of how the cert got
+    # here counts as the origin moving.
+    origin_changing = old_mode != mode or old_domain != domain
 
     try:
         SSL_DIR.mkdir(parents=True, exist_ok=True)
@@ -218,16 +236,16 @@ def save_bundle(bundle: ParsedCertBundle, domain: str) -> None:
         os.chmod(KEY_PATH, 0o600)
     except OSError as e:
         raise SSLValidationError("write_failed", f"Failed to write SSL files: {e}")
-    set_setting("ssl_mode", "upload")
+    set_setting("ssl_mode", mode)
     set_setting("ssl_domain", domain)
-    set_setting("webauthn_origin", f"https://{domain}:8443")
+    set_setting("webauthn_origin", public_origin(domain))
     set_setting("webauthn_rp_id", domain)
     if origin_changing:
         with get_session() as session:
             session.query(WebAuthnCredential).delete()
     audit_service.log(
         product="system",
-        operation="ssl_upload",
+        operation="ssl_upload" if mode == "upload" else f"ssl_{mode}",
         action="upload",
         status="success",
         resource_type="ssl_certificate",
@@ -239,7 +257,7 @@ def get_status() -> SSLStatus:
     try:
         mode = get_setting("ssl_mode") or "none"
         domain = get_setting("ssl_domain") or ""
-        if mode != "upload" or not CERT_PATH.exists():
+        if mode not in _ACTIVE_MODES or not CERT_PATH.exists():
             return SSLStatus(active=False, mode=mode, domain=domain,
                              subject=None, sans=None, not_before=None,
                              not_after=None, days_until_expiry=None)

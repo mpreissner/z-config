@@ -10,6 +10,7 @@ import requests
 
 from db.database import get_session, get_setting
 from db.models import TenantConfig
+from lib.auth import DEFAULT_GOV_TIER
 from lib.crypto import CryptoAlgorithm, decrypt, encrypt, load_key
 
 
@@ -87,6 +88,7 @@ def add_tenant(
     client_secret: str,
     oneapi_base_url: str = "https://api.zsapi.net",
     govcloud: bool = False,
+    gov_tier: Optional[str] = None,
     zpa_customer_id: Optional[str] = None,
     zpa_tenant_cloud: Optional[str] = None,
     zia_tenant_id: Optional[str] = None,
@@ -106,6 +108,7 @@ def add_tenant(
             tenant.client_id = client_id
             tenant.client_secret_enc = encrypt_secret(client_secret)
             tenant.govcloud = govcloud
+            tenant.gov_cloud_tier = (gov_tier or DEFAULT_GOV_TIER) if govcloud else None
             tenant.zpa_customer_id = zpa_customer_id or None
             tenant.zpa_tenant_cloud = zpa_tenant_cloud or None
             tenant.zia_tenant_id = zia_tenant_id or None
@@ -122,6 +125,7 @@ def add_tenant(
                 client_id=client_id,
                 client_secret_enc=encrypt_secret(client_secret),
                 govcloud=govcloud,
+                gov_cloud_tier=(gov_tier or DEFAULT_GOV_TIER) if govcloud else None,
                 zpa_customer_id=zpa_customer_id or None,
                 zpa_tenant_cloud=zpa_tenant_cloud or None,
                 zia_tenant_id=zia_tenant_id or None,
@@ -154,6 +158,7 @@ def update_tenant(
     client_secret: Optional[str] = None,
     oneapi_base_url: Optional[str] = None,
     govcloud: Optional[bool] = None,
+    gov_tier: Optional[str] = None,
     zpa_customer_id: Optional[str] = None,
     zpa_tenant_cloud: Optional[str] = None,
     zia_tenant_id: Optional[str] = None,
@@ -172,6 +177,10 @@ def update_tenant(
             tenant.oneapi_base_url = oneapi_base_url.rstrip("/")
         if govcloud is not None:
             tenant.govcloud = govcloud
+            # Tier only means anything for GovCloud tenants; clear it otherwise.
+            tenant.gov_cloud_tier = (gov_tier or tenant.gov_cloud_tier or DEFAULT_GOV_TIER) if govcloud else None
+        elif gov_tier is not None and tenant.govcloud:
+            tenant.gov_cloud_tier = gov_tier
         if client_id is not None:
             tenant.client_id = client_id
         if client_secret is not None:

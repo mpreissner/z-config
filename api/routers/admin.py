@@ -4,17 +4,18 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 
 from api.dependencies import require_admin, AuthUser
 from api.auth_utils import hash_password
-from db.database import get_session, get_setting, init_db, get_db_url
+from db.database import dispose_engine, get_session, get_setting, init_db, get_db_url
 from db.models import (
-    AuditLog, RestorePoint, SyncLog, TenantConfig,
-    User, UserTenantEntitlement, ZCCResource, ZIAResource, ZPAResource,
+    AuditLog, RestorePoint, ScimGroup, ScimGroupMember, ScimToken, SyncLog,
+    TenantConfig, User, UserTenantEntitlement, ZCCResource, ZIAResource,
+    ZPAResource,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
@@ -67,6 +68,11 @@ class EntitlementCreate(BaseModel):
     tenant_id: int
 
 
+class EntitlementBulkCreate(BaseModel):
+    user_id: int
+    tenant_ids: List[int]
+
+
 # ── Users ─────────────────────────────────────────────────────────────────────
 
 def _user_out(u: User) -> dict:
@@ -78,6 +84,10 @@ def _user_out(u: User) -> dict:
         "is_active": u.is_active,
         "force_password_change": u.force_password_change,
         "mfa_required": bool(u.mfa_required),
+        # The UI disables local username/role edits on IdP-owned accounts —
+        # a SCIM sync would overwrite them on the next cycle anyway.
+        "scim_managed": bool(u.scim_managed),
+        "sso_provider": u.sso_provider,
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
     }
@@ -199,6 +209,69 @@ def create_entitlement(body: EntitlementCreate, _: AuthUser = Depends(require_ad
         return _ent_out(ent)
 
 
+@router.post("/entitlements/bulk", status_code=201)
+def create_entitlements_bulk(
+    body: EntitlementBulkCreate, _: AuthUser = Depends(require_admin)
+):
+    """Grant one user access to several tenants in a single transaction.
+
+    The UI multi-select used to POST to /entitlements once per tenant, in
+    parallel. Those requests are handled on separate threads that share one
+    database connection, so they landed in each other's transactions and the
+    grant failed outright. Doing the whole set here keeps it to one request on
+    one thread, and makes the grant atomic: either every tenant is granted or
+    none is, rather than leaving the user half-entitled with one error message
+    standing in for several different outcomes.
+    """
+    tenant_ids = list(dict.fromkeys(body.tenant_ids))  # de-dupe, keep order
+    if not tenant_ids:
+        raise HTTPException(status_code=400, detail="No tenants selected")
+
+    with get_session() as session:
+        user = session.query(User).filter_by(id=body.user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        found = {
+            t.id: t
+            for t in session.query(TenantConfig).filter(TenantConfig.id.in_(tenant_ids)).all()
+        }
+        missing = [tid for tid in tenant_ids if tid not in found]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tenant not found: {', '.join(str(t) for t in missing)}",
+            )
+
+        # Already-granted tenants are skipped rather than rejected. The modal
+        # filters them out of the picker, so one arriving here means the list
+        # went stale between opening the form and submitting it — not something
+        # the admin should have to resolve by hand.
+        already = {
+            e.tenant_id
+            for e in session.query(UserTenantEntitlement)
+            .filter(
+                UserTenantEntitlement.user_id == body.user_id,
+                UserTenantEntitlement.tenant_id.in_(tenant_ids),
+            )
+            .all()
+        }
+
+        created = []
+        for tid in tenant_ids:
+            if tid in already:
+                continue
+            ent = UserTenantEntitlement(user_id=body.user_id, tenant_id=tid)
+            session.add(ent)
+            created.append(ent)
+
+        session.flush()
+        return {
+            "granted": [_ent_out(e) for e in created],
+            "skipped": sorted(already),
+        }
+
+
 @router.delete("/entitlements/{entitlement_id}", status_code=204)
 def delete_entitlement(entitlement_id: int, _: AuthUser = Depends(require_admin)):
     with get_session() as session:
@@ -278,6 +351,70 @@ def rotate_encryption_key(body: RotateKeyRequest, _: AuthUser = Depends(require_
 
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# SQLite writes these next to the main file in WAL mode. They describe the
+# database being replaced, so they must not survive a swap — SQLite would try
+# to replay a stale WAL against the incoming file.
+_SIDECAR_SUFFIXES = ("-wal", "-shm")
+
+
+def _sqlcipher_key_from_material(raw: bytes) -> bytes:
+    """Derive the 32-byte SQLCipher key from raw secret.key file content.
+
+    Mirrors db.database._derive_sqlcipher_key(), but takes the material
+    explicitly so an uploaded key can be tested before it is installed.
+    """
+    import base64
+
+    from lib.crypto import CryptoAlgorithm, get_active_algorithm
+
+    if get_active_algorithm() == CryptoAlgorithm.FERNET:
+        return base64.urlsafe_b64decode(raw)[:32]
+    return base64.b64decode(raw)[:32]
+
+
+def _probe_database(path: Path, key_material: Optional[bytes]) -> Optional[str]:
+    """Return None if the file is a usable database, else a reason string.
+
+    A plaintext SQLite file is accepted on its header — init_db() converts it
+    to SQLCipher on first open. Anything else is treated as already encrypted,
+    where the header is ciphertext and there is no magic number to match; the
+    only way to distinguish a real SQLCipher database from arbitrary bytes is
+    to decrypt it, which also verifies the key actually fits the data.
+    """
+    with open(path, "rb") as fh:
+        header = fh.read(16)
+    if len(header) < 16:
+        return "the file is too small to be a database"
+    if header == _SQLITE_MAGIC:
+        return None
+
+    if not key_material:
+        return (
+            "the file is not plaintext SQLite, and no encryption key is available "
+            "to decrypt it — upload the matching secret.key alongside it"
+        )
+
+    try:
+        import binascii
+
+        import sqlcipher3.dbapi2 as sqlcipher
+
+        hex_key = binascii.hexlify(_sqlcipher_key_from_material(key_material)).decode()
+        conn = sqlcipher.connect(str(path))
+        try:
+            conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
+            conn.execute("SELECT count(*) FROM sqlite_master")
+        finally:
+            conn.close()
+    except Exception:
+        # Deliberately not surfacing the driver error — it varies by failure
+        # mode and adds nothing an operator can act on.
+        return (
+            "the file could not be opened — it is neither a plaintext SQLite "
+            "database nor a SQLCipher database matching the supplied key"
+        )
+    return None
+
 
 @router.post("/import-db")
 async def import_database(
@@ -288,13 +425,14 @@ async def import_database(
     """Replace the running database and (optionally) the encryption key.
 
     Accepts multipart/form-data with:
-      - db_file  — SQLite database exported from a TUI zs-config install
-      - key_file — secret.key Fernet key file (optional; omit if tenant secrets
-                   were not encrypted or you are importing into a fresh install
-                   that has not yet encrypted anything)
+      - db_file  — a zs-config database, either plaintext SQLite (older TUI
+                   exports) or SQLCipher-encrypted (anything current)
+      - key_file — secret.key material. Required when db_file is encrypted,
+                   unless this install already holds the matching key.
 
-    The endpoint writes the new files and reinitialises the SQLAlchemy engine.
-    A page reload is required after import.
+    The upload is staged and opened before anything live is touched, and the
+    previous database and key are restored if the swap or the reinitialisation
+    fails. A page reload is required after a successful import.
     """
     db_path_str = os.environ.get("ZSCALER_DB_PATH")
     if not db_path_str:
@@ -302,40 +440,93 @@ async def import_database(
 
     db_path = Path(db_path_str)
     key_dir = db_path.parent
+    key_path = key_dir / "secret.key"
 
-    # Read and validate the SQLite file
     db_bytes = await db_file.read()
-    if len(db_bytes) < 16 or db_bytes[:16] != _SQLITE_MAGIC:
-        raise HTTPException(status_code=422, detail="Uploaded file is not a valid SQLite database")
 
-    # Write atomically: write to a temp file first, then replace
-    tmp_db = db_path.with_suffix(".tmp")
-    try:
-        tmp_db.write_bytes(db_bytes)
-        if sys.platform != "win32":
-            tmp_db.chmod(0o600)
-        shutil.move(str(tmp_db), str(db_path))
-    except Exception as exc:
-        tmp_db.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Failed to write database: {exc}")
-
-    # Write key file if provided
+    new_key: Optional[str] = None
     if key_file is not None:
         key_bytes = await key_file.read()
-        key_str = key_bytes.decode().strip()
-        # Validate — must be a 44-char base64url string (Fernet key)
-        if len(key_str) != 44:
-            raise HTTPException(status_code=422, detail="Key file does not look like a valid Fernet key (expected 44 characters)")
-        key_out = key_dir / "secret.key"
-        key_out.write_text(key_str)
-        if sys.platform != "win32":
-            key_out.chmod(0o600)
+        try:
+            new_key = key_bytes.decode().strip()
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=422, detail="Key file is not valid text")
+        # Fernet keys are 44 base64url chars; the raw-byte algorithms store
+        # base64 of 32 bytes, which is also 44.
+        if len(new_key) != 44:
+            raise HTTPException(status_code=422, detail="Key file does not look like a valid key (expected 44 characters)")
 
-    # Reinitialise the database engine against the new file
+    # The candidate is opened with the uploaded key when one was supplied,
+    # otherwise with whatever this install already uses.
+    if new_key is not None:
+        probe_key: Optional[bytes] = new_key.encode()
+    elif os.environ.get("ZSCALER_SECRET_KEY"):
+        probe_key = os.environ["ZSCALER_SECRET_KEY"].encode()
+    elif key_path.exists():
+        probe_key = key_path.read_bytes().strip()
+    else:
+        probe_key = None
+
+    staged = db_path.with_suffix(".import.tmp")
     try:
+        staged.write_bytes(db_bytes)
+        if sys.platform != "win32":
+            staged.chmod(0o600)
+    except Exception as exc:
+        staged.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to write database: {exc}")
+
+    reason = _probe_database(staged, probe_key)
+    if reason is not None:
+        staged.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=f"Uploaded file rejected — {reason}.")
+
+    # Past this point live files change, so keep restorable copies of each.
+    backup_dir = Path(tempfile.mkdtemp(prefix=".zs-import-", dir=str(key_dir)))
+    saved: dict = {}
+
+    def _save(src: Path) -> None:
+        if src.exists():
+            dest = backup_dir / src.name
+            shutil.copy2(src, dest)
+            saved[src] = dest
+
+    try:
+        # Drop handles on the outgoing file before it is replaced.
+        dispose_engine()
+
+        _save(db_path)
+        _save(key_path)
+        for suffix in _SIDECAR_SUFFIXES:
+            _save(Path(str(db_path) + suffix))
+        for suffix in _SIDECAR_SUFFIXES:
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+        shutil.move(str(staged), str(db_path))
+
+        if new_key is not None:
+            key_path.write_text(new_key)
+            if sys.platform != "win32":
+                key_path.chmod(0o600)
+
         init_db()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Database reinitialisation failed: {exc}")
+        for src, dest in saved.items():
+            try:
+                shutil.copy2(dest, src)
+            except Exception:
+                pass
+        staged.unlink(missing_ok=True)
+        try:
+            init_db()  # bring the previous database back online
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Import failed and the previous database was restored: {exc}",
+        )
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
     # Seed a default admin if the imported DB has no admin accounts (e.g. TUI export)
     from api.main import seed_admin_if_needed
@@ -348,3 +539,113 @@ async def import_database(
         "temp_password": temp_password,
     }
 
+
+
+# ── SCIM provisioning ─────────────────────────────────────────────────────────
+
+class ScimTokenCreate(BaseModel):
+    label: Optional[str] = None
+
+
+class ScimGroupMapping(BaseModel):
+    mapped_role: Optional[str] = None   # 'admin' | 'user' | null to unmap
+
+
+def _scim_token_out(t: ScimToken) -> dict:
+    return {
+        "id": t.id,
+        "label": t.label,
+        # Only ever the first few characters, so an admin can tell two tokens
+        # apart without the value being usable.
+        "token_prefix": t.token_prefix,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "created_by": t.created_by,
+        "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
+        "is_active": bool(t.is_active),
+    }
+
+
+@router.get("/scim/tokens")
+def list_scim_tokens(_: AuthUser = Depends(require_admin)):
+    with get_session() as session:
+        rows = session.query(ScimToken).order_by(ScimToken.created_at.desc()).all()
+        return [_scim_token_out(t) for t in rows]
+
+
+@router.post("/scim/tokens", status_code=201)
+def create_scim_token(body: ScimTokenCreate, current: AuthUser = Depends(require_admin)):
+    """Issue a bearer token. The plaintext is returned once and never stored."""
+    from api.routers.scim import generate_token
+
+    plaintext, token_hash, prefix = generate_token()
+    with get_session() as session:
+        token = ScimToken(
+            label=body.label or None,
+            token_hash=token_hash,
+            token_prefix=prefix,
+            created_by=current.username,
+            is_active=True,
+        )
+        session.add(token)
+        session.flush()
+        session.refresh(token)
+        out = _scim_token_out(token)
+    out["token"] = plaintext
+    return out
+
+
+@router.delete("/scim/tokens/{token_id}", status_code=204)
+def revoke_scim_token(token_id: int, _: AuthUser = Depends(require_admin)):
+    with get_session() as session:
+        token = session.query(ScimToken).filter_by(id=token_id).first()
+        if not token:
+            raise HTTPException(status_code=404, detail="Token not found")
+        session.delete(token)
+
+
+@router.get("/scim/groups")
+def list_scim_groups(_: AuthUser = Depends(require_admin)):
+    with get_session() as session:
+        rows = session.query(ScimGroup).order_by(ScimGroup.display_name).all()
+        out = []
+        for g in rows:
+            count = session.query(ScimGroupMember).filter_by(group_id=g.id).count()
+            out.append({
+                "id": g.id,
+                "display_name": g.display_name,
+                "external_id": g.external_id,
+                "mapped_role": g.mapped_role,
+                "member_count": count,
+                "updated_at": g.updated_at.isoformat() if g.updated_at else None,
+            })
+        return out
+
+
+@router.put("/scim/groups/{group_id}")
+def map_scim_group(group_id: int, body: ScimGroupMapping, _: AuthUser = Depends(require_admin)):
+    """Point a provisioned group at a zs-config role, then re-apply it."""
+    if body.mapped_role not in (None, "", "admin", "user"):
+        raise HTTPException(status_code=422, detail="mapped_role must be 'admin', 'user' or null")
+
+    with get_session() as session:
+        group = session.query(ScimGroup).filter_by(id=group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        group.mapped_role = body.mapped_role or None
+        group.updated_at = datetime.utcnow()
+        session.flush()
+
+        # Members inherit the new mapping immediately rather than waiting for
+        # the IdP's next sync cycle.
+        from api.routers.scim import _reconcile_roles
+        _reconcile_roles(session, group_id)
+
+        count = session.query(ScimGroupMember).filter_by(group_id=group_id).count()
+        return {
+            "id": group.id,
+            "display_name": group.display_name,
+            "external_id": group.external_id,
+            "mapped_role": group.mapped_role,
+            "member_count": count,
+            "updated_at": group.updated_at.isoformat() if group.updated_at else None,
+        }
