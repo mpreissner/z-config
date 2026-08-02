@@ -4,11 +4,27 @@ Exposes the operations `cli/menus/plugin_menu.py` already offers — GitHub logi
 channel switching, manifest browsing, install, branch override, uninstall — so
 the web UI can manage plugins without the TUI.
 
-Three things shape the design:
+Four things shape the design:
+
+*Off unless switched on.*  The whole router is registered only when the
+environment variable named by ``MANAGER_ENV`` is set (see `api/main.py`).  On a
+deployment that has not set it these paths fall through to the SPA catch-all
+exactly like any address that was never routed, so nothing about the manager —
+not a 403, not an entry in /docs — is visible to anyone poking at the API.  The
+variable is deliberately absent from the README, the compose file and the
+sample env: it is a switch for whoever runs the deployment, found by reading
+this file.
 
 *Admin only.*  Installing a plugin runs pip against a URL and then imports the
 result into this process on the next start, so every endpoint here is behind
-`require_admin`, including the read-only ones.
+`require_plugin_admin`, including the read-only ones.  That dependency answers
+404 rather than 403 for a non-admin, so an ordinary user cannot infer the
+manager exists from the shape of the refusal.
+
+*Installing is not publishing.*  A plugin becomes usable by an account only
+once an admin grants it, per user or per SCIM group — zs-config may be shared,
+and the team that asked for a plugin is rarely everyone with a login.  The
+grant list lives in `services/plugin_entitlement_service.py`.
 
 *A GitHub auth failure is never a 401.*  The web client logs the user out when
 an authenticated call comes back 401 (`web/src/api/client.ts`), and "your
@@ -25,22 +41,55 @@ touches pip says so in its result rather than pretending the change took
 effect.
 """
 
+import os
 import threading
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import require_admin, AuthUser
+from api.dependencies import require_auth, AuthUser
 from api.jobs import store
 
 router = APIRouter(prefix="/api/v1/plugins", tags=["Plugins"])
+
+# The switch that makes the plugin manager exist at all. Undocumented on
+# purpose — see the module docstring. Set it to 1/true/yes/on before starting
+# the API to expose this router.
+MANAGER_ENV = "ZS_EXT_MODULES"
 
 # One key for every pip-mutating job: install, uninstall and the branch switch
 # all rewrite the same site-packages, so they queue behind each other.
 _PIP_JOB_KEY = "plugin:pip"
 
 _NOT_AUTHENTICATED = "Not authenticated to GitHub — log in first."
+
+
+def manager_enabled() -> bool:
+    """Whether this deployment exposes the plugin manager."""
+    return os.environ.get(MANAGER_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def require_plugin_manager(user: AuthUser = Depends(require_auth)) -> AuthUser:
+    """Any authenticated account, but only where the manager is switched on.
+
+    Kept separate from `require_plugin_admin` for the one endpoint an ordinary
+    user is allowed to ask: which plugins have been granted to them.
+    """
+    if not manager_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return user
+
+
+def require_plugin_admin(user: AuthUser = Depends(require_auth)) -> AuthUser:
+    """Admin, on a deployment where the manager is switched on.
+
+    Both failures answer 404 with FastAPI's own wording: a 403 would tell a
+    non-admin that there is a plugin manager here to be refused access to.
+    """
+    if not manager_enabled() or user.role != "admin":
+        raise HTTPException(status_code=404, detail="Not Found")
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +157,7 @@ def _audit(operation: str, action: str, status: str, package: str, **details) ->
 # ---------------------------------------------------------------------------
 
 @router.get("")
-def list_installed(user: AuthUser = Depends(require_admin)):
+def list_installed(user: AuthUser = Depends(require_plugin_admin)):
     """Plugins discovered via entry points in the running interpreter."""
     from lib.plugin_manager import get_installed_plugins
 
@@ -116,7 +165,7 @@ def list_installed(user: AuthUser = Depends(require_admin)):
 
 
 @router.get("/status")
-def plugin_status(verify: bool = True, user: AuthUser = Depends(require_admin)):
+def plugin_status(verify: bool = True, user: AuthUser = Depends(require_plugin_admin)):
     """Manager state: GitHub session, channel, overrides, deferred install.
 
     `verify=false` skips the round trip to GitHub and reports only whether a
@@ -153,7 +202,7 @@ def plugin_status(verify: bool = True, user: AuthUser = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 
 @router.post("/auth/device", status_code=202)
-def start_github_login(user: AuthUser = Depends(require_admin)):
+def start_github_login(user: AuthUser = Depends(require_plugin_admin)):
     """Begin GitHub device-flow login. Returns the code to enter, plus a job_id.
 
     The browser that completes this is the user's, not the server's, so the
@@ -207,7 +256,7 @@ def start_github_login(user: AuthUser = Depends(require_admin)):
 
 
 @router.delete("/auth")
-def github_logout(user: AuthUser = Depends(require_admin)):
+def github_logout(user: AuthUser = Depends(require_plugin_admin)):
     """Discard the stored GitHub token. Installed plugins keep working."""
     from lib.github_auth import logout
 
@@ -221,7 +270,7 @@ def github_logout(user: AuthUser = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 
 @router.get("/available")
-def list_available(user: AuthUser = Depends(require_admin)):
+def list_available(user: AuthUser = Depends(require_plugin_admin)):
     """Manifest entries for the active channel, annotated with install state.
 
     `install_url` is the URL this host would actually use — channel and any
@@ -254,7 +303,7 @@ def list_available(user: AuthUser = Depends(require_admin)):
 
 
 @router.get("/{package}/branches")
-def list_branches(package: str, user: AuthUser = Depends(require_admin)):
+def list_branches(package: str, user: AuthUser = Depends(require_plugin_admin)):
     """Feature branches available for a plugin, for the branch override flow."""
     from lib.plugin_manager import fetch_plugin_branches
 
@@ -274,7 +323,7 @@ class ChannelRequest(BaseModel):
 
 
 @router.put("/channel")
-def set_channel(body: ChannelRequest, user: AuthUser = Depends(require_admin)):
+def set_channel(body: ChannelRequest, user: AuthUser = Depends(require_plugin_admin)):
     """Switch between the stable and dev plugin channels.
 
     Takes effect on the next install — nothing already installed changes here.
@@ -333,7 +382,7 @@ def _resolve_install_url(body: InstallRequest) -> tuple[str, str]:
 
 
 @router.post("/install", status_code=202)
-def install(body: InstallRequest, user: AuthUser = Depends(require_admin)):
+def install(body: InstallRequest, user: AuthUser = Depends(require_plugin_admin)):
     """Install a plugin from the manifest or a git URL. Returns a job_id.
 
     Backgrounded because pip clones and builds; `install_plugin` caps it at 120
@@ -385,7 +434,7 @@ class BranchOverrideRequest(BaseModel):
 
 @router.put("/{package}/branch", status_code=202)
 def set_branch(
-    package: str, body: BranchOverrideRequest, user: AuthUser = Depends(require_admin)
+    package: str, body: BranchOverrideRequest, user: AuthUser = Depends(require_plugin_admin)
 ):
     """Pin a plugin to a git branch, or clear the pin, and reinstall it.
 
@@ -494,6 +543,94 @@ def set_branch(
 
 
 # ---------------------------------------------------------------------------
+# Entitlements
+#
+# Declared before DELETE /{package} for the same reason as the section below:
+# /entitlements/{id} is two segments and safe, but keeping the whole literal
+# family above the wildcard means a later addition cannot be swallowed by it.
+# ---------------------------------------------------------------------------
+
+class EntitlementGrant(BaseModel):
+    package: str
+    user_ids: List[int] = []
+    group_ids: List[int] = []
+
+
+@router.get("/entitled")
+def my_plugins(user: AuthUser = Depends(require_plugin_manager)):
+    """Which plugins the calling account may use.
+
+    The one endpoint here an ordinary user may call: it answers only about
+    them, and an account with no grants gets an empty list, which is also what
+    a deployment with no plugins returns.  `unrestricted` is true for admins,
+    who are not checked against the grant list at all.
+    """
+    from services import plugin_entitlement_service
+
+    packages = plugin_entitlement_service.entitled_packages(user.user_id, user.role)
+    return {
+        "packages": packages if packages is not None else [],
+        "unrestricted": packages is None,
+    }
+
+
+@router.get("/entitlements")
+def list_entitlements(package: Optional[str] = None,
+                      user: AuthUser = Depends(require_plugin_admin)):
+    """Every plugin grant, or those for one package."""
+    from services import plugin_entitlement_service
+
+    if package:
+        _validate_package(package)
+    return {"entitlements": plugin_entitlement_service.list_entitlements(package)}
+
+
+@router.post("/entitlements", status_code=201)
+def grant_entitlement(body: EntitlementGrant,
+                      user: AuthUser = Depends(require_plugin_admin)):
+    """Grant a plugin to users and/or SCIM groups.
+
+    Granting does not require the plugin to be installed — an admin can line
+    up access for a package before or after the install job finishes, and a
+    branch switch briefly uninstalls the very plugin being granted.
+    """
+    from services import plugin_entitlement_service
+
+    package = _validate_package(body.package)
+    try:
+        result = plugin_entitlement_service.grant(
+            package,
+            user_ids=body.user_ids,
+            group_ids=body.group_ids,
+            granted_by=user.username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if result["granted"]:
+        _audit("plugin_entitlement", "CREATE", "SUCCESS", package,
+               user_ids=[e["user_id"] for e in result["granted"] if e["user_id"]],
+               group_ids=[e["group_id"] for e in result["granted"] if e["group_id"]])
+    return result
+
+
+@router.delete("/entitlements/{entitlement_id}", status_code=204)
+def revoke_entitlement(entitlement_id: int,
+                       user: AuthUser = Depends(require_plugin_admin)):
+    """Revoke one grant. Takes effect on the holder's next request."""
+    from services import plugin_entitlement_service
+
+    rows = plugin_entitlement_service.list_entitlements()
+    row = next((r for r in rows if r["id"] == entitlement_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Entitlement not found")
+
+    plugin_entitlement_service.revoke(entitlement_id)
+    _audit("plugin_entitlement", "DELETE", "SUCCESS", row["package"],
+           user_id=row["user_id"], group_id=row["group_id"])
+
+
+# ---------------------------------------------------------------------------
 # Deferred install
 #
 # Declared before DELETE /{package}: FastAPI matches in declaration order, and
@@ -501,7 +638,7 @@ def set_branch(
 # ---------------------------------------------------------------------------
 
 @router.delete("/pending-install")
-def clear_pending(user: AuthUser = Depends(require_admin)):
+def clear_pending(user: AuthUser = Depends(require_plugin_admin)):
     """Drop a deferred install left behind by a failed branch switch.
 
     Without this, a pending record that can never succeed would be retried on
@@ -519,7 +656,7 @@ def clear_pending(user: AuthUser = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 
 @router.get("/{package}/data")
-def plugin_data(package: str, user: AuthUser = Depends(require_admin)):
+def plugin_data(package: str, user: AuthUser = Depends(require_plugin_admin)):
     """What a purging uninstall of this plugin would remove.
 
     Read-only.  The UI shows this before asking to confirm, so the damage is
@@ -534,13 +671,15 @@ def plugin_data(package: str, user: AuthUser = Depends(require_admin)):
 
 @router.delete("/{package}", status_code=202)
 def uninstall(
-    package: str, purge_data: bool = False, user: AuthUser = Depends(require_admin)
+    package: str, purge_data: bool = False, user: AuthUser = Depends(require_plugin_admin)
 ):
     """Uninstall a plugin, optionally removing its data. Returns a job_id.
 
     `purge_data` drops the tables the plugin declares and runs its teardown
-    hook; objects it already pushed to a tenant are untouched, because a
-    successful push reverts them to ordinary tenant config.
+    hook, and revokes every grant for the package; objects it already pushed to
+    a tenant are untouched, because a successful push reverts them to ordinary
+    tenant config.  A plain uninstall keeps the grants, so reinstalling or
+    switching branch does not make the admin re-entitle everyone.
     """
     from lib.plugin_manager import uninstall_plugin
 
@@ -566,14 +705,21 @@ def uninstall(
                    purge_data=purge_data, error=message)
             return
 
+        revoked = 0
+        if purge_data:
+            from services import plugin_entitlement_service
+            revoked = plugin_entitlement_service.revoke_package(package)
+
         store.complete(job_id, {
             "uninstalled": True,
             "package": package,
             "purged_data": purge_data,
+            "revoked_entitlements": revoked,
             "message": message,
             "restart_required": True,
         })
-        _audit("plugin_uninstall", "DELETE", "SUCCESS", package, purge_data=purge_data)
+        _audit("plugin_uninstall", "DELETE", "SUCCESS", package,
+               purge_data=purge_data, revoked_entitlements=revoked)
 
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id, "already_running": False}
