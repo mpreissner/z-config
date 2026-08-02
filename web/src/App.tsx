@@ -26,6 +26,10 @@ import { fetchTenants } from "./api/tenants";
 // every deployment serves.
 const AdminPluginsPage = lazy(() => import("./pages/AdminPluginsPage"));
 
+// Likewise for the page entitled users see. A deployment with no plugins never
+// fetches either chunk.
+const PluginPage = lazy(() => import("./pages/PluginPage"));
+
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useAuth();
   const { data: tenants } = useQuery({
@@ -102,6 +106,17 @@ export default function App() {
                   <Route
                     path="/admin/settings"
                     element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
+                  />
+                  {/* One route for every plugin. Entitlement is enforced by
+                      the API — a package the account was not granted answers
+                      404 exactly as an uninstalled one does. */}
+                  <Route
+                    path="/plugins/:pkg"
+                    element={
+                      <Suspense fallback={<LoadingSpinner />}>
+                        <PluginPage />
+                      </Suspense>
+                    }
                   />
                   <Route
                     path="/admin/plugins"

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { probePluginManager } from "../api/plugins";
+import { probePluginManager, fetchEntitledPlugins, EntitledPlugin } from "../api/plugins";
 import { useAuth } from "../context/AuthContext";
 
 /**
@@ -34,4 +34,28 @@ export function usePluginManagerProbe(): { available: boolean; resolved: boolean
     retry: false,
   });
   return { available: isAdmin && data === true, resolved: !isAdmin || isFetched };
+}
+
+/**
+ * The plugins this account may open — the source of the per-plugin nav items.
+ *
+ * Separate from the probe above, which asks an admin-only question and so
+ * answers false for the ordinary users this is for. /plugins/entitled is
+ * readable by any session, tells the caller only about itself, and comes back
+ * empty on a deployment that never switched the manager on, so the nav needs no
+ * feature flag of its own.
+ *
+ * Not cached for the session like the probe: an admin can grant or revoke while
+ * the tab is open, and the nav should catch up on the next window focus.
+ */
+export function useEntitledPlugins(): { plugins: EntitledPlugin[]; resolved: boolean } {
+  const { isAuthenticated } = useAuth();
+  const { data, isFetched } = useQuery({
+    queryKey: ["entitled-plugins"],
+    queryFn: fetchEntitledPlugins,
+    enabled: isAuthenticated,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  return { plugins: data ?? [], resolved: isFetched };
 }

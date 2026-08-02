@@ -6,7 +6,13 @@ Plugins are pip-installable packages that declare themselves via:
     my-plugin = "my_package.plugin:register"
 
 The register() function must return:
-    {"name": "Display Name", "menu": callable}
+    {"name": "Display Name", "menu": callable, "web": {...}}
+
+`menu` is the TUI entry point, deprecated along with the rest of the TUI in
+v4.0.0. `web` is the declarative description of the plugin's web interface —
+actions, their parameters, and the callables that run them. `lib/plugin_web.py`
+defines that contract; nothing here interprets it beyond passing it through.
+Both keys are optional, but a plugin with neither cannot be reached by anyone.
 
 Available plugins are listed in manifest.json in the private manifest repo,
 fetched via the GitHub API using the authenticated token.
@@ -84,12 +90,14 @@ def get_installed_plugins() -> list[dict]:
                 **base,
                 "name":  info.get("name", ep.name),
                 "menu":  info.get("menu"),
+                "web":   info.get("web"),
             })
         except Exception as exc:
             plugins.append({
                 **base,
                 "name":  ep.name,
                 "menu":  None,
+                "web":   None,
                 "error": str(exc),
             })
     return plugins
