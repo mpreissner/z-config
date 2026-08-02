@@ -836,6 +836,305 @@ def delete_snapshot(
 
 
 # ------------------------------------------------------------------
+# Snapshot restore
+#
+# Restores the tenant to a snapshot taken from that same tenant. Distinct
+# from POST /tenants/{id}/snapshots/apply, which pushes one tenant's snapshot
+# onto a *different* tenant and never deletes: a restore is only a restore if
+# resources created since the snapshot are removed.
+#
+# Mirrors the TUI flow in cli/menus/snapshots_menu.py:216.
+# ------------------------------------------------------------------
+
+def _load_zia_snapshot(tenant_id: int, snapshot_id: int) -> dict:
+    """Load a ZIA snapshot belonging to this tenant, or 404."""
+    from db.database import get_session
+    from db.models import RestorePoint
+
+    with get_session() as session:
+        snap = session.query(RestorePoint).filter_by(
+            id=snapshot_id, tenant_id=tenant_id, product="ZIA"
+        ).first()
+        if not snap:
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        return {
+            "name": snap.name,
+            "comment": snap.comment,
+            "created_at": snap.created_at.isoformat() if snap.created_at else None,
+            "resource_count": snap.resource_count,
+            "resources": snap.snapshot["resources"],
+        }
+
+
+@router.post("/{tenant}/snapshots/{snapshot_id}/restore/preview", status_code=202)
+def preview_snapshot_restore(
+    tenant: str, snapshot_id: int, user: AuthUser = Depends(require_auth)
+):
+    """Classify a snapshot restore without writing. Returns a job_id.
+
+    Backgrounded because classification runs a full live import first.
+    """
+    import threading
+    from api.jobs import store
+    from services.zia_push_service import ZIAPushService
+
+    svc = _get_service(tenant, user)
+    snap = _load_zia_snapshot(svc.tenant_id, snapshot_id)
+    job_id = store.create()
+
+    def run():
+        try:
+            service = ZIAPushService(svc.client, tenant_id=svc.tenant_id)
+
+            def on_import_progress(resource_type: str, done: int, total: int):
+                store.append(job_id, {
+                    "type": "progress", "phase": "import",
+                    "resource_type": resource_type, "done": done, "total": total,
+                })
+
+            dry_run = service.classify_baseline(
+                {"product": "ZIA", "resources": snap["resources"]},
+                import_progress_callback=on_import_progress,
+            )
+            # Must follow classify_baseline: it imports live state into the DB
+            # that classify_snapshot_deletes then reads.
+            delete_candidates = service.classify_snapshot_deletes(snap["resources"])
+
+            creates, updates, _ = dry_run.changes_by_action()
+            store.complete(job_id, {
+                "snapshot_name": snap["name"],
+                "snapshot_comment": snap["comment"],
+                "snapshot_created": snap["created_at"],
+                "snapshot_resource_count": snap["resource_count"],
+                "creates": dry_run.create_count,
+                "updates": dry_run.update_count,
+                "deletes": len(delete_candidates),
+                "skips": dry_run.skip_count,
+                "items": (
+                    [{"action": "create", "resource_type": rt, "name": n} for rt, n in creates]
+                    + [{"action": "update", "resource_type": rt, "name": n} for rt, n in updates]
+                    + [{"action": "delete", "resource_type": r.resource_type, "name": r.name}
+                       for r in delete_candidates]
+                ),
+            })
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+class SnapshotRestoreRequest(BaseModel):
+    delete_extras: bool = True   # remove resources absent from the snapshot
+    remediate: bool = True       # re-push anything the verify pass finds missing
+    activate: bool = False       # activate remaining changes when the restore finishes
+
+
+@router.post("/{tenant}/snapshots/{snapshot_id}/restore", status_code=202)
+def restore_snapshot(
+    tenant: str,
+    snapshot_id: int,
+    body: Optional[SnapshotRestoreRequest] = None,
+    user: AuthUser = Depends(require_auth),
+):
+    """Restore this tenant to one of its own snapshots. Returns a job_id.
+
+    `delete_extras` defaults to True: resources created since the snapshot are
+    removed, which is what makes this a restore rather than a merge. Call the
+    preview endpoint first to show the user what that covers.
+    """
+    import threading
+    from api.jobs import store
+    from services import audit_service
+    from services.zia_push_service import ZIAPushService, _PushCancelled
+
+    body = body or SnapshotRestoreRequest()
+    svc = _get_service(tenant, user)
+    snap = _load_zia_snapshot(svc.tenant_id, snapshot_id)
+    job_id = store.create()
+
+    def run():
+        service = ZIAPushService(svc.client, tenant_id=svc.tenant_id)
+        baseline = {"product": "ZIA", "resources": snap["resources"]}
+        counters: Dict[str, int] = {}
+
+        def on_import_progress(resource_type: str, done: int, total: int, phase: str = "import"):
+            store.append(job_id, {
+                "type": "progress", "phase": phase,
+                "resource_type": resource_type, "done": done, "total": total,
+            })
+
+        def push_progress(phase: str):
+            def cb(_pass_num, resource_type, record):
+                counters[phase] = counters.get(phase, 0) + 1
+                store.append(job_id, {
+                    "type": "progress", "phase": phase,
+                    "resource_type": resource_type, "name": record.name,
+                    "status": record.status, "done": counters[phase],
+                })
+            return cb
+
+        def delete_progress(_pass_num, resource_type, record):
+            counters["delete"] = counters.get("delete", 0) + 1
+            store.append(job_id, {
+                "type": "progress", "phase": "delete",
+                "resource_type": resource_type, "name": record.name,
+                "status": record.status, "done": counters["delete"],
+            })
+
+        stop_fn = lambda: store.is_cancel_requested(job_id)
+
+        try:
+            dry_run = service.classify_baseline(
+                baseline, import_progress_callback=on_import_progress
+            )
+            delete_candidates = (
+                service.classify_snapshot_deletes(snap["resources"])
+                if body.delete_extras else []
+            )
+
+            push_records: List[Any] = []
+            try:
+                if dry_run.create_count or dry_run.update_count:
+                    push_records = service.push_classified(
+                        dry_run, progress_callback=push_progress("push"), stop_fn=stop_fn
+                    )
+            except _PushCancelled as exc:
+                rollback = service.rollback_pushed(exc.pushed_records)
+                store.complete(job_id, {
+                    "cancelled": True,
+                    "rolled_back": sum(
+                        1 for r in rollback
+                        if r.status in ("rollback_deleted", "rollback_restored")
+                    ),
+                    "rollback_failed": sum(
+                        1 for r in rollback if r.status.startswith("rollback_failed")
+                    ),
+                })
+                return
+
+            # Verify pass 1 — creates and updates.
+            discrepancies: List[dict] = []
+            if push_records:
+                try:
+                    verify1 = service.verify_push(
+                        baseline,
+                        import_progress_callback=lambda rt, d, t: on_import_progress(
+                            rt, d, t, phase="verify"),
+                    )
+                except Exception as exc:
+                    store.append(job_id, {"type": "warning",
+                                          "message": f"Verify pass 1 failed: {exc}"})
+                    verify1 = None
+
+                if verify1 is not None:
+                    v_creates, v_updates, v_deletes = verify1.changes_by_action()
+                    # Resources queued for deletion are expected to still be
+                    # present — deletes have not run yet.
+                    pending = {(r.resource_type, r.name) for r in delete_candidates}
+                    v_deletes = [(rt, n) for rt, n in v_deletes if (rt, n) not in pending]
+                    discrepancies = (
+                        [{"issue": "not_created", "resource_type": rt, "name": n}
+                         for rt, n in v_creates]
+                        + [{"issue": "config_mismatch", "resource_type": rt, "name": n}
+                           for rt, n in v_updates]
+                        + [{"issue": "not_deleted", "resource_type": rt, "name": n}
+                           for rt, n in v_deletes]
+                    )
+                    if discrepancies and body.remediate:
+                        push_records += service.push_classified(
+                            verify1, progress_callback=push_progress("remediate")
+                        )
+
+            # Deletes.
+            delete_records: List[Any] = []
+            deleted = 0
+            if delete_candidates:
+                delete_records = service.execute_deletes(
+                    delete_candidates, progress_callback=delete_progress
+                )
+                deleted = sum(1 for r in delete_records if r.is_deleted)
+
+                # Deletes are not live until activated, and verify pass 2 reads
+                # live state — without this it reports every delete as failed.
+                if deleted:
+                    store.append(job_id, {"type": "progress", "phase": "activate",
+                                          "message": "Activating deletions..."})
+                    try:
+                        svc.client.activate()
+                    except Exception as exc:
+                        store.append(job_id, {
+                            "type": "warning",
+                            "message": f"Activation after deletes failed: {exc}",
+                        })
+
+            # Verify pass 2 — deletions.
+            still_present: List[dict] = []
+            if delete_candidates:
+                try:
+                    still = service.verify_deleted(
+                        delete_candidates,
+                        import_progress_callback=lambda rt, d, t: on_import_progress(
+                            rt, d, t, phase="verify"),
+                    )
+                    still_present = [{"resource_type": r.resource_type, "name": r.name}
+                                     for r in still]
+                except Exception as exc:
+                    store.append(job_id, {"type": "warning",
+                                          "message": f"Verify pass 2 failed: {exc}"})
+
+            created = sum(1 for r in push_records if r.is_created)
+            updated = sum(1 for r in push_records if r.is_updated)
+            failed_items = [
+                {"resource_type": r.resource_type, "name": r.name, "reason": r.failure_reason}
+                for r in push_records + delete_records if r.is_failed
+            ]
+            status = "SUCCESS" if not failed_items and not still_present else "PARTIAL"
+
+            activated = False
+            if body.activate:
+                try:
+                    svc.client.activate()
+                    activated = True
+                except Exception as exc:
+                    store.append(job_id, {"type": "warning",
+                                          "message": f"Activation failed: {exc}"})
+
+            audit_service.log(
+                product="ZIA", operation="restore_snapshot", action="UPDATE",
+                status=status, tenant_id=svc.tenant_id,
+                resource_type="snapshot", resource_id=str(snapshot_id),
+                resource_name=snap["name"],
+                details={"created": created, "updated": updated, "deleted": deleted,
+                         "failed": len(failed_items), "delete_extras": body.delete_extras},
+            )
+
+            store.complete(job_id, {
+                "status": status,
+                "snapshot_name": snap["name"],
+                "created": created,
+                "updated": updated,
+                "deleted": deleted,
+                "failed": len(failed_items),
+                "failed_items": failed_items,
+                "discrepancies": discrepancies,
+                "still_present": still_present,
+                "activated": activated,
+            })
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+            audit_service.log(
+                product="ZIA", operation="restore_snapshot", action="UPDATE",
+                status="FAILURE", tenant_id=svc.tenant_id,
+                resource_type="snapshot", resource_id=str(snapshot_id),
+                resource_name=snap["name"], error_message=str(exc),
+            )
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+# ------------------------------------------------------------------
 # Organization
 # ------------------------------------------------------------------
 
