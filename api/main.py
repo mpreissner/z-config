@@ -247,7 +247,12 @@ app.include_router(jobs_router.router)
 app.include_router(scheduled_tasks_router.router)
 app.include_router(templates_router.router)
 app.include_router(sso_router.router)
-app.include_router(plugins_router.router)
+# Registered only where the deployment asks for it (plugins_router.MANAGER_ENV).
+# Left out, /api/v1/plugins/* is not a route at all: it falls through to the SPA
+# catch-all like any unknown address, so the manager leaves no trace in the API
+# or in /docs for a deployment that does not run plugins.
+if plugins_router.manager_enabled():
+    app.include_router(plugins_router.router)
 # Mounted at its own /scim/v2 root — provisioning clients expect that path and
 # authenticate with an opaque bearer token rather than a session JWT.
 app.include_router(scim_router.router)

@@ -1,3 +1,4 @@
+import { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Layout from "./components/Layout";
@@ -15,8 +16,14 @@ import AdminUsersPage from "./pages/AdminUsersPage";
 import AdminEntitlementsPage from "./pages/AdminEntitlementsPage";
 import AdminSettingsPage from "./pages/AdminSettingsPage";
 import ProfilePage from "./pages/ProfilePage";
+import LoadingSpinner from "./components/LoadingSpinner";
 import { useAuth } from "./context/AuthContext";
+import { usePluginManagerProbe } from "./hooks/usePluginManager";
 import { fetchTenants } from "./api/tenants";
+
+// Split out so the manager's code lands in its own chunk instead of the bundle
+// every deployment serves.
+const AdminPluginsPage = lazy(() => import("./pages/AdminPluginsPage"));
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useAuth();
@@ -31,6 +38,14 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to={`/tenant/${tenants[0].id}/zia`} replace />;
   }
   return <Navigate to="/tenants" replace />;
+}
+
+/** Admin, and only on a deployment that registered the plugin API. */
+function PluginRoute({ children }: { children: React.ReactNode }) {
+  const { available, resolved } = usePluginManagerProbe();
+  if (!resolved) return <LoadingSpinner />;
+  if (!available) return <Navigate to="/tenants" replace />;
+  return <>{children}</>;
 }
 
 function RootRedirect() {
@@ -82,6 +97,16 @@ export default function App() {
                   <Route
                     path="/admin/settings"
                     element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
+                  />
+                  <Route
+                    path="/admin/plugins"
+                    element={
+                      <PluginRoute>
+                        <Suspense fallback={<LoadingSpinner />}>
+                          <AdminPluginsPage />
+                        </Suspense>
+                      </PluginRoute>
+                    }
                   />
                 </Routes>
               </Layout>

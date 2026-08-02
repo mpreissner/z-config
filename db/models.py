@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text,
+    UniqueConstraint, text,
+)
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -513,6 +516,51 @@ class ScimGroupMember(Base):
 
     def __repr__(self) -> str:
         return f"<ScimGroupMember group_id={self.group_id} user_id={self.user_id}>"
+
+
+class PluginEntitlement(Base):
+    """Grants one user, or one group's members, the use of an installed plugin.
+
+    Installing a plugin does not expose it: on a shared deployment the admin
+    who installed it still has to name who may use it. A row here is that
+    grant. Exactly one of user_id / group_id is set — a user grant names an
+    account directly, a group grant follows SCIM group membership, so an
+    account that leaves the group loses the plugin without anyone editing
+    this table.
+
+    package is the distribution name rather than a foreign key, because
+    plugins live in site-packages and have no row of their own. Grants
+    therefore survive a reinstall or version switch; only a purging
+    uninstall clears them.
+
+    Admins bypass this table, exactly as they bypass UserTenantEntitlement.
+    """
+
+    __tablename__ = "plugin_entitlements"
+    __table_args__ = (
+        # SQLite treats NULLs as distinct in a UNIQUE constraint, so a plain
+        # UniqueConstraint("package", "user_id", "group_id") would let the same
+        # user grant be inserted twice. Two partial indexes constrain the half
+        # of each row that is actually populated.
+        Index("uq_plugin_ent_user", "package", "user_id",
+              unique=True, sqlite_where=text("user_id IS NOT NULL")),
+        Index("uq_plugin_ent_group", "package", "group_id",
+              unique=True, sqlite_where=text("group_id IS NOT NULL")),
+    )
+
+    id         = Column(Integer, primary_key=True)
+    package    = Column(String(255), nullable=False)
+    user_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    group_id   = Column(Integer, ForeignKey("scim_groups.id", ondelete="CASCADE"), nullable=True)
+    granted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    granted_by = Column(String(255), nullable=True)
+
+    user  = relationship("User", backref="plugin_entitlements")
+    group = relationship("ScimGroup", backref="plugin_entitlements")
+
+    def __repr__(self) -> str:
+        subject = f"user_id={self.user_id}" if self.user_id else f"group_id={self.group_id}"
+        return f"<PluginEntitlement package={self.package!r} {subject}>"
 
 
 class ScheduledTask(Base):

@@ -322,6 +322,21 @@ def _migrate(engine) -> None:
         "ALTER TABLE users ADD COLUMN scim_managed BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN given_name VARCHAR(255)",
         "ALTER TABLE users ADD COLUMN family_name VARCHAR(255)",
+        # Per-plugin access grants. Exactly one of user_id / group_id is set;
+        # the partial indexes below are what stop a duplicate grant, since
+        # SQLite counts NULLs as distinct in a plain UNIQUE.
+        """CREATE TABLE IF NOT EXISTS plugin_entitlements (
+            id INTEGER PRIMARY KEY,
+            package VARCHAR(255) NOT NULL,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            group_id INTEGER REFERENCES scim_groups(id) ON DELETE CASCADE,
+            granted_at DATETIME NOT NULL,
+            granted_by VARCHAR(255)
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_ent_user
+           ON plugin_entitlements (package, user_id) WHERE user_id IS NOT NULL""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_ent_group
+           ON plugin_entitlements (package, group_id) WHERE group_id IS NOT NULL""",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

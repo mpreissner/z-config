@@ -5,6 +5,7 @@ import { fetchHealth } from "../api/system";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { useAuth } from "../context/AuthContext";
 import { useActiveTenant } from "../context/ActiveTenantContext";
+import { usePluginManagerAvailable } from "../hooks/usePluginManager";
 import { fetchTenants, Tenant } from "../api/tenants";
 import zLogo from "../assets/z-logo.jpg";
 
@@ -82,6 +83,13 @@ export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const [tenantsOpen, setTenantsOpen] = useState(true);
   const [adminOpen, setAdminOpen] = useState(true);
+
+  // Absent unless this deployment runs the plugin manager — see
+  // usePluginManagerAvailable(). Last in the list, below Settings.
+  const pluginManager = usePluginManagerAvailable();
+  const adminItems = pluginManager
+    ? [...adminNavItems, { to: "/admin/plugins", label: "Plugins" }]
+    : adminNavItems;
 
   const { data: tenants } = useQuery({
     queryKey: ["tenants"],
@@ -226,7 +234,7 @@ export default function Layout({ children }: LayoutProps) {
               </button>
               {adminOpen && (
                 <div className="mt-0.5 ml-2 space-y-0.5">
-                  {adminNavItems.map((item) => (
+                  {adminItems.map((item) => (
                     <NavLink
                       key={item.to}
                       to={item.to}
