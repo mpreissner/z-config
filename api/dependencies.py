@@ -65,17 +65,16 @@ def require_admin(user: AuthUser = Depends(require_auth)) -> AuthUser:
 def check_tenant_access(tenant_id: int, user: AuthUser) -> None:
     """Raise 404 if user has no entitlement for tenant_id.
 
+    A grant to any group the account belongs to counts, exactly as a direct
+    grant does — group_service.effective_tenant_ids() is the one place that
+    union is computed, so this and the tenant listing can never disagree.
+
     Always enforced regardless of role — admins are not exempt.
     Use an explicit `if user.role != "admin"` guard before calling this
     for endpoints that intentionally allow admins through.
     Uses 404 (not 403) to avoid leaking tenant existence to unauthorized users.
     Must never be called from inside an existing with get_session() block.
     """
-    from db.database import get_session
-    from db.models import UserTenantEntitlement
-    with get_session() as session:
-        row = session.query(UserTenantEntitlement).filter_by(
-            user_id=user.user_id, tenant_id=tenant_id
-        ).first()
-    if not row:
+    from services.group_service import effective_tenant_ids
+    if tenant_id not in effective_tenant_ids(user.user_id):
         raise HTTPException(status_code=404, detail="Tenant not found")

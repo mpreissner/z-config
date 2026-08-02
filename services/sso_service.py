@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from db.database import get_session, get_setting
-from db.models import ScimGroup, ScimGroupMember, User
+from db.models import UserGroup, UserGroupMember, User
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -463,7 +463,7 @@ def role_for_groups(session, group_names: List[str], default_role: str) -> str:
     if not group_names:
         return default_role
     lowered = {g.lower() for g in group_names}
-    rows = session.query(ScimGroup).filter(ScimGroup.mapped_role.isnot(None)).all()
+    rows = session.query(UserGroup).filter(UserGroup.mapped_role.isnot(None)).all()
     roles = {r.mapped_role for r in rows if r.display_name.lower() in lowered}
     if "admin" in roles:
         return "admin"
@@ -538,9 +538,9 @@ def resolve_user(cfg: SsoConfig, identity: Identity) -> Tuple[int, str, str]:
 def group_names_for_user(user_id: int) -> List[str]:
     with get_session() as session:
         rows = (
-            session.query(ScimGroup.display_name)
-            .join(ScimGroupMember, ScimGroupMember.group_id == ScimGroup.id)
-            .filter(ScimGroupMember.user_id == user_id)
+            session.query(UserGroup.display_name)
+            .join(UserGroupMember, UserGroupMember.group_id == UserGroup.id)
+            .filter(UserGroupMember.user_id == user_id)
             .all()
         )
     return [r[0] for r in rows]

@@ -13,7 +13,7 @@ from api.dependencies import require_admin, AuthUser
 from api.auth_utils import hash_password
 from db.database import dispose_engine, get_session, get_setting, init_db, get_db_url
 from db.models import (
-    AuditLog, RestorePoint, ScimGroup, ScimGroupMember, ScimToken, SyncLog,
+    AuditLog, RestorePoint, ScimToken, SyncLog,
     TenantConfig, User, UserTenantEntitlement, ZCCResource, ZIAResource,
     ZPAResource,
 )
@@ -547,10 +547,6 @@ class ScimTokenCreate(BaseModel):
     label: Optional[str] = None
 
 
-class ScimGroupMapping(BaseModel):
-    mapped_role: Optional[str] = None   # 'admin' | 'user' | null to unmap
-
-
 def _scim_token_out(t: ScimToken) -> dict:
     return {
         "id": t.id,
@@ -603,49 +599,6 @@ def revoke_scim_token(token_id: int, _: AuthUser = Depends(require_admin)):
         session.delete(token)
 
 
-@router.get("/scim/groups")
-def list_scim_groups(_: AuthUser = Depends(require_admin)):
-    with get_session() as session:
-        rows = session.query(ScimGroup).order_by(ScimGroup.display_name).all()
-        out = []
-        for g in rows:
-            count = session.query(ScimGroupMember).filter_by(group_id=g.id).count()
-            out.append({
-                "id": g.id,
-                "display_name": g.display_name,
-                "external_id": g.external_id,
-                "mapped_role": g.mapped_role,
-                "member_count": count,
-                "updated_at": g.updated_at.isoformat() if g.updated_at else None,
-            })
-        return out
-
-
-@router.put("/scim/groups/{group_id}")
-def map_scim_group(group_id: int, body: ScimGroupMapping, _: AuthUser = Depends(require_admin)):
-    """Point a provisioned group at a zs-config role, then re-apply it."""
-    if body.mapped_role not in (None, "", "admin", "user"):
-        raise HTTPException(status_code=422, detail="mapped_role must be 'admin', 'user' or null")
-
-    with get_session() as session:
-        group = session.query(ScimGroup).filter_by(id=group_id).first()
-        if not group:
-            raise HTTPException(status_code=404, detail="Group not found")
-        group.mapped_role = body.mapped_role or None
-        group.updated_at = datetime.utcnow()
-        session.flush()
-
-        # Members inherit the new mapping immediately rather than waiting for
-        # the IdP's next sync cycle.
-        from api.routers.scim import _reconcile_roles
-        _reconcile_roles(session, group_id)
-
-        count = session.query(ScimGroupMember).filter_by(group_id=group_id).count()
-        return {
-            "id": group.id,
-            "display_name": group.display_name,
-            "external_id": group.external_id,
-            "mapped_role": group.mapped_role,
-            "member_count": count,
-            "updated_at": group.updated_at.isoformat() if group.updated_at else None,
-        }
+# Groups — including the SCIM-provisioned ones this section used to serve —
+# live at /api/v1/admin/groups (api/routers/groups.py). They are no longer a
+# SCIM-only concept, so the endpoints moved with them.
