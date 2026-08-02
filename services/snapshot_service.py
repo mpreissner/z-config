@@ -72,13 +72,18 @@ def get_snapshot_data_current(tenant_id: int, product: str, session: Session) ->
     """Return the current (non-deleted) resource inventory for a tenant+product.
 
     Result shape: {"resource_type": [{"id": <api_id>, "name": ..., "raw_config": {...}}, ...]}
+
+    Migration candidates (source != 'tenant') are excluded.  They share these
+    tables but do not exist in the tenant, so including them would make
+    snapshots record config the tenant never had and make the push engine
+    believe those resources were already there.
     """
     result: Dict[str, List[dict]] = {}
 
     if product.upper() == "ZPA":
         rows = (
             session.query(ZPAResource)
-            .filter_by(tenant_id=tenant_id, is_deleted=False)
+            .filter_by(tenant_id=tenant_id, is_deleted=False, source="tenant")
             .order_by(ZPAResource.resource_type, ZPAResource.name)
             .all()
         )
@@ -89,7 +94,7 @@ def get_snapshot_data_current(tenant_id: int, product: str, session: Session) ->
     else:  # ZIA
         rows = (
             session.query(ZIAResource)
-            .filter_by(tenant_id=tenant_id, is_deleted=False)
+            .filter_by(tenant_id=tenant_id, is_deleted=False, source="tenant")
             .order_by(ZIAResource.resource_type, ZIAResource.name)
             .all()
         )
