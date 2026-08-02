@@ -488,8 +488,11 @@ class UserGroup(Base):
     SCIM server can replace what it owns without disturbing groups it never
     created, and so the UI can refuse to rename a group the IdP will rename back.
 
-    mapped_role turns group membership into a zs-config role. Null means the
-    group carries no role and members fall back to the idp_default_role setting.
+    mapped_role offers a zs-config role to everyone in the group. It is never
+    written into User.role — it adds to what a member may assume, alongside the
+    role the account holds in its own right, and only one of them is active in
+    any given session (see services/role_service.py). Null means the group
+    offers no role at all.
     """
 
     __tablename__ = "user_groups"

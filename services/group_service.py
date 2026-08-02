@@ -7,10 +7,11 @@ authoritative only over its own rows: syncing a group replaces the members the
 IdP put there and leaves hand-added ones alone, so an admin can top up a
 provisioned group without the next sync undoing the work.
 
-Two things hang off a group: a `mapped_role`, which SCIM already resolved into
-each member's role, and tenant grants, which work exactly like
-`UserTenantEntitlement` but for everyone in the group. Plugin grants live in
-`plugin_entitlement_service` and reference the same groups.
+Two things hang off a group: a `mapped_role`, which adds to the roles its
+members may assume rather than overwriting their own (`services/role_service.py`
+unions the two when a token is minted), and tenant grants, which work exactly
+like `UserTenantEntitlement` but for everyone in the group. Plugin grants live
+in `plugin_entitlement_service` and reference the same groups.
 
 Callers are responsible for auditing; this module only touches the database.
 Every function opens its own session and returns plain dicts, so nothing here
@@ -155,13 +156,6 @@ def update_group(
 
         g.updated_at = datetime.utcnow()
         session.flush()
-
-        # Members inherit a changed mapping now rather than at the IdP's next
-        # sync — and for a local group there is no sync that would ever do it.
-        if set_role:
-            from api.routers.scim import _reconcile_roles
-            _reconcile_roles(session, group_id)
-
         session.refresh(g)
         members = session.query(UserGroupMember).filter_by(group_id=group_id).count()
         tenants = session.query(GroupTenantEntitlement).filter_by(group_id=group_id).count()
@@ -184,20 +178,11 @@ def delete_group(group_id: int) -> str:
                 status=409,
             )
         name = g.display_name
-        mapped_role = g.mapped_role
-        member_ids = [
-            uid for (uid,) in session.query(UserGroupMember.user_id).filter_by(group_id=group_id)
-        ]
         session.query(UserGroupMember).filter_by(group_id=group_id).delete()
         session.query(GroupTenantEntitlement).filter_by(group_id=group_id).delete()
         session.query(PluginEntitlement).filter_by(group_id=group_id).delete()
         session.delete(g)
         session.flush()
-
-        # The group may have been what made these people admins.
-        if mapped_role:
-            from api.routers.scim import _reconcile_roles
-            _reconcile_roles(session, group_id, extra_user_ids=member_ids)
         return name
 
 
@@ -268,11 +253,6 @@ def add_members(group_id: int, user_ids: Iterable[int], added_by: Optional[str] 
             )
             added.append(uid)
         session.flush()
-
-        if added and g.mapped_role:
-            from api.routers.scim import _reconcile_roles
-            _reconcile_roles(session, group_id)
-
         return {"added": added, "skipped": sorted(already), "group_name": g.display_name}
 
 
@@ -296,10 +276,6 @@ def remove_member(group_id: int, user_id: int) -> None:
             )
         session.delete(m)
         session.flush()
-
-        if g.mapped_role:
-            from api.routers.scim import _reconcile_roles
-            _reconcile_roles(session, group_id, extra_user_ids=[user_id])
 
 
 def groups_for_user(user_id: int) -> list[dict]:

@@ -75,12 +75,15 @@ class EntitlementBulkCreate(BaseModel):
 
 # ── Users ─────────────────────────────────────────────────────────────────────
 
-def _user_out(u: User) -> dict:
+def _user_out(u: User, available_roles: Optional[List[str]] = None) -> dict:
     return {
         "id": u.id,
         "username": u.username,
         "email": u.email,
+        # The account's own role. Groups can offer more without changing this,
+        # which is why the two are reported separately.
         "role": u.role,
+        "available_roles": available_roles if available_roles is not None else [u.role],
         "is_active": u.is_active,
         "force_password_change": u.force_password_change,
         "mfa_required": bool(u.mfa_required),
@@ -95,9 +98,12 @@ def _user_out(u: User) -> dict:
 
 @router.get("/users")
 def list_users(_: AuthUser = Depends(require_admin)):
+    from services.role_service import roles_for_users
+
     with get_session() as session:
         users = session.query(User).order_by(User.username).all()
-        return [_user_out(u) for u in users]
+        roles = roles_for_users(session, users)
+        return [_user_out(u, roles.get(u.id)) for u in users]
 
 
 @router.post("/users", status_code=201)

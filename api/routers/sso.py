@@ -16,6 +16,7 @@ from fastapi.responses import RedirectResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from api.auth_utils import issue_access_token, issue_refresh_token
+from services.role_service import available_roles, resolve_active
 from api.dependencies import require_admin, AuthUser
 from db.database import get_session, get_setting
 from db.models import User
@@ -88,9 +89,13 @@ def _complete_login(cfg: SsoConfig, identity: Identity) -> RedirectResponse:
     user_id, username, role = sso_service.resolve_user(cfg, identity)
 
     shim = _TokenUser(id=user_id, username=username, role=role)
+    # Same rule as a password login: start at least privilege, whatever the
+    # IdP's groups make available.
+    roles = available_roles(user_id, role)
+    active = resolve_active(roles)
     payload = {
-        "access_token": issue_access_token(shim),
-        "refresh_token": issue_refresh_token(shim),
+        "access_token": issue_access_token(shim, roles=roles, active_role=active),
+        "refresh_token": issue_refresh_token(shim, active_role=active),
         "username": username,
     }
     code = secrets.token_urlsafe(32)

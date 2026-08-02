@@ -217,20 +217,10 @@ def _assert_not_last_admin(session, user: User, *, deactivating: bool, new_role:
         )
 
 
-def _resolve_role(session, user_id: int, default_role: str) -> str:
-    """Effective role from group mappings; admin beats user."""
-    rows = (
-        session.query(UserGroup.mapped_role)
-        .join(UserGroupMember, UserGroupMember.group_id == UserGroup.id)
-        .filter(UserGroupMember.user_id == user_id)
-        .all()
-    )
-    roles = {r[0] for r in rows if r[0]}
-    if "admin" in roles:
-        return "admin"
-    if "user" in roles:
-        return "user"
-    return default_role
+# A group's mapped_role is not written into User.role. It adds to the roles the
+# account may assume, and role_service.available_roles() unions the two at
+# token time — see services/role_service.py. Nothing here has to recompute a
+# role when membership changes, because nothing here owns it.
 
 
 def _default_role() -> str:
@@ -628,7 +618,6 @@ async def patch_group(group_id: int, request: Request, _: int = Depends(require_
                     _set_members(session, g.id, value["members"] or [], replace=(action == "replace"))
 
         session.flush()
-        _reconcile_roles(session, g.id)
         session.refresh(g)
         body = group_to_scim(g, _members_of(session, g.id))
         audit.append({"operation": "scim_patch_group", "action": "UPDATE", "name": g.display_name})
@@ -644,20 +633,12 @@ def delete_group(group_id: int, _: int = Depends(require_scim_token)):
         g = session.query(UserGroup).filter_by(id=group_id).first()
         if not g:
             raise ScimError(404, f"Group {group_id} not found")
-        member_ids = [uid for uid, _n in _members_of(session, g.id)]
         name = g.display_name
         session.query(UserGroupMember).filter_by(group_id=g.id).delete()
         session.delete(g)
         session.flush()
-        # Members may have just lost the group that granted their role.
-        default = _default_role()
-        for uid in member_ids:
-            u = session.query(User).filter_by(id=uid).first()
-            if u:
-                new_role = _resolve_role(session, uid, default)
-                if new_role != u.role:
-                    _assert_not_last_admin(session, u, deactivating=False, new_role=new_role)
-                    u.role = new_role
+        # Members lose whatever role this group offered on their next token —
+        # nothing to rewrite, because User.role was never it.
         audit.append({"operation": "scim_delete_group", "action": "DELETE", "name": name})
 
     _audit(audit)
@@ -702,7 +683,6 @@ def _set_members(session, group_id: int, value: Any, replace: bool = False) -> N
             continue
         session.add(UserGroupMember(group_id=group_id, user_id=uid, source="scim"))
     session.flush()
-    _reconcile_roles(session, group_id)
 
 
 _MEMBER_FILTER_RE = re.compile(r'value\s+eq\s+"([^"]+)"', re.IGNORECASE)
@@ -723,27 +703,6 @@ def _remove_members(session, group_id: int, value: Any, path: str) -> None:
             UserGroupMember.user_id.in_(ids),
         ).delete(synchronize_session=False)
     session.flush()
-    _reconcile_roles(session, group_id, extra_user_ids=ids)
-
-
-def _reconcile_roles(session, group_id: int, extra_user_ids: Optional[List[int]] = None) -> None:
-    """Recompute roles for everyone the group change could have affected."""
-    default = _default_role()
-    ids = {uid for uid, _n in _members_of(session, group_id)}
-    ids.update(extra_user_ids or [])
-    for uid in ids:
-        u = session.query(User).filter_by(id=uid).first()
-        if not u:
-            continue
-        new_role = _resolve_role(session, uid, default)
-        if new_role == u.role:
-            continue
-        try:
-            _assert_not_last_admin(session, u, deactivating=False, new_role=new_role)
-        except ScimError:
-            # Keep the last admin rather than failing the whole group sync.
-            continue
-        u.role = new_role
 
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
