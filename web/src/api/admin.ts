@@ -4,7 +4,10 @@ export interface AdminUser {
   id: number;
   username: string;
   email: string | null;
+  /** The account's own role — what this page edits. */
   role: string;
+  /** Everything it may assume, including roles offered by its groups. */
+  available_roles: string[];
   is_active: boolean;
   force_password_change: boolean;
   mfa_required: boolean;

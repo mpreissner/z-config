@@ -403,6 +403,18 @@ export default function AdminUsersPage() {
                     }`}>
                       {u.role}
                     </span>
+                    {/* A group can offer a role this account does not hold in
+                        its own right. It is not live until the user assumes
+                        it, so it reads as "+ admin", not as a second badge. */}
+                    {(u.available_roles ?? []).filter((r) => r !== u.role).map((r) => (
+                      <span
+                        key={r}
+                        title="Available through a group — the user must assume it"
+                        className="ml-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-white text-gray-500 border border-dashed border-gray-300"
+                      >
+                        + {r}
+                      </span>
+                    ))}
                   </td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm">
                     {u.is_active ? (

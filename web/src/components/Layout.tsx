@@ -64,6 +64,56 @@ function TenantNavItem({ tenant, isActive, onClick }: {
   );
 }
 
+const ROLE_LABELS: Record<string, string> = { admin: "Admin", user: "User" };
+
+function roleLabel(role: string): string {
+  return ROLE_LABELS[role] ?? role;
+}
+
+/** Only rendered for accounts that hold more than one role. Switching mints a
+ *  new token server-side and wipes the query cache, so nothing fetched under
+ *  the old role survives the change. */
+function RoleSwitcher({ onSwitched }: { onSwitched: () => void }) {
+  const { activeRole, availableRoles, assumeRole } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (availableRoles.length < 2) return null;
+
+  async function handleChange(role: string) {
+    if (role === activeRole || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await assumeRole(role);
+      onSwitched();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not switch role");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-3 py-1">
+      <label className="block text-xs text-blue-300 mb-1">Acting as</label>
+      <select
+        value={activeRole ?? ""}
+        onChange={(e) => handleChange(e.target.value)}
+        disabled={busy}
+        className="w-full bg-zs-600 text-white text-sm rounded-md px-2 py-1 border border-zs-600 focus:outline-none focus:border-blue-300 disabled:opacity-60"
+      >
+        {availableRoles.map((r) => (
+          <option key={r} value={r}>
+            {roleLabel(r)}
+          </option>
+        ))}
+      </select>
+      {error && <p className="mt-1 text-xs text-red-300">{error}</p>}
+    </div>
+  );
+}
+
 const adminNavItems = [
   { to: "/admin/users", label: "Users" },
   { to: "/admin/groups", label: "Groups" },
@@ -79,7 +129,7 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   }`;
 
 export default function Layout({ children }: LayoutProps) {
-  const { logout, isAdmin, user } = useAuth();
+  const { logout, isAdmin, user, availableRoles } = useAuth();
   const { activeTenantId, setActiveTenantId } = useActiveTenant();
   const navigate = useNavigate();
   const [tenantsOpen, setTenantsOpen] = useState(true);
@@ -266,11 +316,14 @@ export default function Layout({ children }: LayoutProps) {
             </div>
             <div className="min-w-0">
               <p className="text-sm text-white font-medium truncate">{username}</p>
-              {isAdmin && (
+              {isAdmin && availableRoles.length < 2 && (
                 <p className="text-xs text-blue-300 leading-none">Admin</p>
               )}
             </div>
           </div>
+          {/* Back to the dashboard on a switch — an admin page the session can
+              no longer reach would otherwise bounce through AdminRoute. */}
+          <RoleSwitcher onSwitched={() => navigate("/")} />
           <NavLink
             to="/profile"
             className={({ isActive }) =>
