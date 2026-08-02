@@ -36,7 +36,7 @@ import {
   uninstallPlugin,
 } from "../api/plugins";
 import { fetchAdminUsers } from "../api/admin";
-import { fetchScimGroups } from "../api/scim";
+import { fetchGroups } from "../api/groups";
 import { useJobStream } from "../hooks/useJobStream";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
@@ -378,7 +378,7 @@ function AccessModal({ pkg, onClose }: { pkg: string; onClose: () => void }) {
     queryFn: () => fetchPluginEntitlements(pkg),
   });
   const { data: users } = useQuery({ queryKey: ["admin-users"], queryFn: fetchAdminUsers });
-  const { data: groups } = useQuery({ queryKey: ["scim-groups"], queryFn: fetchScimGroups });
+  const { data: groups } = useQuery({ queryKey: ["admin-groups"], queryFn: fetchGroups });
 
   const rows: PluginEntitlement[] = grants?.entitlements ?? [];
   const grantedUsers = new Set(rows.map((r) => r.user_id).filter(Boolean) as number[]);

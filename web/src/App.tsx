@@ -13,6 +13,7 @@ import ChangePasswordPage from "./pages/ChangePasswordPage";
 import SsoCompletePage from "./pages/SsoCompletePage";
 import MfaEnrollModal from "./components/MfaEnrollModal";
 import AdminUsersPage from "./pages/AdminUsersPage";
+import AdminGroupsPage from "./pages/AdminGroupsPage";
 import AdminEntitlementsPage from "./pages/AdminEntitlementsPage";
 import AdminSettingsPage from "./pages/AdminSettingsPage";
 import ProfilePage from "./pages/ProfilePage";
@@ -89,6 +90,10 @@ export default function App() {
                   <Route
                     path="/admin/users"
                     element={<AdminRoute><AdminUsersPage /></AdminRoute>}
+                  />
+                  <Route
+                    path="/admin/groups"
+                    element={<AdminRoute><AdminGroupsPage /></AdminRoute>}
                   />
                   <Route
                     path="/admin/entitlements"

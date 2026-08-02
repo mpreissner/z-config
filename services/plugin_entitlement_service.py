@@ -5,10 +5,10 @@ zs-config can run as a shared service, so a plugin an admin installs for one
 team must not appear for everyone with an account; this module is the grant
 list that decides.
 
-A grant names either a user or a SCIM group. Group grants are resolved through
+A grant names either a user or a group. Group grants are resolved through
 current membership at read time rather than expanded into user rows, so an
-account that the IdP moves out of the group loses the plugin on its next
-request with nothing to clean up here.
+account that leaves the group — whether the IdP moved it or an admin did —
+loses the plugin on its next request with nothing to clean up here.
 
 Admins are not checked against the list — they install the plugins, and
 `UserTenantEntitlement` already sets that precedent for tenant access.
@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 from db.database import get_session
-from db.models import PluginEntitlement, ScimGroup, ScimGroupMember, User
+from db.models import PluginEntitlement, UserGroup, UserGroupMember, User
 
 
 def _out(row: PluginEntitlement, username: Optional[str], group_name: Optional[str]) -> dict:
@@ -43,7 +43,7 @@ def list_entitlements(package: Optional[str] = None) -> list[dict]:
         rows = query.order_by(PluginEntitlement.package, PluginEntitlement.id).all()
 
         user_names = dict(session.query(User.id, User.username).all())
-        group_names = dict(session.query(ScimGroup.id, ScimGroup.display_name).all())
+        group_names = dict(session.query(UserGroup.id, UserGroup.display_name).all())
 
         return [
             _out(r, user_names.get(r.user_id), group_names.get(r.group_id))
@@ -78,7 +78,7 @@ def grant(
             if missing:
                 raise ValueError(f"Unknown user id(s): {sorted(missing)}")
         if group_ids:
-            found = {g for (g,) in session.query(ScimGroup.id).filter(ScimGroup.id.in_(group_ids))}
+            found = {g for (g,) in session.query(UserGroup.id).filter(UserGroup.id.in_(group_ids))}
             missing = set(group_ids) - found
             if missing:
                 raise ValueError(f"Unknown group id(s): {sorted(missing)}")
@@ -109,7 +109,7 @@ def grant(
         session.flush()
 
         user_names = dict(session.query(User.id, User.username).all())
-        group_names = dict(session.query(ScimGroup.id, ScimGroup.display_name).all())
+        group_names = dict(session.query(UserGroup.id, UserGroup.display_name).all())
         granted = [
             _out(r, user_names.get(r.user_id), group_names.get(r.group_id))
             for r in created
@@ -159,7 +159,7 @@ def entitled_packages(user_id: int, role: str = "user") -> Optional[list[str]]:
 
     with get_session() as session:
         group_ids = [
-            g for (g,) in session.query(ScimGroupMember.group_id).filter_by(user_id=user_id)
+            g for (g,) in session.query(UserGroupMember.group_id).filter_by(user_id=user_id)
         ]
         query = session.query(PluginEntitlement.package).filter(
             PluginEntitlement.user_id == user_id

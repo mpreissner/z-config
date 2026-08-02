@@ -479,43 +479,86 @@ class ScimToken(Base):
         return f"<ScimToken label={self.label!r} prefix={self.token_prefix!r}>"
 
 
-class ScimGroup(Base):
-    """A group pushed by the IdP over SCIM.
+class UserGroup(Base):
+    """A group of users, whether the IdP pushed it or an admin created it here.
+
+    Both kinds live in one table because everything downstream — role mapping,
+    tenant entitlements, plugin grants — cares only that a set of users can be
+    named, not where the name came from. `source` records the origin so the
+    SCIM server can replace what it owns without disturbing groups it never
+    created, and so the UI can refuse to rename a group the IdP will rename back.
 
     mapped_role turns group membership into a zs-config role. Null means the
     group carries no role and members fall back to the idp_default_role setting.
     """
 
-    __tablename__ = "scim_groups"
+    __tablename__ = "user_groups"
 
     id           = Column(Integer, primary_key=True)
-    external_id  = Column(String(512), nullable=True)
+    external_id  = Column(String(512), nullable=True)   # the IdP's id; null for local groups
     display_name = Column(String(255), nullable=False, unique=True)
-    mapped_role  = Column(String(32), nullable=True)  # 'admin' | 'user' | None
+    description  = Column(Text, nullable=True)
+    mapped_role  = Column(String(32), nullable=True)    # 'admin' | 'user' | None
+    source       = Column(String(16), nullable=False, default="local")   # 'scim' | 'local'
     created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     def __repr__(self) -> str:
-        return f"<ScimGroup display_name={self.display_name!r} mapped_role={self.mapped_role!r}>"
+        return f"<UserGroup display_name={self.display_name!r} source={self.source!r}>"
 
 
-class ScimGroupMember(Base):
-    """Join between a SCIM group and a zs-config user."""
+class UserGroupMember(Base):
+    """Join between a group and a user.
 
-    __tablename__ = "scim_group_members"
+    `source` is per membership, not per group: an IdP push replaces only the
+    rows it owns, so a member an admin added by hand to a SCIM group survives
+    the next sync instead of disappearing without anyone having removed them.
+    """
+
+    __tablename__ = "user_group_members"
     __table_args__ = (
-        UniqueConstraint("group_id", "user_id", name="uq_scim_group_member"),
+        UniqueConstraint("group_id", "user_id", name="uq_user_group_member"),
     )
 
     id       = Column(Integer, primary_key=True)
-    group_id = Column(Integer, ForeignKey("scim_groups.id", ondelete="CASCADE"), nullable=False)
+    group_id = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=False)
     user_id  = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    source   = Column(String(16), nullable=False, default="local")   # 'scim' | 'local'
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    added_by = Column(String(255), nullable=True)
 
-    group = relationship("ScimGroup", backref="members")
-    user  = relationship("User", backref="scim_group_memberships")
+    group = relationship("UserGroup", backref="members")
+    user  = relationship("User", backref="group_memberships")
 
     def __repr__(self) -> str:
-        return f"<ScimGroupMember group_id={self.group_id} user_id={self.user_id}>"
+        return f"<UserGroupMember group_id={self.group_id} user_id={self.user_id}>"
+
+
+class GroupTenantEntitlement(Base):
+    """Maps a group to the tenants its members may access.
+
+    The counterpart to UserTenantEntitlement, and the reason groups exist at
+    all: entitling a group once beats entitling every member and then
+    remembering to entitle the next joiner. A user sees the union of their own
+    grants and those of every group they belong to; admins bypass both tables.
+    """
+
+    __tablename__ = "group_tenant_entitlements"
+    __table_args__ = (
+        UniqueConstraint("group_id", "tenant_id", name="uq_group_tenant"),
+    )
+
+    id         = Column(Integer, primary_key=True)
+    group_id   = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=False)
+    tenant_id  = Column(Integer, ForeignKey("tenant_configs.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    granted_by = Column(String(255), nullable=True)
+
+    group  = relationship("UserGroup", backref="tenant_entitlements")
+    tenant = relationship("TenantConfig", backref="group_entitlements")
+
+    def __repr__(self) -> str:
+        return f"<GroupTenantEntitlement group_id={self.group_id} tenant_id={self.tenant_id}>"
 
 
 class PluginEntitlement(Base):
@@ -524,9 +567,8 @@ class PluginEntitlement(Base):
     Installing a plugin does not expose it: on a shared deployment the admin
     who installed it still has to name who may use it. A row here is that
     grant. Exactly one of user_id / group_id is set — a user grant names an
-    account directly, a group grant follows SCIM group membership, so an
-    account that leaves the group loses the plugin without anyone editing
-    this table.
+    account directly, a group grant follows group membership, so an account
+    that leaves the group loses the plugin without anyone editing this table.
 
     package is the distribution name rather than a foreign key, because
     plugins live in site-packages and have no row of their own. Grants
@@ -551,12 +593,12 @@ class PluginEntitlement(Base):
     id         = Column(Integer, primary_key=True)
     package    = Column(String(255), nullable=False)
     user_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
-    group_id   = Column(Integer, ForeignKey("scim_groups.id", ondelete="CASCADE"), nullable=True)
+    group_id   = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=True)
     granted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     granted_by = Column(String(255), nullable=True)
 
     user  = relationship("User", backref="plugin_entitlements")
-    group = relationship("ScimGroup", backref="plugin_entitlements")
+    group = relationship("UserGroup", backref="plugin_entitlements")
 
     def __repr__(self) -> str:
         subject = f"user_id={self.user_id}" if self.user_id else f"group_id={self.group_id}"

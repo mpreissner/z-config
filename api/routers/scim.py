@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from db.database import get_session
-from db.models import ScimGroup, ScimGroupMember, ScimToken, User
+from db.models import ScimToken, User, UserGroup, UserGroupMember
 
 router = APIRouter(prefix="/scim/v2", tags=["SCIM"])
 
@@ -123,7 +123,7 @@ def user_to_scim(u: User) -> dict:
     return body
 
 
-def group_to_scim(g: ScimGroup, member_rows: List[Tuple[int, str]]) -> dict:
+def group_to_scim(g: UserGroup, member_rows: List[Tuple[int, str]]) -> dict:
     return {
         "schemas": [GROUP_SCHEMA],
         "id": str(g.id),
@@ -220,9 +220,9 @@ def _assert_not_last_admin(session, user: User, *, deactivating: bool, new_role:
 def _resolve_role(session, user_id: int, default_role: str) -> str:
     """Effective role from group mappings; admin beats user."""
     rows = (
-        session.query(ScimGroup.mapped_role)
-        .join(ScimGroupMember, ScimGroupMember.group_id == ScimGroup.id)
-        .filter(ScimGroupMember.user_id == user_id)
+        session.query(UserGroup.mapped_role)
+        .join(UserGroupMember, UserGroupMember.group_id == UserGroup.id)
+        .filter(UserGroupMember.user_id == user_id)
         .all()
     )
     roles = {r[0] for r in rows if r[0]}
@@ -493,8 +493,8 @@ def delete_user(user_id: int, _: int = Depends(require_scim_token)):
 def _members_of(session, group_id: int) -> List[Tuple[int, str]]:
     rows = (
         session.query(User.id, User.username)
-        .join(ScimGroupMember, ScimGroupMember.user_id == User.id)
-        .filter(ScimGroupMember.group_id == group_id)
+        .join(UserGroupMember, UserGroupMember.user_id == User.id)
+        .filter(UserGroupMember.group_id == group_id)
         .all()
     )
     return [(r[0], r[1]) for r in rows]
@@ -509,17 +509,17 @@ def list_groups(
 ):
     parsed = parse_filter(filter, ("displayName", "externalId", "id"))
     with get_session() as session:
-        q = session.query(ScimGroup)
+        q = session.query(UserGroup)
         if parsed:
             attr, value = parsed
             if attr == "displayName":
-                q = q.filter(ScimGroup.display_name == value)
+                q = q.filter(UserGroup.display_name == value)
             elif attr == "externalId":
-                q = q.filter(ScimGroup.external_id == value)
+                q = q.filter(UserGroup.external_id == value)
             else:
-                q = q.filter(ScimGroup.id == (int(value) if value.isdigit() else -1))
+                q = q.filter(UserGroup.id == (int(value) if value.isdigit() else -1))
         total = q.count()
-        rows = q.order_by(ScimGroup.id).offset(startIndex - 1).limit(count).all()
+        rows = q.order_by(UserGroup.id).offset(startIndex - 1).limit(count).all()
         resources = [group_to_scim(g, _members_of(session, g.id)) for g in rows]
     return _scim_json(_list_response(resources, total, startIndex))
 
@@ -527,7 +527,7 @@ def list_groups(
 @router.get("/Groups/{group_id}")
 def get_group(group_id: int, _: int = Depends(require_scim_token)):
     with get_session() as session:
-        g = session.query(ScimGroup).filter_by(id=group_id).first()
+        g = session.query(UserGroup).filter_by(id=group_id).first()
         if not g:
             raise ScimError(404, f"Group {group_id} not found")
         body = group_to_scim(g, _members_of(session, g.id))
@@ -543,10 +543,21 @@ async def create_group(request: Request, _: int = Depends(require_scim_token)):
 
     audit: List[Dict[str, Any]] = []
     with get_session() as session:
-        if session.query(ScimGroup).filter_by(display_name=display).first():
+        existing = session.query(UserGroup).filter_by(display_name=display).first()
+        if existing and existing.source == "scim":
             raise ScimError(409, f"Group {display} already exists", scim_type="uniqueness")
-        g = ScimGroup(display_name=display, external_id=payload.get("externalId"))
-        session.add(g)
+        if existing:
+            # A local group of the same name is adopted rather than rejected: the
+            # IdP has no way to resolve a 409 it did not cause, and refusing would
+            # wedge provisioning for good. Membership the admin added by hand
+            # stays — only rows marked 'scim' are ever replaced from here.
+            g = existing
+            g.source = "scim"
+            g.external_id = payload.get("externalId") or g.external_id
+        else:
+            g = UserGroup(display_name=display, external_id=payload.get("externalId"),
+                          source="scim")
+            session.add(g)
         session.flush()
         _set_members(session, g.id, payload.get("members") or [])
         session.flush()
@@ -563,7 +574,7 @@ async def replace_group(group_id: int, request: Request, _: int = Depends(requir
     payload = await request.json()
     audit: List[Dict[str, Any]] = []
     with get_session() as session:
-        g = session.query(ScimGroup).filter_by(id=group_id).first()
+        g = session.query(UserGroup).filter_by(id=group_id).first()
         if not g:
             raise ScimError(404, f"Group {group_id} not found")
         if payload.get("displayName"):
@@ -588,7 +599,7 @@ async def patch_group(group_id: int, request: Request, _: int = Depends(require_
     audit: List[Dict[str, Any]] = []
 
     with get_session() as session:
-        g = session.query(ScimGroup).filter_by(id=group_id).first()
+        g = session.query(UserGroup).filter_by(id=group_id).first()
         if not g:
             raise ScimError(404, f"Group {group_id} not found")
 
@@ -630,12 +641,12 @@ async def patch_group(group_id: int, request: Request, _: int = Depends(require_
 def delete_group(group_id: int, _: int = Depends(require_scim_token)):
     audit: List[Dict[str, Any]] = []
     with get_session() as session:
-        g = session.query(ScimGroup).filter_by(id=group_id).first()
+        g = session.query(UserGroup).filter_by(id=group_id).first()
         if not g:
             raise ScimError(404, f"Group {group_id} not found")
         member_ids = [uid for uid, _n in _members_of(session, g.id)]
         name = g.display_name
-        session.query(ScimGroupMember).filter_by(group_id=g.id).delete()
+        session.query(UserGroupMember).filter_by(group_id=g.id).delete()
         session.delete(g)
         session.flush()
         # Members may have just lost the group that granted their role.
@@ -671,19 +682,25 @@ def _member_ids(value: Any) -> List[int]:
 
 
 def _set_members(session, group_id: int, value: Any, replace: bool = False) -> None:
+    """Apply the IdP's membership list.
+
+    A replace clears only the memberships SCIM itself created. Anyone an admin
+    added to the group by hand keeps their place — the IdP does not know about
+    them, so its list is not evidence they should be gone.
+    """
     ids = _member_ids(value)
     if replace:
-        session.query(ScimGroupMember).filter_by(group_id=group_id).delete()
+        session.query(UserGroupMember).filter_by(group_id=group_id, source="scim").delete()
         session.flush()
     existing = {
-        r.user_id for r in session.query(ScimGroupMember).filter_by(group_id=group_id).all()
+        r.user_id for r in session.query(UserGroupMember).filter_by(group_id=group_id).all()
     }
     for uid in ids:
         if uid in existing:
             continue
         if session.query(User).filter_by(id=uid).first() is None:
             continue
-        session.add(ScimGroupMember(group_id=group_id, user_id=uid))
+        session.add(UserGroupMember(group_id=group_id, user_id=uid, source="scim"))
     session.flush()
     _reconcile_roles(session, group_id)
 
@@ -696,12 +713,14 @@ def _remove_members(session, group_id: int, value: Any, path: str) -> None:
     ids = _member_ids(value)
     ids.extend(int(m) for m in _MEMBER_FILTER_RE.findall(path) if m.isdigit())
     if not ids:
-        # `remove` on the whole `members` path clears the group.
-        session.query(ScimGroupMember).filter_by(group_id=group_id).delete()
+        # `remove` on the whole `members` path clears what SCIM put there.
+        session.query(UserGroupMember).filter_by(group_id=group_id, source="scim").delete()
     else:
-        session.query(ScimGroupMember).filter(
-            ScimGroupMember.group_id == group_id,
-            ScimGroupMember.user_id.in_(ids),
+        # Naming a member explicitly does remove them, however they were added:
+        # the IdP is stating that this person is not in the group.
+        session.query(UserGroupMember).filter(
+            UserGroupMember.group_id == group_id,
+            UserGroupMember.user_id.in_(ids),
         ).delete(synchronize_session=False)
     session.flush()
     _reconcile_roles(session, group_id, extra_user_ids=ids)

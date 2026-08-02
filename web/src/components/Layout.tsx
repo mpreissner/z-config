@@ -66,6 +66,7 @@ function TenantNavItem({ tenant, isActive, onClick }: {
 
 const adminNavItems = [
   { to: "/admin/users", label: "Users" },
+  { to: "/admin/groups", label: "Groups" },
   { to: "/admin/entitlements", label: "Tenant Access" },
   { to: "/admin/settings", label: "Settings" },
 ];

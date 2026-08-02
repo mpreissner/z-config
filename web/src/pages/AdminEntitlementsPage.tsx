@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchEntitlements,
@@ -189,6 +190,12 @@ export default function AdminEntitlementsPage() {
 
       <p className="text-sm text-gray-500 mb-4">
         Admin users have access to all tenants. Use this page to grant non-admin users access to specific tenants.
+        These are direct grants only — a user also reaches every tenant granted to a group they belong to, which is
+        managed on the{" "}
+        <Link to="/admin/groups" className="text-zs-600 hover:underline">
+          Groups
+        </Link>{" "}
+        page.
       </p>
 
       {loadingEnts && <LoadingSpinner />}

@@ -46,6 +46,7 @@ from api.routers import templates as templates_router
 from api.routers import ssl as ssl_router
 from api.routers import sso as sso_router
 from api.routers import scim as scim_router
+from api.routers import groups as groups_router
 from api.routers import plugins as plugins_router
 from api.auth_utils import decode_token
 from api.dependencies import require_auth, AuthUser
@@ -243,6 +244,7 @@ app.include_router(ssl_router.router)
 app.include_router(auth_router.router)
 app.include_router(tenants_router.router)
 app.include_router(admin_router.router)
+app.include_router(groups_router.router)
 app.include_router(jobs_router.router)
 app.include_router(scheduled_tasks_router.router)
 app.include_router(templates_router.router)
