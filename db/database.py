@@ -269,7 +269,8 @@ def _migrate(engine) -> None:
             id INTEGER PRIMARY KEY,
             name VARCHAR(255) NOT NULL UNIQUE,
             source_tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id),
-            target_tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id),
+            -- nullable: import tasks have no target tenant
+            target_tenant_id INTEGER REFERENCES tenant_configs(id),
             resource_groups JSON NOT NULL,
             cron_expression VARCHAR(128) NOT NULL,
             sync_deletes BOOLEAN NOT NULL DEFAULT 0,
@@ -305,8 +306,8 @@ def _migrate(engine) -> None:
         )""",
         # Scheduled tasks v2 — task_type discriminator, multi-target sync, import tasks
         "ALTER TABLE scheduled_tasks ADD COLUMN task_type VARCHAR(16) NOT NULL DEFAULT 'sync'",
-        # SQLite cannot DROP NOT NULL via ALTER; making nullable is a DB-level no-op
-        # for SQLite — the column stores NULL after this migration runs.
+        # Import tasks leave target_tenant_id NULL. Dropping the legacy NOT NULL
+        # needs a table rebuild — see _migrate_scheduled_tasks_target_nullable().
         "ALTER TABLE scheduled_tasks ADD COLUMN target_tenant_ids JSON",
         "ALTER TABLE scheduled_tasks ADD COLUMN import_products JSON",
         "ALTER TABLE task_run_history ADD COLUMN parent_run_id INTEGER REFERENCES task_run_history(id) ON DELETE SET NULL",
@@ -329,6 +330,95 @@ def _migrate(engine) -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()  # reset transaction state; column already exists
+
+    _migrate_scheduled_tasks_target_nullable(engine)
+
+
+def _migrate_scheduled_tasks_target_nullable(engine) -> None:
+    """Drop the legacy NOT NULL on scheduled_tasks.target_tenant_id.
+
+    Databases created before import tasks existed declared the column NOT NULL.
+    Import tasks have no target tenant and must store NULL there, so creating
+    one fails with an IntegrityError until the constraint is gone. SQLite has no
+    DROP NOT NULL, so the table is rebuilt.
+
+    Kept out of the additive `migrations` list above because that loop swallows
+    every exception — a rebuild that failed halfway through would be silently
+    left in a broken state. This runs guarded and all-or-nothing instead.
+    """
+    with engine.connect() as conn:
+        try:
+            cols = conn.execute(text("PRAGMA table_info(scheduled_tasks)")).fetchall()
+        except Exception:
+            return  # table absent (fresh DB pre-create_all); nothing to migrate
+        if not cols:
+            return
+        # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+        target = next((c for c in cols if c[1] == "target_tenant_id"), None)
+        if target is None or not target[3]:
+            return  # already nullable — nothing to do
+
+    # Foreign keys must be disabled outside the transaction; task_run_history
+    # references scheduled_tasks(id) and would otherwise block the DROP.
+    with engine.connect() as conn:
+        fk_was_on = bool(conn.execute(text("PRAGMA foreign_keys")).scalar())
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        conn.commit()
+        try:
+            with conn.begin():
+                conn.execute(text("""
+                    CREATE TABLE scheduled_tasks_new (
+                        id INTEGER NOT NULL,
+                        name VARCHAR(255) NOT NULL,
+                        source_tenant_id INTEGER NOT NULL,
+                        target_tenant_id INTEGER,
+                        resource_groups JSON NOT NULL,
+                        cron_expression VARCHAR(128) NOT NULL,
+                        sync_deletes BOOLEAN NOT NULL,
+                        enabled BOOLEAN NOT NULL,
+                        owner_email VARCHAR(512),
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        sync_mode VARCHAR(16) NOT NULL DEFAULT 'resource_type',
+                        label_name VARCHAR(255),
+                        label_resource_types JSON,
+                        task_type VARCHAR(16) NOT NULL DEFAULT 'sync',
+                        target_tenant_ids JSON,
+                        import_products JSON,
+                        PRIMARY KEY (id),
+                        UNIQUE (name),
+                        FOREIGN KEY(source_tenant_id) REFERENCES tenant_configs (id),
+                        FOREIGN KEY(target_tenant_id) REFERENCES tenant_configs (id)
+                    )
+                """))
+                conn.execute(text("""
+                    INSERT INTO scheduled_tasks_new (
+                        id, name, source_tenant_id, target_tenant_id, resource_groups,
+                        cron_expression, sync_deletes, enabled, owner_email,
+                        created_at, updated_at, sync_mode, label_name,
+                        label_resource_types, task_type, target_tenant_ids, import_products
+                    )
+                    SELECT
+                        id, name, source_tenant_id, target_tenant_id, resource_groups,
+                        cron_expression, sync_deletes, enabled, owner_email,
+                        created_at, updated_at, sync_mode, label_name,
+                        label_resource_types, task_type, target_tenant_ids, import_products
+                    FROM scheduled_tasks
+                """))
+                conn.execute(text("DROP TABLE scheduled_tasks"))
+                conn.execute(text("ALTER TABLE scheduled_tasks_new RENAME TO scheduled_tasks"))
+        except Exception:
+            with engine.connect() as cleanup:
+                try:
+                    cleanup.execute(text("DROP TABLE IF EXISTS scheduled_tasks_new"))
+                    cleanup.commit()
+                except Exception:
+                    cleanup.rollback()
+            raise
+        finally:
+            if fk_was_on:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.commit()
 
 
 def get_engine():
