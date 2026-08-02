@@ -372,6 +372,11 @@ class ZPAImportService:
 
         Rows written during this run have synced_at == run_start.  Any row
         with synced_at < run_start was not returned by the API this time.
+
+        Migration candidates are excluded: they do not exist in the tenant, so
+        the API will never return them and every import would otherwise flag
+        them deleted.  Their NULL synced_at already fails the comparison; the
+        source filter states the intent rather than resting on that.
         """
         deleted = 0
         type_filter = resource_types or [d.resource_type for d in RESOURCE_DEFINITIONS]
@@ -384,6 +389,7 @@ class ZPAImportService:
                     ZPAResource.tenant_id == self.tenant_id,
                     ZPAResource.resource_type.in_(type_filter),
                     ZPAResource.is_deleted == False,
+                    ZPAResource.source == "tenant",
                     ZPAResource.synced_at < run_start,
                 )
                 .all()
