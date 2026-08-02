@@ -580,9 +580,14 @@ class TaskRunHistory(Base):
     target_tenant_id = Column(Integer, nullable=True)
 
     task     = relationship("ScheduledTask", back_populates="runs")
+    # Two sides of one self-referential FK. Without back_populates SQLAlchemy
+    # treats them as independent relationships that both write parent_run_id,
+    # so a change through one side is not reflected in the other until expiry.
     parent   = relationship("TaskRunHistory", remote_side=[id],
-                            foreign_keys=[parent_run_id])
-    children = relationship("TaskRunHistory", foreign_keys=[parent_run_id])
+                            foreign_keys=[parent_run_id],
+                            back_populates="children")
+    children = relationship("TaskRunHistory", foreign_keys=[parent_run_id],
+                            back_populates="parent")
 
     def __repr__(self) -> str:
         return f"<TaskRunHistory task_id={self.task_id} status={self.status!r}>"
