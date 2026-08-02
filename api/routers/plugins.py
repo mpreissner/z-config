@@ -274,22 +274,31 @@ def list_available(user: AuthUser = Depends(require_plugin_admin)):
     """Manifest entries for the active channel, annotated with install state.
 
     `install_url` is the URL this host would actually use — channel and any
-    branch override already applied — so the UI shows what will be installed
+    per-plugin pin already applied — so the UI shows what will be installed
     rather than the stable default.
+
+    `pinned_ref` is that plugin's own pin, `effective_ref` the ref it resolves
+    to once the channel fills in for an absent pin. The two are separate because
+    the UI has to distinguish "follows the channel, which happens to be dev"
+    from "pinned to dev regardless of the channel".
     """
     from lib.plugin_manager import (
-        effective_install_url, fetch_manifest, get_installed_plugins, get_manifest_ref,
+        effective_install_url, fetch_manifest, get_installed_plugins,
+        get_manifest_ref, get_plugin_branch_overrides, get_plugin_channel,
     )
 
     available, error = fetch_manifest()
     if error:
         raise _github_error(error)
 
+    channel = get_plugin_channel()
+    pins = get_plugin_branch_overrides()
     installed = {p["package"]: p for p in get_installed_plugins()}
     plugins = []
     for entry in available or []:
         package = entry.get("package")
         current = installed.get(package)
+        pinned = pins.get(package)
         plugins.append({
             "name": entry.get("display_name") or entry.get("name"),
             "package": package,
@@ -298,8 +307,11 @@ def list_available(user: AuthUser = Depends(require_plugin_admin)):
             "installed": current is not None,
             "installed_version": current.get("version") if current else None,
             "install_url": effective_install_url(entry),
+            "pinned_ref": pinned,
+            "effective_ref": pinned or channel,
+            "has_dev": bool(entry.get("install_url_dev")),
         })
-    return {"plugins": plugins, "ref": get_manifest_ref()}
+    return {"plugins": plugins, "ref": get_manifest_ref(), "channel": channel}
 
 
 @router.get("/{package}/branches")
@@ -428,7 +440,7 @@ def install(body: InstallRequest, user: AuthUser = Depends(require_plugin_admin)
 # ---------------------------------------------------------------------------
 
 class BranchOverrideRequest(BaseModel):
-    branch: Optional[str] = None    # None clears the override
+    branch: Optional[str] = None    # 'stable' | 'dev' | a branch; None follows the channel
     reinstall: bool = True
 
 
@@ -436,19 +448,23 @@ class BranchOverrideRequest(BaseModel):
 def set_branch(
     package: str, body: BranchOverrideRequest, user: AuthUser = Depends(require_plugin_admin)
 ):
-    """Pin a plugin to a git branch, or clear the pin, and reinstall it.
+    """Pin one plugin to a ref — a channel name or a branch — and reinstall it.
 
-    Mirrors the TUI's hidden Ctrl+] flow: uninstall, record the override, then
+    The pin is per plugin, so a deployment can hold one plugin on stable while
+    another follows dev and a third tracks a feature branch. `branch: null`
+    drops the pin and returns that plugin to the channel setting.
+
+    Mirrors the TUI's hidden Ctrl+] flow: uninstall, record the pin, then
     install from the new ref.  The uninstall does not purge — this is a version
     switch, and the user's in-progress data belongs to the plugin either way.
 
-    `reinstall=false` records the override without touching pip, for pinning a
+    `reinstall=false` records the pin without touching pip, for pinning a
     plugin that is not installed yet.
     """
     from lib.plugin_manager import (
-        clear_pending_plugin_install, fetch_manifest, install_plugin,
-        set_pending_plugin_install, set_plugin_branch_override, uninstall_plugin,
-        url_for_branch,
+        clear_pending_plugin_install, fetch_manifest, get_plugin_channel,
+        install_plugin, install_url_for_ref, set_pending_plugin_install,
+        set_plugin_branch_override, uninstall_plugin,
     )
 
     _validate_package(package)
@@ -473,32 +489,21 @@ def set_branch(
             status_code=404, detail=f"'{package}' is not in the plugin manifest"
         )
 
-    base_url = entry.get("install_url_dev") or entry.get("install_url", "")
-    if not base_url:
-        raise HTTPException(
-            status_code=422, detail=f"No install URL in the manifest for '{package}'"
-        )
-
-    if branch:
-        install_url = url_for_branch(base_url, branch)
-    else:
-        # Clearing the override reverts to whatever the active channel points at.
-        from lib.plugin_manager import get_plugin_channel
-        install_url = (
-            (entry.get("install_url_dev") or entry.get("install_url", ""))
-            if get_plugin_channel() == "dev"
-            else entry.get("install_url", "")
-        )
+    # A cleared pin falls back to the channel, so both cases resolve through the
+    # same ref vocabulary — 'stable' and 'dev' are refs like any branch name.
+    channel = get_plugin_channel()
+    ref = branch or channel
+    install_url = install_url_for_ref(entry, ref)
     if not install_url:
         raise HTTPException(
-            status_code=422, detail=f"No install URL for '{package}' on this channel"
+            status_code=422, detail=f"No install URL for '{package}' at '{ref}'"
         )
 
     job_id, created = store.create_unique(_PIP_JOB_KEY)
     if not created:
         return {"job_id": job_id, "already_running": True}
 
-    label = branch or "channel default"
+    label = branch or f"channel default ({channel})"
 
     def run():
         try:

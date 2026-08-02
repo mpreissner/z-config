@@ -299,7 +299,7 @@ def set_plugin_channel(channel: str) -> None:
 
 
 def get_plugin_branch_overrides() -> dict:
-    """Return per-package branch overrides: {package_name: branch_name}."""
+    """Return per-package ref pins: {package_name: ref}, ref per install_url_for_ref()."""
     import json
     from db.database import get_setting
     raw = get_setting("plugin_branch_overrides")
@@ -338,11 +338,12 @@ def clear_pending_plugin_install() -> None:
 
 
 def set_plugin_branch_override(package_name: str, branch: Optional[str]) -> None:
-    """Set or clear a branch override for a specific package.
+    """Pin one package to a ref, or clear its pin.
 
-    When set, the override takes precedence over the active channel when
-    constructing install URLs via url_for_branch().
-    Pass branch=None to clear the override.
+    The ref is 'stable', 'dev', or a branch name — see install_url_for_ref().
+    A pin outranks the channel, which is what lets one plugin sit on stable
+    while another follows dev. Pass branch=None to clear it and follow the
+    channel again.
     """
     import json
     from db.database import set_setting
@@ -373,22 +374,38 @@ def url_for_branch(base_url: str, branch: str) -> str:
     return f"{stripped}@{branch}"
 
 
-def effective_install_url(plugin_entry: dict) -> str:
-    """Return the install URL for the current channel and any branch override.
+def install_url_for_ref(plugin_entry: dict, ref: str) -> str:
+    """Return the install URL for one plugin at one ref.
 
-    Priority: per-package branch override > channel setting > stable.
+    A ref is either of the two channel names or a git branch. Keeping all three
+    in the same vocabulary is what lets plugins differ from each other: one can
+    sit on stable while another follows dev and a third tracks a feature branch,
+    without a global setting deciding for all of them.
     """
-    package   = plugin_entry.get("package", "")
-    overrides = get_plugin_branch_overrides()
+    stable = plugin_entry.get("install_url", "")
+    dev    = plugin_entry.get("install_url_dev") or stable
 
-    if package in overrides:
-        branch   = overrides[package]
-        base_url = plugin_entry.get("install_url_dev") or plugin_entry.get("install_url", "")
-        return url_for_branch(base_url, branch) if base_url else ""
+    if ref == "stable":
+        return stable
+    if ref == "dev":
+        return dev
+    # A branch. Built off the dev URL because that is the one carrying an @ref
+    # for url_for_branch to replace; it falls back to stable for manifests that
+    # only publish one URL.
+    base = dev or stable
+    return url_for_branch(base, ref) if base else ""
 
-    if get_plugin_channel() == "dev":
-        return plugin_entry.get("install_url_dev") or plugin_entry.get("install_url", "")
-    return plugin_entry.get("install_url", "")
+
+def effective_install_url(plugin_entry: dict) -> str:
+    """Return the install URL a plugin would actually be installed from.
+
+    Priority: the plugin's own pin > the channel setting. The pin holds a ref,
+    so pinning to 'stable' is as expressible as pinning to a feature branch —
+    a plugin can stay on stable while the channel says dev.
+    """
+    package = plugin_entry.get("package", "")
+    pin     = get_plugin_branch_overrides().get(package)
+    return install_url_for_ref(plugin_entry, pin or get_plugin_channel())
 
 
 def uninstall_plugin(package_name: str, purge_data: bool = False) -> tuple[bool, str]:
