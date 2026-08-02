@@ -80,6 +80,44 @@ def roles_for_users(session, users) -> dict:
     return {uid: _order(roles) for uid, roles in out.items()}
 
 
+LAST_ADMIN_MESSAGE = (
+    "This change would leave the install with no active administrator"
+)
+
+
+def active_admin_count(session) -> int:
+    """How many accounts can administer this install *right now*.
+
+    Base role or group mapping — the same union `available_roles` performs, so
+    an account that is only an admin through a group counts, and demoting the
+    last `User.role == "admin"` is not by itself a lockout.
+
+    Meant to be called *after* a change has been flushed and *before* its
+    session commits. `get_session` rolls back on the way out, so a caller that
+    sees zero here refuses by raising and the change is undone. Measuring the
+    result beats predicting it: every write path asks the same question of the
+    same data, and no caller has to model what its own edit was about to do.
+    """
+    from db.models import User, UserGroup, UserGroupMember
+
+    admins = {
+        uid
+        for (uid,) in session.query(User.id).filter(
+            User.role == "admin", User.is_active.is_(True)
+        )
+    }
+    # "admin" is hardcoded where ROLE_ORDER is not: this counts who can still
+    # unlock the deployment, and only one role does that.
+    admins |= {
+        uid
+        for (uid,) in session.query(UserGroupMember.user_id)
+        .join(UserGroup, UserGroup.id == UserGroupMember.group_id)
+        .join(User, User.id == UserGroupMember.user_id)
+        .filter(UserGroup.mapped_role == "admin", User.is_active.is_(True))
+    }
+    return len(admins)
+
+
 def resolve_active(roles: Sequence[str], requested: Optional[str] = None) -> str:
     """The role a session should hold.
 

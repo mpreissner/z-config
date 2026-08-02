@@ -31,6 +31,7 @@ from db.models import (
     UserGroupMember,
     UserTenantEntitlement,
 )
+from services import role_service
 
 
 class GroupError(Exception):
@@ -43,6 +44,19 @@ class GroupError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+
+
+def _assert_admin_remains(session) -> None:
+    """Refuse a change that has just left the install with no active admin.
+
+    A group's `mapped_role` is a real source of admin (see
+    `services/role_service.py`), so clearing it, deleting the group, or removing
+    its last member can lock everyone out on a deployment whose admins come from
+    the IdP rather than from `User.role`. Checked after the change is flushed —
+    `get_session` rolls it back when this raises.
+    """
+    if role_service.active_admin_count(session) == 0:
+        raise GroupError(role_service.LAST_ADMIN_MESSAGE, status=409)
 
 
 def _out(group: UserGroup, member_count: int = 0, tenant_count: int = 0) -> dict:
@@ -156,6 +170,8 @@ def update_group(
 
         g.updated_at = datetime.utcnow()
         session.flush()
+        if set_role:
+            _assert_admin_remains(session)
         session.refresh(g)
         members = session.query(UserGroupMember).filter_by(group_id=group_id).count()
         tenants = session.query(GroupTenantEntitlement).filter_by(group_id=group_id).count()
@@ -183,6 +199,7 @@ def delete_group(group_id: int) -> str:
         session.query(PluginEntitlement).filter_by(group_id=group_id).delete()
         session.delete(g)
         session.flush()
+        _assert_admin_remains(session)
         return name
 
 
@@ -276,6 +293,7 @@ def remove_member(group_id: int, user_id: int) -> None:
             )
         session.delete(m)
         session.flush()
+        _assert_admin_remains(session)
 
 
 def groups_for_user(user_id: int) -> list[dict]:

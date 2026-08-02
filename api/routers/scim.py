@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response
 
 from db.database import get_session
 from db.models import ScimToken, User, UserGroup, UserGroupMember
+from services import role_service
 
 router = APIRouter(prefix="/scim/v2", tags=["SCIM"])
 
@@ -194,27 +195,21 @@ def _truthy(value: Any, default: bool = True) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
-def _assert_not_last_admin(session, user: User, *, deactivating: bool, new_role: Optional[str]) -> None:
-    """Refuse changes that would leave the install with no active admin.
+def _assert_admin_remains(session) -> None:
+    """Refuse a change that has just left the install with no active admin.
 
-    A group mapping typo should not be able to lock everyone out.
+    Called after the edit is flushed rather than before it is applied: the
+    account being changed may hold admin through a group rather than through
+    `User.role`, and a PATCH may carry several operations whose combined effect
+    is not visible one at a time. Counting afterwards asks the question of the
+    database instead of re-deriving it here, and `get_session` rolls the
+    refused change back on the way out.
+
+    A group mapping typo, or an IdP that deactivates the wrong account, should
+    not be able to lock everyone out.
     """
-    if user.role != "admin" or not user.is_active:
-        return
-    losing_admin = deactivating or (new_role is not None and new_role != "admin")
-    if not losing_admin:
-        return
-    remaining = (
-        session.query(User)
-        .filter(User.role == "admin", User.is_active.is_(True), User.id != user.id)
-        .count()
-    )
-    if remaining == 0:
-        raise ScimError(
-            400,
-            "Refusing to remove the last active admin account",
-            scim_type="mutability",
-        )
+    if role_service.active_admin_count(session) == 0:
+        raise ScimError(400, role_service.LAST_ADMIN_MESSAGE, scim_type="mutability")
 
 
 # A group's mapped_role is not written into User.role. It adds to the roles the
@@ -369,7 +364,6 @@ async def replace_user(user_id: int, request: Request, _: int = Depends(require_
             raise ScimError(404, f"User {user_id} not found")
 
         active = _truthy(payload.get("active"), u.is_active)
-        _assert_not_last_admin(session, u, deactivating=not active, new_role=None)
 
         name = payload.get("name") or {}
         if payload.get("userName"):
@@ -381,6 +375,7 @@ async def replace_user(user_id: int, request: Request, _: int = Depends(require_
             u.scim_external_id = payload["externalId"]
         u.is_active = active
         session.flush()
+        _assert_admin_remains(session)
         session.refresh(u)
         body = user_to_scim(u)
         audit.append({"operation": "scim_replace_user", "action": "UPDATE", "name": u.username})
@@ -412,13 +407,16 @@ async def patch_user(user_id: int, request: Request, _: int = Depends(require_sc
             # Entra sends {"op":"replace","value":{"active":false}} with no path.
             if not path and isinstance(value, dict):
                 for k, v in value.items():
-                    _apply_user_field(session, u, k, v, action)
+                    _apply_user_field(u, k, v, action)
                 continue
             if action == "remove" and not path:
                 continue
-            _apply_user_field(session, u, path, value, action)
+            _apply_user_field(u, path, value, action)
 
         session.flush()
+        # After the whole batch: a PATCH that deactivates and reactivates in one
+        # body has no net effect, and checking per-operation would refuse it.
+        _assert_admin_remains(session)
         session.refresh(u)
         body = user_to_scim(u)
         audit.append({"operation": "scim_patch_user", "action": "UPDATE", "name": u.username})
@@ -427,7 +425,7 @@ async def patch_user(user_id: int, request: Request, _: int = Depends(require_sc
     return _scim_json(body)
 
 
-def _apply_user_field(session, u: User, path: str, value: Any, action: str) -> None:
+def _apply_user_field(u: User, path: str, value: Any, action: str) -> None:
     """Apply one PATCH operation. Unknown paths are ignored on purpose.
 
     Entra in particular sends operations for attributes we do not store; 400ing
@@ -436,9 +434,7 @@ def _apply_user_field(session, u: User, path: str, value: Any, action: str) -> N
     key = path.split("[", 1)[0].strip().lower()
 
     if key == "active":
-        active = _truthy(value, True) if action != "remove" else False
-        _assert_not_last_admin(session, u, deactivating=not active, new_role=None)
-        u.is_active = active
+        u.is_active = _truthy(value, True) if action != "remove" else False
     elif key == "username":
         if isinstance(value, str) and value.strip():
             u.username = value.strip()
@@ -469,8 +465,9 @@ def delete_user(user_id: int, _: int = Depends(require_scim_token)):
         u = session.query(User).filter_by(id=user_id).first()
         if not u:
             raise ScimError(404, f"User {user_id} not found")
-        _assert_not_last_admin(session, u, deactivating=True, new_role=None)
         u.is_active = False
+        session.flush()
+        _assert_admin_remains(session)
         audit.append({"operation": "scim_delete_user", "action": "DELETE", "name": u.username})
 
     _audit(audit)
@@ -574,6 +571,7 @@ async def replace_group(group_id: int, request: Request, _: int = Depends(requir
         if "members" in payload:
             _set_members(session, g.id, payload.get("members") or [], replace=True)
         session.flush()
+        _assert_admin_remains(session)
         session.refresh(g)
         body = group_to_scim(g, _members_of(session, g.id))
         audit.append({"operation": "scim_replace_group", "action": "UPDATE", "name": g.display_name})
@@ -618,6 +616,7 @@ async def patch_group(group_id: int, request: Request, _: int = Depends(require_
                     _set_members(session, g.id, value["members"] or [], replace=(action == "replace"))
 
         session.flush()
+        _assert_admin_remains(session)
         session.refresh(g)
         body = group_to_scim(g, _members_of(session, g.id))
         audit.append({"operation": "scim_patch_group", "action": "UPDATE", "name": g.display_name})
@@ -637,6 +636,7 @@ def delete_group(group_id: int, _: int = Depends(require_scim_token)):
         session.query(UserGroupMember).filter_by(group_id=g.id).delete()
         session.delete(g)
         session.flush()
+        _assert_admin_remains(session)
         # Members lose whatever role this group offered on their next token —
         # nothing to rewrite, because User.role was never it.
         audit.append({"operation": "scim_delete_group", "action": "DELETE", "name": name})
