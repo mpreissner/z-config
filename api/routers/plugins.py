@@ -15,16 +15,26 @@ variable is deliberately absent from the README, the compose file and the
 sample env: it is a switch for whoever runs the deployment, found by reading
 this file.
 
-*Admin only.*  Installing a plugin runs pip against a URL and then imports the
-result into this process on the next start, so every endpoint here is behind
-`require_plugin_admin`, including the read-only ones.  That dependency answers
-404 rather than 403 for a non-admin, so an ordinary user cannot infer the
-manager exists from the shape of the refusal.
+*Managing and using are different roles.*  Installing a plugin runs pip against
+a URL and then imports the result into this process on the next start, so every
+management endpoint is behind `require_plugin_admin`, including the read-only
+ones.  The three paths an entitled user reaches a plugin through — `/entitled`,
+`/{package}/ui` and `/{package}/actions/{key}` — are behind `require_plugin_user`,
+which admins fail: an admin installs and grants plugins, they do not run them.
+An account that does both holds both roles and switches between them.  Every
+refusal here is a 404, so neither role learns from the shape of one what the
+other would have found.
 
 *Installing is not publishing.*  A plugin becomes usable by an account only
 once an admin grants it, per user or per SCIM group — zs-config may be shared,
 and the team that asked for a plugin is rarely everyone with a login.  The
 grant list lives in `services/plugin_entitlement_service.py`.
+
+*A plugin's web interface is declarative.*  A plugin describes its actions and
+their parameters; it ships no markup and no JavaScript, and its `run` callables
+never leave the server.  `lib/plugin_web.py` holds that contract.  Every tenant
+parameter is checked against the caller's own entitlements before an action
+starts, so a plugin cannot widen the reach of the account running it.
 
 *A GitHub auth failure is never a 401.*  The web client logs the user out when
 an authenticated call comes back 401 (`web/src/api/client.ts`), and "your
@@ -45,11 +55,12 @@ import os
 import threading
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from api.dependencies import require_auth, AuthUser
+from api.dependencies import require_auth, check_tenant_access, AuthUser
 from api.jobs import store
+from lib import plugin_web
 
 router = APIRouter(prefix="/api/v1/plugins", tags=["Plugins"])
 
@@ -70,13 +81,18 @@ def manager_enabled() -> bool:
     return os.environ.get(MANAGER_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def require_plugin_manager(user: AuthUser = Depends(require_auth)) -> AuthUser:
-    """Any authenticated account, but only where the manager is switched on.
+def require_plugin_user(user: AuthUser = Depends(require_auth)) -> AuthUser:
+    """A session that may *use* a plugin, which an admin session is not.
 
-    Kept separate from `require_plugin_admin` for the one endpoint an ordinary
-    user is allowed to ask: which plugins have been granted to them.
+    Admins install, grant and remove plugins; they do not run them, exactly as
+    they cannot reach Templates or Scheduled Tasks.  An account that needs both
+    holds both roles and switches (see `services/role_service.py`) — the admin
+    role is for managing the deployment, and one session only ever holds one.
+
+    404 like everything else here, so the refusal says nothing about what the
+    account would find after switching.
     """
-    if not manager_enabled():
+    if not manager_enabled() or user.role == "admin":
         raise HTTPException(status_code=404, detail="Not Found")
     return user
 
@@ -562,21 +578,208 @@ class EntitlementGrant(BaseModel):
 
 
 @router.get("/entitled")
-def my_plugins(user: AuthUser = Depends(require_plugin_manager)):
-    """Which plugins the calling account may use.
+def my_plugins(user: AuthUser = Depends(require_plugin_user)):
+    """Which plugins the calling account may use, and which of those it can open.
 
-    The one endpoint here an ordinary user may call: it answers only about
-    them, and an account with no grants gets an empty list, which is also what
-    a deployment with no plugins returns.  `unrestricted` is true for admins,
-    who are not checked against the grant list at all.
+    It answers only about the caller, and an account with no grants gets an
+    empty list — the same answer as a deployment with no plugins at all, which
+    is why the nav can ask this without first establishing that the manager is
+    switched on.
+
+    `plugins` is the nav: entitled *and* installed *and* offering a usable web
+    spec.  A grant for something not installed yet, or installed but with no
+    web interface, is real but has nowhere to point, so it is left out rather
+    than rendered as a link to a dead page.  `packages` is the raw grant list.
+
+    `entitled_packages` returns None for an unrestricted account, but no admin
+    session reaches this endpoint, so the list here is always a real one.
+    """
+    from lib.plugin_manager import get_installed_plugins
+    from lib import plugin_web
+    from services import plugin_entitlement_service
+
+    packages = plugin_entitlement_service.entitled_packages(user.user_id, user.role) or []
+
+    plugins = []
+    for plugin in get_installed_plugins():
+        package = plugin.get("package")
+        if package not in packages:
+            continue
+        spec = plugin_web.describe(plugin)
+        if not spec:
+            continue
+        plugins.append({
+            "package": package,
+            "name": plugin.get("name"),
+            "version": plugin.get("version"),
+        })
+    plugins.sort(key=lambda p: (p["name"] or "").lower())
+
+    return {"packages": packages, "plugins": plugins}
+
+
+def _entitled_plugin(package: str, user: AuthUser) -> dict:
+    """The installed plugin this account is allowed to open, or 404.
+
+    Not being entitled answers exactly as not being installed does.  A user who
+    was never granted a plugin has no way to learn from the API that it exists
+    on this deployment, which is the same reasoning behind `require_plugin_admin`
+    and `require_plugin_user` answering 404 rather than 403.
     """
     from services import plugin_entitlement_service
 
-    packages = plugin_entitlement_service.entitled_packages(user.user_id, user.role)
-    return {
-        "packages": packages if packages is not None else [],
-        "unrestricted": packages is None,
-    }
+    _validate_package(package)
+    if not plugin_entitlement_service.may_use(user.user_id, user.role, package):
+        raise HTTPException(status_code=404, detail=f"Plugin '{package}' is not installed")
+    return _require_installed(package)
+
+
+@router.get("/{package}/ui")
+def plugin_ui(package: str, user: AuthUser = Depends(require_plugin_user)):
+    """The declarative description of one plugin's web interface.
+
+    Everything the page needs to draw itself: the actions, their parameters and
+    how to label them.  The `run` callables never leave the server.
+    """
+    from lib import plugin_web
+
+    plugin = _entitled_plugin(package, user)
+    spec = plugin_web.describe(plugin)
+    if not spec:
+        raise HTTPException(
+            status_code=404, detail=f"Plugin '{package}' has no web interface"
+        )
+    return spec
+
+
+async def _collect_params(request, action: dict) -> tuple[dict, Optional[str]]:
+    """Pull the caller's values off the request, saving uploads to disk.
+
+    Two shapes, because a file cannot ride in a JSON body: a plain JSON object,
+    or multipart with the non-file values as a JSON string in `params` and each
+    file under its own parameter name. Returns the raw values and the temp
+    directory to delete once the action has finished with them.
+    """
+    import json
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    wanted_files = plugin_web.file_params(action)
+    content_type = request.headers.get("content-type", "")
+
+    if not content_type.startswith("multipart/form-data"):
+        try:
+            supplied = await request.json()
+        except Exception:
+            supplied = {}
+        if not isinstance(supplied, dict):
+            raise HTTPException(status_code=400, detail="Body must be a JSON object")
+        return supplied, None
+
+    form = await request.form()
+    try:
+        supplied = json.loads(form.get("params") or "{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="'params' is not valid JSON")
+    if not isinstance(supplied, dict):
+        raise HTTPException(status_code=400, detail="'params' must be a JSON object")
+
+    tmpdir = None
+    for name in wanted_files:
+        upload = form.get(name)
+        if upload is None or not hasattr(upload, "filename"):
+            continue
+        if tmpdir is None:
+            tmpdir = tempfile.mkdtemp(prefix=".zs-plugin-")
+        # The plugin gets a path it can open, never the client's own filename —
+        # that string is attacker-controlled and has no business on this disk.
+        dest = Path(tmpdir) / f"{name}.upload"
+        with open(dest, "wb") as fh:
+            shutil.copyfileobj(upload.file, fh)
+        supplied[name] = str(dest)
+
+    return supplied, tmpdir
+
+
+@router.post("/{package}/actions/{action_key}", status_code=202)
+async def run_plugin_action(
+    package: str,
+    action_key: str,
+    request: Request,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """Run one of a plugin's declared actions. Returns a job_id.
+
+    Backgrounded unconditionally: a plugin action is arbitrary work of unknown
+    length, and the job store already gives the page progress and cancellation
+    for free.
+
+    Every tenant parameter is checked against the caller's own entitlements
+    before the action starts. A plugin cannot widen the reach of the account
+    running it, whatever tenant id it was handed.
+    """
+    import shutil
+
+    plugin = _entitled_plugin(package, user)
+    described = plugin_web.describe(plugin)
+    action = next(
+        (a for a in (described or {}).get("actions", []) if a["key"] == action_key), None
+    )
+    if not action:
+        raise HTTPException(status_code=404, detail=f"Unknown action '{action_key}'")
+
+    raw_action = plugin_web.find_action(plugin, action_key)
+    if not raw_action or not callable(raw_action.get("run")):
+        raise HTTPException(status_code=500, detail=f"Action '{action_key}' has no runnable")
+
+    supplied, tmpdir = await _collect_params(request, action)
+    try:
+        params = plugin_web.coerce_params(action, supplied)
+    except plugin_web.PluginWebError as exc:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    # No admin exemption, unlike the tenant routers: an admin session cannot
+    # reach this endpoint at all, so every caller here is entitlement-checked.
+    for name in plugin_web.tenant_params(action):
+        if params.get(name) is not None:
+            check_tenant_access(int(params[name]), user)
+
+    job_id = store.create(key=f"plugin:{package}:{action_key}")
+    run_callable = raw_action["run"]
+    label = action["label"]
+
+    def run():
+        ctx = plugin_web.PluginContext(
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            job_id=job_id,
+            emit=lambda m: store.append(
+                job_id, {"type": "progress", "phase": "plugin", "message": m}
+            ),
+            cancelled=lambda: store.is_cancel_requested(job_id),
+        )
+        store.append(job_id, {"type": "progress", "phase": "plugin", "message": f"{label}..."})
+        try:
+            result = run_callable(params, ctx)
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+            _audit("plugin_action", "EXECUTE", "FAILED", package,
+                   plugin_action=action_key, by=user.username, error=str(exc))
+            return
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        store.complete(job_id, plugin_web.normalise_result(result))
+        _audit("plugin_action", "EXECUTE", "SUCCESS", package,
+               plugin_action=action_key, by=user.username)
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id, "already_running": False}
 
 
 @router.get("/entitlements")

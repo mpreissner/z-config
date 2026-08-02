@@ -5,7 +5,7 @@ import { fetchHealth } from "../api/system";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { useAuth } from "../context/AuthContext";
 import { useActiveTenant } from "../context/ActiveTenantContext";
-import { usePluginManagerAvailable } from "../hooks/usePluginManager";
+import { usePluginManagerAvailable, useEntitledPlugins } from "../hooks/usePluginManager";
 import { fetchTenants, Tenant } from "../api/tenants";
 import zLogo from "../assets/z-logo.jpg";
 
@@ -142,6 +142,8 @@ export default function Layout({ children }: LayoutProps) {
     ? [...adminNavItems, { to: "/admin/plugins", label: "Plugins" }]
     : adminNavItems;
 
+  const { plugins: entitledPlugins } = useEntitledPlugins();
+
   const { data: tenants } = useQuery({
     queryKey: ["tenants"],
     queryFn: fetchTenants,
@@ -259,6 +261,16 @@ export default function Layout({ children }: LayoutProps) {
               Templates
             </NavLink>
           )}
+
+          {/* Plugins granted to this account. Hidden from an admin session
+              like the two items above: admins install and grant plugins, they
+              do not run them, and an account that does both switches roles.
+              Empty on any deployment without the manager. */}
+          {!isAdmin && entitledPlugins.map((p) => (
+            <NavLink key={p.package} to={`/plugins/${p.package}`} className={navLinkClass}>
+              {p.name || p.package}
+            </NavLink>
+          ))}
 
           {/* Audit Log */}
           <NavLink to="/audit" className={navLinkClass}>

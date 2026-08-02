@@ -26,6 +26,10 @@ import { fetchTenants } from "./api/tenants";
 // every deployment serves.
 const AdminPluginsPage = lazy(() => import("./pages/AdminPluginsPage"));
 
+// Likewise for the page entitled users see. A deployment with no plugins never
+// fetches either chunk.
+const PluginPage = lazy(() => import("./pages/PluginPage"));
+
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useAuth();
   const { data: tenants } = useQuery({
@@ -39,6 +43,15 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to={`/tenant/${tenants[0].id}/zia`} replace />;
   }
   return <Navigate to="/tenants" replace />;
+}
+
+/** Anyone but an admin: running a plugin is the user role's job, and the API
+ *  answers an admin session 404 here. Sent to the dashboard rather than shown
+ *  that 404 — an admin who lands here wanted the role switcher. */
+function PluginUserRoute({ children }: { children: React.ReactNode }) {
+  const { isAdmin } = useAuth();
+  if (isAdmin) return <Navigate to="/tenants" replace />;
+  return <>{children}</>;
 }
 
 /** Admin, and only on a deployment that registered the plugin API. */
@@ -102,6 +115,19 @@ export default function App() {
                   <Route
                     path="/admin/settings"
                     element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
+                  />
+                  {/* One route for every plugin. Entitlement is enforced by
+                      the API — a package the account was not granted answers
+                      404 exactly as an uninstalled one does. */}
+                  <Route
+                    path="/plugins/:pkg"
+                    element={
+                      <PluginUserRoute>
+                        <Suspense fallback={<LoadingSpinner />}>
+                          <PluginPage />
+                        </Suspense>
+                      </PluginUserRoute>
+                    }
                   />
                   <Route
                     path="/admin/plugins"

@@ -180,3 +180,94 @@ export const grantPluginAccess = (
 
 export const revokePluginAccess = (id: number): Promise<void> =>
   apiFetch(`/api/v1/plugins/entitlements/${id}`, { method: "DELETE" });
+
+// ---------------------------------------------------------------------------
+// Using a plugin (as opposed to managing one)
+// ---------------------------------------------------------------------------
+
+/** A plugin the current account may open — one left-nav item. */
+export interface EntitledPlugin {
+  package: string;
+  name: string | null;
+  version: string | null;
+}
+
+export interface PluginParam {
+  name: string;
+  label: string;
+  type: "text" | "textarea" | "password" | "number" | "boolean" | "select" | "tenant" | "file";
+  required: boolean;
+  help: string | null;
+  placeholder: string | null;
+  options?: { value: string; label: string }[];
+  default?: unknown;
+}
+
+export interface PluginAction {
+  key: string;
+  label: string;
+  description: string | null;
+  /** Shown as a confirmation prompt before the action runs. */
+  confirm: string | null;
+  destructive: boolean;
+  params: PluginParam[];
+}
+
+/** Everything the page needs to draw itself. The plugin ships no markup. */
+export interface PluginUi {
+  name: string | null;
+  package: string;
+  version: string | null;
+  description: string | null;
+  actions: PluginAction[];
+}
+
+export interface PluginActionResult {
+  message: string;
+  table: { columns: string[]; rows: unknown[][] } | null;
+  details: Record<string, unknown>;
+}
+
+/**
+ * Plugins granted to this account that are installed and have a web interface.
+ *
+ * Resolves to an empty list rather than throwing whenever the manager is off —
+ * the nav asks this on every page load and a deployment without plugins is the
+ * ordinary case, not an error worth surfacing.
+ */
+export async function fetchEntitledPlugins(): Promise<EntitledPlugin[]> {
+  try {
+    const r = await apiFetch<{ plugins?: EntitledPlugin[] }>("/api/v1/plugins/entitled");
+    return Array.isArray(r?.plugins) ? r.plugins : [];
+  } catch {
+    return [];
+  }
+}
+
+export const fetchPluginUi = (packageName: string): Promise<PluginUi> =>
+  apiFetch(`/api/v1/plugins/${packageName}/ui`);
+
+/**
+ * Start one of a plugin's actions. Always a job — the work is arbitrary.
+ *
+ * Files cannot ride in a JSON body, so an action that declares any goes out as
+ * multipart with the rest of the values as a JSON string under `params`. The
+ * server reads both shapes; this picks whichever the values require.
+ */
+export function runPluginAction(
+  packageName: string,
+  actionKey: string,
+  params: Record<string, unknown>,
+  files: Record<string, File>,
+): Promise<JobStart> {
+  const path = `/api/v1/plugins/${packageName}/actions/${encodeURIComponent(actionKey)}`;
+  const names = Object.keys(files);
+  if (names.length === 0) {
+    return apiFetch(path, { method: "POST", body: JSON.stringify(params) });
+  }
+  const form = new FormData();
+  form.append("params", JSON.stringify(params));
+  for (const name of names) form.append(name, files[name]);
+  // No Content-Type header: the browser has to set the multipart boundary.
+  return apiFetch(path, { method: "POST", body: form });
+}
