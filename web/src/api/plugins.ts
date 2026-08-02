@@ -26,8 +26,14 @@ export interface AvailablePlugin {
   version: string;
   installed: boolean;
   installed_version: string | null;
-  /** The URL this host would use — channel and branch override applied. */
+  /** The URL this host would use — channel and any per-plugin pin applied. */
   install_url: string;
+  /** This plugin's own pin, or null when it just follows the channel. */
+  pinned_ref: string | null;
+  /** What the pin resolves to once the channel fills in for a null pin. */
+  effective_ref: string;
+  /** Whether the manifest publishes a dev URL for this plugin at all. */
+  has_dev: boolean;
 }
 
 export interface PluginStatus {
@@ -98,8 +104,33 @@ export const fetchPluginStatus = (verify = true): Promise<PluginStatus> =>
 export const fetchInstalledPlugins = (): Promise<{ plugins: InstalledPlugin[] }> =>
   apiFetch("/api/v1/plugins");
 
-export const fetchAvailablePlugins = (): Promise<{ plugins: AvailablePlugin[]; ref: string }> =>
-  apiFetch("/api/v1/plugins/available");
+export const fetchAvailablePlugins = (): Promise<{
+  plugins: AvailablePlugin[];
+  ref: string;
+  channel: string;
+}> => apiFetch("/api/v1/plugins/available");
+
+export const fetchPluginBranches = (
+  packageName: string,
+): Promise<{ package: string; branches: string[] }> =>
+  apiFetch(`/api/v1/plugins/${packageName}/branches`);
+
+/**
+ * Pin one plugin to a ref, or clear its pin with `ref = null`.
+ *
+ * `reinstall` is the caller's business: an installed plugin has to be rebuilt
+ * from the new ref (a job), while pinning one that is not installed yet is just
+ * a recorded preference the next install reads.
+ */
+export const setPluginRef = (
+  packageName: string,
+  ref: string | null,
+  reinstall: boolean,
+): Promise<JobStart | { package: string; branch: string | null; reinstalled: false }> =>
+  apiFetch(`/api/v1/plugins/${packageName}/branch`, {
+    method: "PUT",
+    body: JSON.stringify({ branch: ref, reinstall }),
+  });
 
 export const startGithubLogin = (): Promise<DeviceFlowStart> =>
   apiFetch("/api/v1/plugins/auth/device", { method: "POST" });

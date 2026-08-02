@@ -22,6 +22,7 @@ import {
   clearPendingInstall,
   fetchAvailablePlugins,
   fetchInstalledPlugins,
+  fetchPluginBranches,
   fetchPluginData,
   fetchPluginEntitlements,
   fetchPluginStatus,
@@ -30,6 +31,7 @@ import {
   installPlugin,
   revokePluginAccess,
   setPluginChannel,
+  setPluginRef,
   startGithubLogin,
   uninstallPlugin,
 } from "../api/plugins";
@@ -233,7 +235,8 @@ function ChannelPanel() {
         <div>
           <h2 className="font-semibold text-gray-900">Channel</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Which branch new installs come from. Nothing already installed changes.
+            The default for plugins that are not pinned individually. Nothing already
+            installed changes.
           </p>
         </div>
         <select
@@ -249,8 +252,8 @@ function ChannelPanel() {
 
       {overrides.length > 0 && (
         <p className="text-xs text-gray-600">
-          Branch pins:{" "}
-          {overrides.map(([pkg, branch]) => `${pkg} → ${branch}`).join(", ")}
+          Pinned, ignoring the channel:{" "}
+          {overrides.map(([pkg, ref]) => `${pkg} → ${ref}`).join(", ")}
         </p>
       )}
 
@@ -270,6 +273,94 @@ function ChannelPanel() {
         </div>
       )}
       {error && <ErrorMessage message={error} />}
+    </div>
+  );
+}
+
+// ── Per-plugin ref ───────────────────────────────────────────────────────────
+
+/**
+ * Which ref one plugin installs from, independent of every other plugin.
+ *
+ * "Channel default" and a pin of the same name are different answers: the first
+ * follows the channel wherever it goes, the second holds this plugin still when
+ * the channel moves. Feature branches come from the plugin's own branch listing,
+ * so a plugin with none simply offers the two channel names.
+ *
+ * Changing the ref of an installed plugin reinstalls it — hence the job — while
+ * pinning one that is not installed only records the choice for its first
+ * install.
+ */
+function RefSelect({
+  plugin,
+  channel,
+  busy,
+  onJob,
+}: {
+  plugin: AvailablePlugin;
+  channel: string;
+  busy: boolean;
+  onJob: (jobId: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  // Same key and args as ChannelPanel's, so the two share one fetch.
+  const { data: status } = useQuery({
+    queryKey: ["plugin-status"],
+    queryFn: () => fetchPluginStatus(true),
+  });
+
+  const { data: branchData } = useQuery({
+    queryKey: ["plugin-branches", plugin.package],
+    queryFn: () => fetchPluginBranches(plugin.package),
+    enabled: status?.github.authenticated === true,
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  const pin = useMutation({
+    mutationFn: (ref: string | null) => setPluginRef(plugin.package, ref, plugin.installed),
+    onSuccess: (res) => {
+      setError(null);
+      if ("job_id" in res) {
+        onJob(res.job_id);
+      } else {
+        qc.invalidateQueries({ queryKey: ["plugins-available"] });
+        qc.invalidateQueries({ queryKey: ["plugin-status"] });
+      }
+    },
+    onError: (e) => setError(errText(e, "Could not change the ref")),
+  });
+
+  // A pin whose branch has since been deleted still belongs in the list: drop it
+  // and the select would fall back to the first option, quietly claiming the
+  // plugin follows the channel when it does not.
+  const branches = [...(branchData?.branches ?? [])];
+  const pinned = plugin.pinned_ref;
+  if (pinned && pinned !== "stable" && pinned !== "dev" && !branches.includes(pinned)) {
+    branches.push(pinned);
+  }
+
+  return (
+    <div className="ml-auto flex flex-col items-end gap-1">
+      <select
+        value={pinned ?? ""}
+        onChange={(e) => pin.mutate(e.target.value || null)}
+        disabled={busy || pin.isPending}
+        title="Which ref this plugin installs from"
+        className="border border-gray-300 rounded-md px-2 py-1 text-xs max-w-[15rem] focus:outline-none focus:ring-2 focus:ring-zs-500 disabled:opacity-60"
+      >
+        <option value="">Channel default ({channel})</option>
+        <option value="stable">stable</option>
+        {plugin.has_dev && <option value="dev">dev</option>}
+        {branches.map((b) => (
+          <option key={b} value={b}>
+            {b}
+          </option>
+        ))}
+      </select>
+      {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
   );
 }
@@ -551,6 +642,12 @@ export default function AdminPluginsPage() {
   const installedRows: InstalledPlugin[] = installed?.plugins ?? [];
   const availableRows: AvailablePlugin[] = available?.plugins ?? [];
   const notInstalled = availableRows.filter((p) => !p.installed);
+  const channel = available?.channel ?? "stable";
+
+  // An installed plugin only gets a ref selector if the manifest is readable —
+  // the options and the install URL both come from there.
+  const manifestEntry = (pkg: string | null) =>
+    availableRows.find((a) => a.package === pkg);
 
   function jobFinished() {
     setJobId(null);
@@ -596,7 +693,17 @@ export default function AdminPluginsPage() {
                   </p>
                   {p.error && <p className="text-xs text-red-600 mt-0.5">{p.error}</p>}
                 </div>
-                <span className="ml-auto text-xs text-gray-500 whitespace-nowrap">
+                {manifestEntry(p.package) ? (
+                  <RefSelect
+                    plugin={manifestEntry(p.package)!}
+                    channel={channel}
+                    busy={!!jobId}
+                    onJob={setJobId}
+                  />
+                ) : (
+                  <span className="ml-auto" />
+                )}
+                <span className="text-xs text-gray-500 whitespace-nowrap">
                   {grantCount(p.package)} grant{grantCount(p.package) === 1 ? "" : "s"}
                 </span>
                 <button
@@ -645,10 +752,16 @@ export default function AdminPluginsPage() {
                     <p className="text-xs text-gray-600 mt-0.5">{p.description}</p>
                   )}
                 </div>
+                <RefSelect
+                  plugin={p}
+                  channel={channel}
+                  busy={!!jobId}
+                  onJob={setJobId}
+                />
                 <button
                   onClick={() => install.mutate(p.package)}
                   disabled={!!jobId || install.isPending}
-                  className="ml-auto px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60 whitespace-nowrap"
+                  className="px-3 py-1.5 text-xs rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60 whitespace-nowrap"
                 >
                   Install
                 </button>
