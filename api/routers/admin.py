@@ -21,6 +21,21 @@ from db.models import (
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
 
+def _assert_admin_remains(session) -> None:
+    """Refuse a change that has just left the install with no active admin.
+
+    The self-edit guards below stop an admin demoting, deactivating or deleting
+    themselves, which covers the obvious lockout but not all of it: the caller
+    may hold admin only through a group, and a token outlives the change that
+    revoked the role it names. This asks the database instead of arguing from
+    who the caller is. `get_session` rolls the refused change back.
+    """
+    from services import role_service
+
+    if role_service.active_admin_count(session) == 0:
+        raise HTTPException(status_code=409, detail=role_service.LAST_ADMIN_MESSAGE)
+
+
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 class UserOut(BaseModel):
@@ -153,6 +168,7 @@ def update_user(user_id: int, body: UserUpdate, current: AuthUser = Depends(requ
             user.password_hash = hash_password(body.password)
         user.updated_at = datetime.utcnow()
         session.flush()
+        _assert_admin_remains(session)
         session.refresh(user)
         return _user_out(user)
 
@@ -166,6 +182,8 @@ def delete_user(user_id: int, current: AuthUser = Depends(require_admin)):
         if user.id == current.user_id:
             raise HTTPException(status_code=400, detail="Cannot delete your own account")
         session.delete(user)
+        session.flush()
+        _assert_admin_remains(session)
 
 
 # ── Entitlements ──────────────────────────────────────────────────────────────
