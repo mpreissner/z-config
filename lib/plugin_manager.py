@@ -50,6 +50,16 @@ _PLUGIN_BRANCH_FILTERS: dict[str, str] = {
 # Installed plugins (entry point discovery)
 # ---------------------------------------------------------------------------
 
+def is_valid_package_name(name: str) -> bool:
+    """Whether a string is a package name safe to hand to pip.
+
+    install_plugin() and uninstall_plugin() validate their own arguments; this
+    is for callers that take a package name from an untrusted place — an API
+    path segment — and want to reject it before doing any work with it.
+    """
+    return bool(_SAFE_PACKAGE_RE.match(name or ""))
+
+
 def get_installed_plugins() -> list[dict]:
     """Return all installed plugins discovered via entry points.
 

@@ -1,0 +1,579 @@
+"""Plugin manager API router.
+
+Exposes the operations `cli/menus/plugin_menu.py` already offers — GitHub login,
+channel switching, manifest browsing, install, branch override, uninstall — so
+the web UI can manage plugins without the TUI.
+
+Three things shape the design:
+
+*Admin only.*  Installing a plugin runs pip against a URL and then imports the
+result into this process on the next start, so every endpoint here is behind
+`require_admin`, including the read-only ones.
+
+*A GitHub auth failure is never a 401.*  The web client logs the user out when
+an authenticated call comes back 401 (`web/src/api/client.ts`), and "your
+GitHub token expired" has nothing to do with the zs-config session.  Those are
+409, and an upstream GitHub failure is 502.
+
+*pip mutations are serialised.*  Install, uninstall and the branch switch all
+share one job key, so two pip processes can never run against the same
+environment at once.
+
+Entry points are read when the interpreter starts, so a plugin that was just
+installed or removed is not live until the process restarts.  Every job that
+touches pip says so in its result rather than pretending the change took
+effect.
+"""
+
+import threading
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from api.dependencies import require_admin, AuthUser
+from api.jobs import store
+
+router = APIRouter(prefix="/api/v1/plugins", tags=["Plugins"])
+
+# One key for every pip-mutating job: install, uninstall and the branch switch
+# all rewrite the same site-packages, so they queue behind each other.
+_PIP_JOB_KEY = "plugin:pip"
+
+_NOT_AUTHENTICATED = "Not authenticated to GitHub — log in first."
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _serialisable(plugin: dict) -> dict:
+    """Drop the menu callable — the rest of the entry is JSON."""
+    return {
+        "name": plugin.get("name"),
+        "package": plugin.get("package"),
+        "version": plugin.get("version"),
+        "entry_point": plugin.get("entry_point"),
+        "has_menu": plugin.get("menu") is not None,
+        "error": plugin.get("error"),
+    }
+
+
+def _validate_package(package: str) -> str:
+    from lib.plugin_manager import is_valid_package_name
+
+    if not is_valid_package_name(package):
+        raise HTTPException(status_code=400, detail=f"Invalid package name: {package!r}")
+    return package
+
+
+def _require_installed(package: str) -> dict:
+    from lib.plugin_manager import get_installed_plugins
+
+    _validate_package(package)
+    for plugin in get_installed_plugins():
+        if plugin.get("package") == package:
+            return plugin
+    raise HTTPException(status_code=404, detail=f"Plugin '{package}' is not installed")
+
+
+def _github_error(message: str) -> HTTPException:
+    """Map a plugin_manager error string onto a status the web client can act on.
+
+    Never 401: see the module docstring.
+    """
+    if "Not authenticated" in message:
+        return HTTPException(status_code=409, detail=_NOT_AUTHENTICATED)
+    if "token expired" in message or "revoked" in message:
+        return HTTPException(status_code=409, detail=message)
+    return HTTPException(status_code=502, detail=message)
+
+
+def _audit(operation: str, action: str, status: str, package: str, **details) -> None:
+    from services import audit_service
+
+    audit_service.log(
+        product=None,
+        operation=operation,
+        action=action,
+        status=status,
+        resource_type="plugin",
+        resource_name=package,
+        details=details or None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Installed plugins and manager state
+# ---------------------------------------------------------------------------
+
+@router.get("")
+def list_installed(user: AuthUser = Depends(require_admin)):
+    """Plugins discovered via entry points in the running interpreter."""
+    from lib.plugin_manager import get_installed_plugins
+
+    return {"plugins": [_serialisable(p) for p in get_installed_plugins()]}
+
+
+@router.get("/status")
+def plugin_status(verify: bool = True, user: AuthUser = Depends(require_admin)):
+    """Manager state: GitHub session, channel, overrides, deferred install.
+
+    `verify=false` skips the round trip to GitHub and reports only whether a
+    token is stored — for callers that poll this and do not want to spend an
+    API call each time.
+    """
+    from lib.github_auth import get_token, verify_token
+    from lib.plugin_manager import (
+        get_pending_plugin_install, get_plugin_branch_overrides, get_plugin_channel,
+    )
+
+    token = get_token()
+    github = {"authenticated": False, "username": None, "error": None}
+    if token and not verify:
+        github["authenticated"] = True
+    elif token:
+        valid, detail = verify_token(token)
+        if valid:
+            github["authenticated"] = True
+            github["username"] = detail
+        else:
+            github["error"] = detail
+
+    return {
+        "github": github,
+        "channel": get_plugin_channel(),
+        "branch_overrides": get_plugin_branch_overrides(),
+        "pending_install": get_pending_plugin_install(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GitHub authentication (device flow)
+# ---------------------------------------------------------------------------
+
+@router.post("/auth/device", status_code=202)
+def start_github_login(user: AuthUser = Depends(require_admin)):
+    """Begin GitHub device-flow login. Returns the code to enter, plus a job_id.
+
+    The browser that completes this is the user's, not the server's, so the
+    response carries the user code and verification URL and a background job
+    does the polling.  The device code stays server-side: it is the half of the
+    exchange that redeems into a token.
+    """
+    from lib.github_auth import poll_device_flow, start_device_flow
+
+    flow, error = start_device_flow()
+    if error:
+        raise HTTPException(status_code=502, detail=error)
+
+    job_id, created = store.create_unique("plugin:github-login")
+    if not created:
+        # A login is already polling; that one still holds a live code.
+        return {"job_id": job_id, "already_running": True}
+
+    device_code = flow["device_code"]
+    expires_in = flow["expires_in"]
+    interval = flow["interval"]
+
+    def run():
+        def on_progress(message: str) -> None:
+            store.append(job_id, {"type": "progress", "message": message})
+
+        try:
+            ok, message = poll_device_flow(
+                device_code,
+                expires_in=expires_in,
+                interval=interval,
+                progress_callback=on_progress,
+            )
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+            return
+
+        if ok:
+            store.complete(job_id, {"authenticated": True, "message": message})
+        else:
+            store.fail(job_id, message)
+
+    threading.Thread(target=run, daemon=True).start()
+    return {
+        "job_id": job_id,
+        "already_running": False,
+        "user_code": flow["user_code"],
+        "verification_uri": flow["verification_uri"],
+        "expires_in": expires_in,
+    }
+
+
+@router.delete("/auth")
+def github_logout(user: AuthUser = Depends(require_admin)):
+    """Discard the stored GitHub token. Installed plugins keep working."""
+    from lib.github_auth import logout
+
+    logout()
+    _audit("plugin_github_logout", "DELETE", "SUCCESS", "github")
+    return {"authenticated": False}
+
+
+# ---------------------------------------------------------------------------
+# Manifest
+# ---------------------------------------------------------------------------
+
+@router.get("/available")
+def list_available(user: AuthUser = Depends(require_admin)):
+    """Manifest entries for the active channel, annotated with install state.
+
+    `install_url` is the URL this host would actually use — channel and any
+    branch override already applied — so the UI shows what will be installed
+    rather than the stable default.
+    """
+    from lib.plugin_manager import (
+        effective_install_url, fetch_manifest, get_installed_plugins, get_manifest_ref,
+    )
+
+    available, error = fetch_manifest()
+    if error:
+        raise _github_error(error)
+
+    installed = {p["package"]: p for p in get_installed_plugins()}
+    plugins = []
+    for entry in available or []:
+        package = entry.get("package")
+        current = installed.get(package)
+        plugins.append({
+            "name": entry.get("display_name") or entry.get("name"),
+            "package": package,
+            "description": entry.get("description", ""),
+            "version": entry.get("version", ""),
+            "installed": current is not None,
+            "installed_version": current.get("version") if current else None,
+            "install_url": effective_install_url(entry),
+        })
+    return {"plugins": plugins, "ref": get_manifest_ref()}
+
+
+@router.get("/{package}/branches")
+def list_branches(package: str, user: AuthUser = Depends(require_admin)):
+    """Feature branches available for a plugin, for the branch override flow."""
+    from lib.plugin_manager import fetch_plugin_branches
+
+    _validate_package(package)
+    branches, error = fetch_plugin_branches(package)
+    if error:
+        raise _github_error(error)
+    return {"package": package, "branches": branches}
+
+
+# ---------------------------------------------------------------------------
+# Channel
+# ---------------------------------------------------------------------------
+
+class ChannelRequest(BaseModel):
+    channel: str
+
+
+@router.put("/channel")
+def set_channel(body: ChannelRequest, user: AuthUser = Depends(require_admin)):
+    """Switch between the stable and dev plugin channels.
+
+    Takes effect on the next install — nothing already installed changes here.
+    """
+    from lib.plugin_manager import get_plugin_channel, set_plugin_channel
+
+    channel = (body.channel or "").strip().lower()
+    if channel not in ("stable", "dev"):
+        raise HTTPException(status_code=400, detail="Channel must be 'stable' or 'dev'")
+
+    previous = get_plugin_channel()
+    set_plugin_channel(channel)
+    _audit("plugin_channel", "UPDATE", "SUCCESS", "plugin_channel",
+           previous=previous, channel=channel)
+    return {"channel": channel, "previous": previous}
+
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+
+class InstallRequest(BaseModel):
+    package: Optional[str] = None   # resolve the URL from the manifest
+    url: Optional[str] = None       # or install straight from a git URL
+
+
+def _resolve_install_url(body: InstallRequest) -> tuple[str, str]:
+    """(install_url, package label) for an install request, or 400/404."""
+    from lib.plugin_manager import effective_install_url, fetch_manifest
+
+    if body.url:
+        return body.url, (body.package or body.url)
+
+    if not body.package:
+        raise HTTPException(status_code=400, detail="Provide either 'package' or 'url'")
+
+    _validate_package(body.package)
+    available, error = fetch_manifest()
+    if error:
+        raise _github_error(error)
+
+    entry = next(
+        (p for p in (available or []) if p.get("package") == body.package), None
+    )
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"'{body.package}' is not in the plugin manifest"
+        )
+
+    url = effective_install_url(entry)
+    if not url:
+        raise HTTPException(
+            status_code=422, detail=f"No install URL in the manifest for '{body.package}'"
+        )
+    return url, body.package
+
+
+@router.post("/install", status_code=202)
+def install(body: InstallRequest, user: AuthUser = Depends(require_admin)):
+    """Install a plugin from the manifest or a git URL. Returns a job_id.
+
+    Backgrounded because pip clones and builds; `install_plugin` caps it at 120
+    seconds.  The URL is validated against github.com inside `install_plugin`,
+    so a hand-supplied one cannot point anywhere else.
+    """
+    from lib.plugin_manager import install_plugin
+
+    install_url, label = _resolve_install_url(body)
+
+    job_id, created = store.create_unique(_PIP_JOB_KEY)
+    if not created:
+        return {"job_id": job_id, "already_running": True}
+
+    def run():
+        store.append(job_id, {"type": "progress", "message": f"Installing {label}..."})
+        try:
+            ok, message = install_plugin(install_url)
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+            _audit("plugin_install", "CREATE", "FAILED", label, error=str(exc))
+            return
+
+        if not ok:
+            store.fail(job_id, message)
+            _audit("plugin_install", "CREATE", "FAILED", label, error=message)
+            return
+
+        store.complete(job_id, {
+            "installed": True,
+            "package": label,
+            "message": message,
+            "restart_required": True,
+        })
+        _audit("plugin_install", "CREATE", "SUCCESS", label)
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id, "already_running": False}
+
+
+# ---------------------------------------------------------------------------
+# Branch override
+# ---------------------------------------------------------------------------
+
+class BranchOverrideRequest(BaseModel):
+    branch: Optional[str] = None    # None clears the override
+    reinstall: bool = True
+
+
+@router.put("/{package}/branch", status_code=202)
+def set_branch(
+    package: str, body: BranchOverrideRequest, user: AuthUser = Depends(require_admin)
+):
+    """Pin a plugin to a git branch, or clear the pin, and reinstall it.
+
+    Mirrors the TUI's hidden Ctrl+] flow: uninstall, record the override, then
+    install from the new ref.  The uninstall does not purge — this is a version
+    switch, and the user's in-progress data belongs to the plugin either way.
+
+    `reinstall=false` records the override without touching pip, for pinning a
+    plugin that is not installed yet.
+    """
+    from lib.plugin_manager import (
+        clear_pending_plugin_install, fetch_manifest, install_plugin,
+        set_pending_plugin_install, set_plugin_branch_override, uninstall_plugin,
+        url_for_branch,
+    )
+
+    _validate_package(package)
+    branch = (body.branch or "").strip() or None
+
+    if not body.reinstall:
+        set_plugin_branch_override(package, branch)
+        _audit("plugin_branch_override", "UPDATE", "SUCCESS", package, branch=branch)
+        return {"package": package, "branch": branch, "reinstalled": False}
+
+    _require_installed(package)
+
+    available, error = fetch_manifest()
+    if error:
+        raise _github_error(error)
+
+    entry = next(
+        (p for p in (available or []) if p.get("package") == package), None
+    )
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"'{package}' is not in the plugin manifest"
+        )
+
+    base_url = entry.get("install_url_dev") or entry.get("install_url", "")
+    if not base_url:
+        raise HTTPException(
+            status_code=422, detail=f"No install URL in the manifest for '{package}'"
+        )
+
+    if branch:
+        install_url = url_for_branch(base_url, branch)
+    else:
+        # Clearing the override reverts to whatever the active channel points at.
+        from lib.plugin_manager import get_plugin_channel
+        install_url = (
+            (entry.get("install_url_dev") or entry.get("install_url", ""))
+            if get_plugin_channel() == "dev"
+            else entry.get("install_url", "")
+        )
+    if not install_url:
+        raise HTTPException(
+            status_code=422, detail=f"No install URL for '{package}' on this channel"
+        )
+
+    job_id, created = store.create_unique(_PIP_JOB_KEY)
+    if not created:
+        return {"job_id": job_id, "already_running": True}
+
+    label = branch or "channel default"
+
+    def run():
+        try:
+            store.append(job_id, {"type": "progress", "message": f"Uninstalling {package}..."})
+            ok, message = uninstall_plugin(package)   # never purge on a version switch
+            if not ok:
+                store.fail(job_id, message)
+                _audit("plugin_branch_override", "UPDATE", "FAILED", package,
+                       branch=branch, error=message)
+                return
+
+            set_plugin_branch_override(package, branch)
+            # Recorded before the install so a failure mid-way is recoverable:
+            # the next TUI launch completes the install that did not happen here.
+            set_pending_plugin_install(package, install_url)
+
+            store.append(job_id, {"type": "progress",
+                                  "message": f"Installing {package} from {label}..."})
+            ok, message = install_plugin(install_url)
+            if not ok:
+                store.fail(job_id, message)
+                _audit("plugin_branch_override", "UPDATE", "FAILED", package,
+                       branch=branch, error=message)
+                return
+
+            clear_pending_plugin_install()
+            store.complete(job_id, {
+                "package": package,
+                "branch": branch,
+                "reinstalled": True,
+                "message": message,
+                "restart_required": True,
+            })
+            _audit("plugin_branch_override", "UPDATE", "SUCCESS", package, branch=branch)
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+            _audit("plugin_branch_override", "UPDATE", "FAILED", package,
+                   branch=branch, error=str(exc))
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id, "already_running": False}
+
+
+# ---------------------------------------------------------------------------
+# Deferred install
+#
+# Declared before DELETE /{package}: FastAPI matches in declaration order, and
+# the literal path would otherwise be swallowed as a package name.
+# ---------------------------------------------------------------------------
+
+@router.delete("/pending-install")
+def clear_pending(user: AuthUser = Depends(require_admin)):
+    """Drop a deferred install left behind by a failed branch switch.
+
+    Without this, a pending record that can never succeed would be retried on
+    every TUI launch.
+    """
+    from lib.plugin_manager import clear_pending_plugin_install, get_pending_plugin_install
+
+    pending = get_pending_plugin_install()
+    clear_pending_plugin_install()
+    return {"cleared": pending is not None, "pending_install": pending}
+
+
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
+
+@router.get("/{package}/data")
+def plugin_data(package: str, user: AuthUser = Depends(require_admin)):
+    """What a purging uninstall of this plugin would remove.
+
+    Read-only.  The UI shows this before asking to confirm, so the damage is
+    named before it is offered.
+    """
+    from lib.plugin_manager import plugin_data_summary
+
+    _require_installed(package)
+    summary = plugin_data_summary(package)
+    return {"package": package, **summary}
+
+
+@router.delete("/{package}", status_code=202)
+def uninstall(
+    package: str, purge_data: bool = False, user: AuthUser = Depends(require_admin)
+):
+    """Uninstall a plugin, optionally removing its data. Returns a job_id.
+
+    `purge_data` drops the tables the plugin declares and runs its teardown
+    hook; objects it already pushed to a tenant are untouched, because a
+    successful push reverts them to ordinary tenant config.
+    """
+    from lib.plugin_manager import uninstall_plugin
+
+    _require_installed(package)
+
+    job_id, created = store.create_unique(_PIP_JOB_KEY)
+    if not created:
+        return {"job_id": job_id, "already_running": True}
+
+    def run():
+        store.append(job_id, {"type": "progress", "message": f"Uninstalling {package}..."})
+        try:
+            ok, message = uninstall_plugin(package, purge_data=purge_data)
+        except Exception as exc:
+            store.fail(job_id, str(exc))
+            _audit("plugin_uninstall", "DELETE", "FAILED", package,
+                   purge_data=purge_data, error=str(exc))
+            return
+
+        if not ok:
+            store.fail(job_id, message)
+            _audit("plugin_uninstall", "DELETE", "FAILED", package,
+                   purge_data=purge_data, error=message)
+            return
+
+        store.complete(job_id, {
+            "uninstalled": True,
+            "package": package,
+            "purged_data": purge_data,
+            "message": message,
+            "restart_required": True,
+        })
+        _audit("plugin_uninstall", "DELETE", "SUCCESS", package, purge_data=purge_data)
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id, "already_running": False}
