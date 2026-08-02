@@ -381,13 +381,28 @@ def effective_install_url(plugin_entry: dict) -> str:
     return plugin_entry.get("install_url", "")
 
 
-def uninstall_plugin(package_name: str) -> tuple[bool, str]:
+def uninstall_plugin(package_name: str, purge_data: bool = False) -> tuple[bool, str]:
     """Uninstall a plugin using pip.
+
+    When purge_data is True, the plugin's tables and rows are removed first —
+    see purge_plugin_data(). It defaults to False because the branch/channel
+    switch flow also calls this to uninstall before reinstalling from another
+    ref; purging there would destroy the user's in-progress work. Only a genuine
+    user-initiated uninstall opts in.
 
     Returns (True, success_message) or (False, error_output).
     """
     if not _SAFE_PACKAGE_RE.match(package_name):
         return False, f"Invalid package name: {package_name!r}"
+
+    # Before pip removes the package — register() must still be importable.
+    # A failed purge aborts the uninstall rather than leaving the plugin
+    # half-removed with its data stranded.
+    if purge_data:
+        ok, msg = purge_plugin_data(package_name)
+        if not ok:
+            return False, f"Data removal failed, plugin not uninstalled:\n{msg}"
+
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "uninstall", "--yes", *_pip_uninstall_args(), package_name],
@@ -401,3 +416,128 @@ def uninstall_plugin(package_name: str) -> tuple[bool, str]:
         return False, output or "pip exited with a non-zero status."
     except Exception as exc:
         return False, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Plugin data teardown
+# ---------------------------------------------------------------------------
+
+# Plugin-declared table names are interpolated into DDL, so they are validated
+# against this before use — never trusted as-is.
+_SAFE_TABLE_RE = re.compile(r'^[a-zA-Z0-9_]+$')
+
+
+def _plugin_entry(package_name: str) -> Optional[dict]:
+    """Return the register() payload for an installed package, or None."""
+    for p in get_installed_plugins():
+        if p.get("package") == package_name:
+            return p
+    return None
+
+
+def _owned_tables(package_name: str) -> tuple[list[str], Optional[str]]:
+    """Resolve a plugin's declared tables to ones that are safe to drop.
+
+    Returns (tables, error). Rejects names that are malformed or that belong to
+    core's own schema; silently skips ones that do not exist in the database.
+    """
+    entry = _plugin_entry(package_name)
+    if entry is None:
+        return [], f"Plugin {package_name!r} is not installed or failed to load."
+
+    declared = entry.get("owns_tables") or []
+    if not isinstance(declared, (list, tuple)):
+        return [], "owns_tables must be a list of table names."
+
+    from db.database import get_engine
+    from db.models import Base
+    from sqlalchemy import inspect
+
+    core_tables = set(Base.metadata.tables)
+    existing = set(inspect(get_engine()).get_table_names())
+
+    tables = []
+    for name in declared:
+        if not isinstance(name, str) or not _SAFE_TABLE_RE.match(name):
+            return [], f"Refusing unsafe table name: {name!r}"
+        if name in core_tables:
+            return [], f"Refusing to drop core table: {name!r}"
+        if name in existing:
+            tables.append(name)
+    return tables, None
+
+
+def plugin_data_summary(package_name: str) -> dict:
+    """Read-only count of what purge_plugin_data() would remove.
+
+    Returns {"tables": [...], "rows": int, "candidates": int, "error": str|None}
+    so the caller can name the damage before asking for confirmation.
+    """
+    summary = {"tables": [], "rows": 0, "candidates": 0, "error": None}
+
+    tables, err = _owned_tables(package_name)
+    if err:
+        summary["error"] = err
+        return summary
+    summary["tables"] = tables
+
+    from db.database import get_engine
+    from sqlalchemy import text
+
+    try:
+        with get_engine().connect() as conn:
+            for name in tables:
+                summary["rows"] += conn.execute(
+                    text(f'SELECT COUNT(*) FROM "{name}"')  # name validated above
+                ).scalar() or 0
+
+            # Unpushed migration candidates in core tables. Pushed objects have
+            # source reverted to 'tenant' and are deliberately not counted.
+            for core in ("zia_resources", "zpa_resources"):
+                summary["candidates"] += conn.execute(
+                    text(f"SELECT COUNT(*) FROM {core} WHERE source = :s"),
+                    {"s": "palo"},
+                ).scalar() or 0
+    except Exception as exc:
+        summary["error"] = str(exc)
+    return summary
+
+
+def purge_plugin_data(package_name: str) -> tuple[bool, str]:
+    """Remove a plugin's tables and its rows in core tables.
+
+    The plugin's optional teardown(session) hook runs first, for row-level
+    cleanup in tables it does not own; then core drops the tables it declared.
+    Both happen in one transaction — if anything raises, nothing is removed.
+
+    Objects the plugin already pushed to a tenant are untouched: on a successful
+    push source reverts to 'tenant', making them indistinguishable from natively
+    imported config.
+    """
+    tables, err = _owned_tables(package_name)
+    if err:
+        return False, err
+
+    entry = _plugin_entry(package_name)
+    teardown = (entry or {}).get("teardown")
+    if teardown is not None and not callable(teardown):
+        return False, "teardown must be callable."
+
+    from db.database import get_session
+    from sqlalchemy import text
+
+    try:
+        with get_session() as session:
+            if teardown is not None:
+                # The hook must not commit or open its own session — it shares
+                # this transaction so a later failure rolls its work back too.
+                teardown(session)
+                session.flush()
+
+            for name in tables:
+                session.execute(text(f'DROP TABLE IF EXISTS "{name}"'))
+    except Exception as exc:
+        return False, str(exc)
+
+    dropped = f"{len(tables)} table(s)" if tables else "no tables"
+    return True, f"Removed plugin data ({dropped})."
