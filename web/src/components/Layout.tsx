@@ -262,11 +262,11 @@ export default function Layout({ children }: LayoutProps) {
             </NavLink>
           )}
 
-          {/* Plugins granted to this account. Driven by the entitlement list
-              rather than by role, so an admin — who is unrestricted — sees
-              every installed plugin here even though the pages above are
-              hidden from them. Empty on any deployment without the manager. */}
-          {entitledPlugins.map((p) => (
+          {/* Plugins granted to this account. Hidden from an admin session
+              like the two items above: admins install and grant plugins, they
+              do not run them, and an account that does both switches roles.
+              Empty on any deployment without the manager. */}
+          {!isAdmin && entitledPlugins.map((p) => (
             <NavLink key={p.package} to={`/plugins/${p.package}`} className={navLinkClass}>
               {p.name || p.package}
             </NavLink>

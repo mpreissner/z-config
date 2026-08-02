@@ -39,21 +39,22 @@ export function usePluginManagerProbe(): { available: boolean; resolved: boolean
 /**
  * The plugins this account may open — the source of the per-plugin nav items.
  *
- * Separate from the probe above, which asks an admin-only question and so
- * answers false for the ordinary users this is for. /plugins/entitled is
- * readable by any session, tells the caller only about itself, and comes back
- * empty on a deployment that never switched the manager on, so the nav needs no
- * feature flag of its own.
+ * Separate from the probe above, which asks the admin-only question of whether
+ * this deployment has a manager at all. /plugins/entitled asks the opposite one
+ * — what this account may run — and admins fail it, because managing a plugin
+ * and using one are different roles. It tells the caller only about itself and
+ * comes back empty on a deployment that never switched the manager on, so the
+ * nav needs no feature flag of its own.
  *
  * Not cached for the session like the probe: an admin can grant or revoke while
  * the tab is open, and the nav should catch up on the next window focus.
  */
 export function useEntitledPlugins(): { plugins: EntitledPlugin[]; resolved: boolean } {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isAdmin } = useAuth();
   const { data, isFetched } = useQuery({
     queryKey: ["entitled-plugins"],
     queryFn: fetchEntitledPlugins,
-    enabled: isAuthenticated,
+    enabled: isAuthenticated && !isAdmin,
     staleTime: 5 * 60_000,
     retry: false,
   });

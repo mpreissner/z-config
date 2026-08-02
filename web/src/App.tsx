@@ -45,6 +45,15 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <Navigate to="/tenants" replace />;
 }
 
+/** Anyone but an admin: running a plugin is the user role's job, and the API
+ *  answers an admin session 404 here. Sent to the dashboard rather than shown
+ *  that 404 — an admin who lands here wanted the role switcher. */
+function PluginUserRoute({ children }: { children: React.ReactNode }) {
+  const { isAdmin } = useAuth();
+  if (isAdmin) return <Navigate to="/tenants" replace />;
+  return <>{children}</>;
+}
+
 /** Admin, and only on a deployment that registered the plugin API. */
 function PluginRoute({ children }: { children: React.ReactNode }) {
   const { available, resolved } = usePluginManagerProbe();
@@ -113,9 +122,11 @@ export default function App() {
                   <Route
                     path="/plugins/:pkg"
                     element={
-                      <Suspense fallback={<LoadingSpinner />}>
-                        <PluginPage />
-                      </Suspense>
+                      <PluginUserRoute>
+                        <Suspense fallback={<LoadingSpinner />}>
+                          <PluginPage />
+                        </Suspense>
+                      </PluginUserRoute>
                     }
                   />
                   <Route
