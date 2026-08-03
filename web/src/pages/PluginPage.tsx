@@ -6,25 +6,36 @@
  * form, runs the action as a job and shows what came back. Plugins ship no
  * JavaScript, so nothing installed from GitHub can execute in the browser, and
  * a plugin that describes itself badly loses its own nav item and nothing else.
+ *
+ * A plugin whose actions are steps of one job says so, and the page grows a
+ * context bar and a step strip around the same machinery: the values in the bar
+ * are chosen once and folded into every action that named them, which the
+ * server does — not this — so they are checked exactly like any other parameter.
  */
 
 import { useState, useEffect, useMemo } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchPluginUi,
   runPluginAction,
   fetchPluginActionOptions,
+  fetchPluginContextOptions,
+  fetchPluginState,
   downloadPluginArtifact,
   PluginAction,
   PluginParam,
   PluginActionResult,
+  PluginStepStatus,
+  PluginUi,
 } from "../api/plugins";
 import { fetchTenants } from "../api/tenants";
 import { cancelJob } from "../api/jobs";
 import { useJobStream } from "../hooks/useJobStream";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
+import SelectionGrid from "../components/plugin/SelectionGrid";
+import ResultSections from "../components/plugin/ResultSections";
 
 type Values = Record<string, unknown>;
 type Files = Record<string, File>;
@@ -38,6 +49,9 @@ function initialValues(action: PluginAction): Values {
   for (const p of action.params) {
     if (p.default !== undefined) out[p.name] = p.default;
     else if (p.type === "boolean") out[p.name] = false;
+    // A grid is left undefined until its rows load, so the ticks the plugin
+    // arrives with can seed it without overwriting a choice already made.
+    else if (p.type === "selection") out[p.name] = undefined;
     else out[p.name] = "";
   }
   return out;
@@ -49,7 +63,8 @@ function ParamField({ param, value, siblings, pkg, actionKey, onChange, onFile }
   /** The rest of the form — what a dynamic select's options are computed from. */
   siblings: Values;
   pkg: string;
-  actionKey: string;
+  /** Null for a page-level context value, which has no action to ask through. */
+  actionKey: string | null;
   onChange: (v: unknown) => void;
   onFile: (f: File | null) => void;
 }) {
@@ -77,8 +92,11 @@ function ParamField({ param, value, siblings, pkg, actionKey, onChange, onFile }
     isFetching: loadingOptions,
     error: optionsError,
   } = useQuery({
-    queryKey: ["plugin-options", pkg, actionKey, param.name, deps],
-    queryFn: () => fetchPluginActionOptions(pkg, actionKey, param.name, deps),
+    queryKey: ["plugin-options", pkg, actionKey ?? "__context__", param.name, deps],
+    queryFn: () =>
+      actionKey
+        ? fetchPluginActionOptions(pkg, actionKey, param.name, deps)
+        : fetchPluginContextOptions(pkg, param.name, deps),
     enabled: !!param.dynamic && ready,
     retry: false,
   });
@@ -88,7 +106,19 @@ function ParamField({ param, value, siblings, pkg, actionKey, onChange, onFile }
   // A choice made before a dependency changed is not a choice in the new list.
   // Left alone it would sit there looking selected and be refused on submit.
   useEffect(() => {
-    if (!param.dynamic || !value) return;
+    if (!param.dynamic) return;
+    if (param.type === "selection") {
+      if (!loaded) return;
+      const offered = new Set(loaded.options.map((o) => o.value));
+      if (value === undefined) {
+        onChange(loaded.options.filter((o) => o.selected).map((o) => o.value));
+        return;
+      }
+      const kept = (value as string[]).filter((v) => offered.has(v));
+      if (kept.length !== (value as string[]).length) onChange(kept);
+      return;
+    }
+    if (!value) return;
     if (!loaded) {
       if (!ready) onChange("");
       return;
@@ -169,6 +199,30 @@ function ParamField({ param, value, siblings, pkg, actionKey, onChange, onFile }
             )}
         </>
       )}
+      {param.type === "selection" && (
+        <>
+          {!ready ? (
+            <p className="rounded-md border border-dashed border-gray-300 px-3 py-4 text-sm italic text-gray-400">
+              Choose {(param.depends_on ?? []).join(" and ")} first.
+            </p>
+          ) : (
+            <SelectionGrid
+              param={param}
+              options={options}
+              value={(value as string[]) ?? []}
+              onChange={onChange}
+              loading={loadingOptions}
+            />
+          )}
+          {optionsError && (
+            <p className="mt-1 text-xs text-red-600">
+              {optionsError instanceof Error
+                ? optionsError.message
+                : "Could not load the rows"}
+            </p>
+          )}
+        </>
+      )}
       {param.type === "tenant" && (
         <select
           value={String(value ?? "")}
@@ -213,10 +267,15 @@ function humanSize(bytes: number): string {
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
-function ResultView({ result, jobId }: { result: PluginActionResult; jobId: string }) {
+function ResultView({ result, jobId, onAction }: {
+  result: PluginActionResult;
+  jobId: string;
+  onAction?: (key: string) => void;
+}) {
   const details = Object.entries(result.details ?? {});
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const download = result.download;
+  const sections = result.sections ?? [];
 
   return (
     <div className="mt-4 rounded-md border border-green-200 bg-green-50 p-4">
@@ -238,6 +297,12 @@ function ResultView({ result, jobId }: { result: PluginActionResult; jobId: stri
             <span className="text-xs text-white/70">{humanSize(download.size)}</span>
           </button>
           {downloadError && <p className="mt-1 text-xs text-red-600">{downloadError}</p>}
+        </div>
+      )}
+
+      {sections.length > 0 && (
+        <div className="mt-3">
+          <ResultSections sections={sections} onAction={onAction} />
         </div>
       )}
 
@@ -285,7 +350,16 @@ function ResultView({ result, jobId }: { result: PluginActionResult; jobId: stri
   );
 }
 
-function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
+function ActionCard({ pkg, action, context, contextParams, onFinished, onAction }: {
+  pkg: string;
+  action: PluginAction;
+  /** Page-level values this action named. Submitted alongside its own. */
+  context: Values;
+  contextParams: PluginParam[];
+  /** Fires when a run completes, so the step strip can catch up. */
+  onFinished?: () => void;
+  onAction?: (key: string) => void;
+}) {
   const [values, setValues] = useState<Values>(() => initialValues(action));
   const [files, setFiles] = useState<Files>({});
   const [jobId, setJobId] = useState<string | null>(null);
@@ -296,16 +370,39 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
     useJobStream<PluginActionResult>(jobId);
   const running = starting || jobStatus === "running";
 
+  // Context is part of the form as far as a dependent parameter is concerned:
+  // a grid that reads the chosen session has to see it to know it may load.
+  const wanted = action.context ?? [];
+  const siblings = useMemo(() => {
+    const out: Values = { ...values };
+    for (const name of wanted) out[name] = context[name];
+    return out;
+  }, [values, context, wanted]);
+
+  const missingContext = wanted.filter((name) => {
+    const spec = contextParams.find((c) => c.name === name);
+    const v = context[name];
+    return spec?.required !== false && (v === undefined || v === null || v === "");
+  });
+
+  useEffect(() => {
+    if (jobStatus === "done") onFinished?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobStatus]);
+
   async function start() {
     if (action.confirm && !window.confirm(action.confirm)) return;
     setError(null);
     setJobId(null);
     setStarting(true);
     try {
-      // File values live outside `values`; everything else goes as declared.
+      // File values live outside `values`; everything else goes as declared,
+      // with the context values the action named added to it.
       const payload: Values = {};
+      for (const name of wanted) payload[name] = context[name];
       for (const p of action.params) {
-        if (p.type !== "file") payload[p.name] = values[p.name];
+        if (p.type === "file") continue;
+        payload[p.name] = p.type === "selection" ? (values[p.name] ?? []) : values[p.name];
       }
       const r = await runPluginAction(pkg, action.key, payload, files);
       setJobId(r.job_id);
@@ -330,7 +427,7 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
               key={p.name}
               param={p}
               value={values[p.name]}
-              siblings={values}
+              siblings={siblings}
               pkg={pkg}
               actionKey={action.key}
               onChange={(v) => setValues((prev) => ({ ...prev, [p.name]: v }))}
@@ -350,7 +447,7 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
       <div className="mt-5 flex items-center gap-3">
         <button
           onClick={start}
-          disabled={running}
+          disabled={running || missingContext.length > 0}
           className={`rounded-md px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-60 ${
             action.destructive ? "bg-red-600 hover:bg-red-700" : "bg-zs-500 hover:bg-zs-600"
           }`}
@@ -364,6 +461,13 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
           >
             Cancel
           </button>
+        )}
+        {missingContext.length > 0 && (
+          <span className="text-sm text-gray-500">
+            Choose {missingContext
+              .map((n) => contextParams.find((c) => c.name === n)?.label ?? n)
+              .join(" and ")} above first.
+          </span>
         )}
       </div>
 
@@ -384,14 +488,49 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
         <div className="mt-4"><ErrorMessage message={streamError} /></div>
       )}
       {jobStatus === "done" && result && jobId && (
-        <ResultView result={result} jobId={jobId} />
+        <ResultView result={result} jobId={jobId} onAction={onAction} />
       )}
+    </div>
+  );
+}
+
+const STEP_DOT: Record<PluginStepStatus, string> = {
+  complete: "bg-green-500",
+  current: "bg-zs-500",
+  blocked: "bg-amber-500",
+  pending: "bg-gray-300",
+};
+
+/** The context bar: values chosen once and kept while the user moves around. */
+function ContextBar({ pkg, params, values, onChange }: {
+  pkg: string;
+  params: PluginParam[];
+  values: Values;
+  onChange: (name: string, value: unknown) => void;
+}) {
+  return (
+    <div className="sticky top-0 z-10 rounded-lg border border-gray-200 bg-gray-50 p-4 shadow-sm">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {params.map((p) => (
+          <ParamField
+            key={p.name}
+            param={p}
+            value={values[p.name]}
+            siblings={values}
+            pkg={pkg}
+            actionKey={null}
+            onChange={(v) => onChange(p.name, v)}
+            onFile={() => {}}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
 export default function PluginPage() {
   const { pkg = "" } = useParams<{ pkg: string }>();
+  const [search, setSearch] = useSearchParams();
   const { data: ui, isLoading, error } = useQuery({
     queryKey: ["plugin-ui", pkg],
     queryFn: () => fetchPluginUi(pkg),
@@ -401,10 +540,43 @@ export default function PluginPage() {
 
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const actions = useMemo(() => ui?.actions ?? [], [ui]);
+  const contextParams = useMemo(() => ui?.context ?? [], [ui]);
+  const workflow = ui?.workflow ?? null;
+
+  // Context lives in the query string, so a reload or a shared link comes back
+  // to the same migration rather than an empty bar.
+  const context = useMemo(() => {
+    const out: Values = {};
+    for (const p of contextParams) out[p.name] = search.get(p.name) ?? "";
+    return out;
+  }, [contextParams, search]);
+
+  const contextReady =
+    contextParams.length > 0 &&
+    contextParams.every((p) => p.required === false || context[p.name]);
+
+  const { data: state, refetch: refetchState } = useQuery({
+    queryKey: ["plugin-state", pkg, context],
+    queryFn: () => fetchPluginState(pkg, context),
+    enabled: !!workflow?.stateful && contextReady,
+    retry: false,
+  });
+
   const active = actions.find((a) => a.key === activeKey) ?? actions[0] ?? null;
+  const activeStep = useMemo(() => {
+    if (!workflow || !active) return null;
+    return workflow.steps.find((s) => s.actions.includes(active.key)) ?? null;
+  }, [workflow, active]);
 
   // The nav switched plugins under us; fall back to the new plugin's first action.
   useEffect(() => setActiveKey(null), [pkg]);
+
+  function setContext(name: string, value: unknown) {
+    const next = new URLSearchParams(search);
+    if (value === "" || value === null || value === undefined) next.delete(name);
+    else next.set(name, String(value));
+    setSearch(next, { replace: true });
+  }
 
   if (isLoading) return <LoadingSpinner />;
   if (error) {
@@ -426,14 +598,124 @@ export default function PluginPage() {
         </p>
       </div>
 
-      {actions.length > 1 && (
+      {contextParams.length > 0 && (
+        <ContextBar
+          pkg={ui.package}
+          params={contextParams}
+          values={context}
+          onChange={setContext}
+        />
+      )}
+
+      {workflow ? (
+        <StepStrip
+          ui={ui}
+          workflow={workflow}
+          state={state?.state}
+          activeStep={activeStep?.key ?? null}
+          activeAction={active?.key ?? null}
+          onPick={setActiveKey}
+        />
+      ) : (
+        actions.length > 1 && (
+          <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
+            {actions.map((a) => (
+              <button
+                key={a.key}
+                onClick={() => setActiveKey(a.key)}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  active?.key === a.key
+                    ? "bg-zs-500 text-white"
+                    : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        )
+      )}
+
+      {active ? (
+        <ActionCard
+          // Remounted per action and per context: a form filled in for one
+          // migration has nothing to say about the next one.
+          key={`${ui.package}:${active.key}:${JSON.stringify(context)}`}
+          pkg={ui.package}
+          action={active}
+          context={context}
+          contextParams={contextParams}
+          onFinished={() => { if (workflow?.stateful && contextReady) refetchState(); }}
+          onAction={(key) => {
+            if (actions.some((a) => a.key === key)) setActiveKey(key);
+          }}
+        />
+      ) : (
+        <p className="text-sm italic text-gray-400">This plugin offers no actions.</p>
+      )}
+    </div>
+  );
+}
+
+function StepStrip({ ui, workflow, state, activeStep, activeAction, onPick }: {
+  ui: PluginUi;
+  workflow: NonNullable<PluginUi["workflow"]>;
+  state?: Record<string, { status: PluginStepStatus; detail: string | null }>;
+  activeStep: string | null;
+  activeAction: string | null;
+  onPick: (actionKey: string) => void;
+}) {
+  const byKey = useMemo(
+    () => Object.fromEntries(ui.actions.map((a) => [a.key, a])),
+    [ui.actions],
+  );
+  const step = workflow.steps.find((s) => s.key === activeStep) ?? workflow.steps[0];
+  const siblings = (step?.actions ?? []).map((k) => byKey[k]).filter(Boolean);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-stretch gap-2">
+        {workflow.steps.map((s) => {
+          const st = state?.[s.key];
+          const on = s.key === activeStep;
+          return (
+            <button
+              key={s.key}
+              onClick={() => onPick(s.actions[0])}
+              className={`flex-1 rounded-md border px-3 py-2 text-left transition-colors ${
+                on
+                  ? "border-zs-500 bg-zs-500/5"
+                  : "border-gray-200 bg-white hover:border-gray-300"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`h-2 w-2 shrink-0 rounded-full ${STEP_DOT[st?.status ?? "pending"]}`}
+                />
+                <span
+                  className={`truncate text-sm font-medium ${
+                    on ? "text-zs-600" : "text-gray-700"
+                  }`}
+                >
+                  {s.label}
+                </span>
+              </div>
+              <p className="mt-0.5 truncate text-xs text-gray-500">
+                {st?.detail ?? s.description ?? " "}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      {siblings.length > 1 && (
         <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
-          {actions.map((a) => (
+          {siblings.map((a) => (
             <button
               key={a.key}
-              onClick={() => setActiveKey(a.key)}
+              onClick={() => onPick(a.key)}
               className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                active?.key === a.key
+                activeAction === a.key
                   ? "bg-zs-500 text-white"
                   : "text-gray-600 hover:bg-gray-100"
               }`}
@@ -442,12 +724,6 @@ export default function PluginPage() {
             </button>
           ))}
         </div>
-      )}
-
-      {active ? (
-        <ActionCard key={`${ui.package}:${active.key}`} pkg={ui.package} action={active} />
-      ) : (
-        <p className="text-sm italic text-gray-400">This plugin offers no actions.</p>
       )}
     </div>
   );
