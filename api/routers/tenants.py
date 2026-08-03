@@ -77,13 +77,8 @@ def list_tenants(user: AuthUser = Depends(require_auth)):
     all_tenants = _list()
     if user.role == "admin":
         return [_serialize(t) for t in all_tenants]
-    from db.database import get_session
-    from db.models import UserTenantEntitlement
-    with get_session() as session:
-        entitled = {
-            row.tenant_id
-            for row in session.query(UserTenantEntitlement).filter_by(user_id=user.user_id).all()
-        }
+    from services.group_service import effective_tenant_ids
+    entitled = effective_tenant_ids(user.user_id)
     return [_serialize(t) for t in all_tenants if t.id in entitled]
 
 

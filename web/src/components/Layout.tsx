@@ -5,6 +5,7 @@ import { fetchHealth } from "../api/system";
 import { useSystemInfo } from "../hooks/useSystemInfo";
 import { useAuth } from "../context/AuthContext";
 import { useActiveTenant } from "../context/ActiveTenantContext";
+import { usePluginManagerAvailable, useEntitledPlugins } from "../hooks/usePluginManager";
 import { fetchTenants, Tenant } from "../api/tenants";
 import zLogo from "../assets/z-logo.jpg";
 
@@ -63,8 +64,59 @@ function TenantNavItem({ tenant, isActive, onClick }: {
   );
 }
 
+const ROLE_LABELS: Record<string, string> = { admin: "Admin", user: "User" };
+
+function roleLabel(role: string): string {
+  return ROLE_LABELS[role] ?? role;
+}
+
+/** Only rendered for accounts that hold more than one role. Switching mints a
+ *  new token server-side and wipes the query cache, so nothing fetched under
+ *  the old role survives the change. */
+function RoleSwitcher({ onSwitched }: { onSwitched: () => void }) {
+  const { activeRole, availableRoles, assumeRole } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (availableRoles.length < 2) return null;
+
+  async function handleChange(role: string) {
+    if (role === activeRole || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await assumeRole(role);
+      onSwitched();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not switch role");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-3 py-1">
+      <label className="block text-xs text-blue-300 mb-1">Acting as</label>
+      <select
+        value={activeRole ?? ""}
+        onChange={(e) => handleChange(e.target.value)}
+        disabled={busy}
+        className="w-full bg-zs-600 text-white text-sm rounded-md px-2 py-1 border border-zs-600 focus:outline-none focus:border-blue-300 disabled:opacity-60"
+      >
+        {availableRoles.map((r) => (
+          <option key={r} value={r}>
+            {roleLabel(r)}
+          </option>
+        ))}
+      </select>
+      {error && <p className="mt-1 text-xs text-red-300">{error}</p>}
+    </div>
+  );
+}
+
 const adminNavItems = [
   { to: "/admin/users", label: "Users" },
+  { to: "/admin/groups", label: "Groups" },
   { to: "/admin/entitlements", label: "Tenant Access" },
   { to: "/admin/settings", label: "Settings" },
 ];
@@ -77,11 +129,20 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   }`;
 
 export default function Layout({ children }: LayoutProps) {
-  const { logout, isAdmin, user } = useAuth();
+  const { logout, isAdmin, user, availableRoles } = useAuth();
   const { activeTenantId, setActiveTenantId } = useActiveTenant();
   const navigate = useNavigate();
   const [tenantsOpen, setTenantsOpen] = useState(true);
   const [adminOpen, setAdminOpen] = useState(true);
+
+  // Absent unless this deployment runs the plugin manager — see
+  // usePluginManagerAvailable(). Last in the list, below Settings.
+  const pluginManager = usePluginManagerAvailable();
+  const adminItems = pluginManager
+    ? [...adminNavItems, { to: "/admin/plugins", label: "Plugins" }]
+    : adminNavItems;
+
+  const { plugins: entitledPlugins } = useEntitledPlugins();
 
   const { data: tenants } = useQuery({
     queryKey: ["tenants"],
@@ -201,6 +262,16 @@ export default function Layout({ children }: LayoutProps) {
             </NavLink>
           )}
 
+          {/* Plugins granted to this account. Hidden from an admin session
+              like the two items above: admins install and grant plugins, they
+              do not run them, and an account that does both switches roles.
+              Empty on any deployment without the manager. */}
+          {!isAdmin && entitledPlugins.map((p) => (
+            <NavLink key={p.package} to={`/plugins/${p.package}`} className={navLinkClass}>
+              {p.name || p.package}
+            </NavLink>
+          ))}
+
           {/* Audit Log */}
           <NavLink to="/audit" className={navLinkClass}>
             Audit Log
@@ -226,7 +297,7 @@ export default function Layout({ children }: LayoutProps) {
               </button>
               {adminOpen && (
                 <div className="mt-0.5 ml-2 space-y-0.5">
-                  {adminNavItems.map((item) => (
+                  {adminItems.map((item) => (
                     <NavLink
                       key={item.to}
                       to={item.to}
@@ -257,11 +328,14 @@ export default function Layout({ children }: LayoutProps) {
             </div>
             <div className="min-w-0">
               <p className="text-sm text-white font-medium truncate">{username}</p>
-              {isAdmin && (
+              {isAdmin && availableRoles.length < 2 && (
                 <p className="text-xs text-blue-300 leading-none">Admin</p>
               )}
             </div>
           </div>
+          {/* Back to the dashboard on a switch — an admin page the session can
+              no longer reach would otherwise bounce through AdminRoute. */}
+          <RoleSwitcher onSwitched={() => navigate("/")} />
           <NavLink
             to="/profile"
             className={({ isActive }) =>

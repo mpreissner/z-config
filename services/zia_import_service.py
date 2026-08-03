@@ -382,6 +382,13 @@ class ZIAImportService:
         return result
 
     def _mark_deleted(self, resource_types: Optional[List[str]], run_start: datetime) -> int:
+        """Mark rows not touched in this sync run as deleted.
+
+        Migration candidates are excluded: they do not exist in the tenant, so
+        the API will never return them and every import would otherwise flag
+        them deleted.  Their NULL synced_at already fails the comparison; the
+        source filter states the intent rather than resting on that.
+        """
         deleted = 0
         type_filter = resource_types or [d.resource_type for d in RESOURCE_DEFINITIONS]
         pending_audit: list = []
@@ -393,6 +400,7 @@ class ZIAImportService:
                     ZIAResource.tenant_id == self.tenant_id,
                     ZIAResource.resource_type.in_(type_filter),
                     ZIAResource.is_deleted == False,
+                    ZIAResource.source == "tenant",
                     ZIAResource.synced_at < run_start,
                 )
                 .all()

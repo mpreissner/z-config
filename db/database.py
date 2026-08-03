@@ -269,7 +269,8 @@ def _migrate(engine) -> None:
             id INTEGER PRIMARY KEY,
             name VARCHAR(255) NOT NULL UNIQUE,
             source_tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id),
-            target_tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id),
+            -- nullable: import tasks have no target tenant
+            target_tenant_id INTEGER REFERENCES tenant_configs(id),
             resource_groups JSON NOT NULL,
             cron_expression VARCHAR(128) NOT NULL,
             sync_deletes BOOLEAN NOT NULL DEFAULT 0,
@@ -305,8 +306,8 @@ def _migrate(engine) -> None:
         )""",
         # Scheduled tasks v2 — task_type discriminator, multi-target sync, import tasks
         "ALTER TABLE scheduled_tasks ADD COLUMN task_type VARCHAR(16) NOT NULL DEFAULT 'sync'",
-        # SQLite cannot DROP NOT NULL via ALTER; making nullable is a DB-level no-op
-        # for SQLite — the column stores NULL after this migration runs.
+        # Import tasks leave target_tenant_id NULL. Dropping the legacy NOT NULL
+        # needs a table rebuild — see _migrate_scheduled_tasks_target_nullable().
         "ALTER TABLE scheduled_tasks ADD COLUMN target_tenant_ids JSON",
         "ALTER TABLE scheduled_tasks ADD COLUMN import_products JSON",
         "ALTER TABLE task_run_history ADD COLUMN parent_run_id INTEGER REFERENCES task_run_history(id) ON DELETE SET NULL",
@@ -321,6 +322,37 @@ def _migrate(engine) -> None:
         "ALTER TABLE users ADD COLUMN scim_managed BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN given_name VARCHAR(255)",
         "ALTER TABLE users ADD COLUMN family_name VARCHAR(255)",
+        # Per-plugin access grants. Exactly one of user_id / group_id is set;
+        # the partial indexes below are what stop a duplicate grant, since
+        # SQLite counts NULLs as distinct in a plain UNIQUE.
+        """CREATE TABLE IF NOT EXISTS plugin_entitlements (
+            id INTEGER PRIMARY KEY,
+            package VARCHAR(255) NOT NULL,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            group_id INTEGER REFERENCES user_groups(id) ON DELETE CASCADE,
+            granted_at DATETIME NOT NULL,
+            granted_by VARCHAR(255)
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_ent_user
+           ON plugin_entitlements (package, user_id) WHERE user_id IS NOT NULL""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_ent_group
+           ON plugin_entitlements (package, group_id) WHERE group_id IS NOT NULL""",
+        # Groups became first-class: local groups sit alongside SCIM ones and
+        # carry tenant grants of their own. The tables themselves are created by
+        # create_all; these fill in the columns for a database that already had
+        # them, and _migrate_scim_groups_to_user_groups() moves the old data in.
+        "ALTER TABLE user_groups ADD COLUMN description TEXT",
+        "ALTER TABLE user_groups ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'local'",
+        "ALTER TABLE user_group_members ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'local'",
+        "ALTER TABLE user_group_members ADD COLUMN added_by VARCHAR(255)",
+        """CREATE TABLE IF NOT EXISTS group_tenant_entitlements (
+            id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+            tenant_id INTEGER NOT NULL REFERENCES tenant_configs(id) ON DELETE CASCADE,
+            granted_at DATETIME NOT NULL,
+            granted_by VARCHAR(255),
+            UNIQUE (group_id, tenant_id)
+        )""",
     ]
     for stmt in migrations:
         with engine.connect() as conn:
@@ -329,6 +361,205 @@ def _migrate(engine) -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()  # reset transaction state; column already exists
+
+    _migrate_scheduled_tasks_target_nullable(engine)
+    _migrate_scim_groups_to_user_groups(engine)
+
+
+def _migrate_scheduled_tasks_target_nullable(engine) -> None:
+    """Drop the legacy NOT NULL on scheduled_tasks.target_tenant_id.
+
+    Databases created before import tasks existed declared the column NOT NULL.
+    Import tasks have no target tenant and must store NULL there, so creating
+    one fails with an IntegrityError until the constraint is gone. SQLite has no
+    DROP NOT NULL, so the table is rebuilt.
+
+    Kept out of the additive `migrations` list above because that loop swallows
+    every exception — a rebuild that failed halfway through would be silently
+    left in a broken state. This runs guarded and all-or-nothing instead.
+    """
+    with engine.connect() as conn:
+        try:
+            cols = conn.execute(text("PRAGMA table_info(scheduled_tasks)")).fetchall()
+        except Exception:
+            return  # table absent (fresh DB pre-create_all); nothing to migrate
+        if not cols:
+            return
+        # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+        target = next((c for c in cols if c[1] == "target_tenant_id"), None)
+        if target is None or not target[3]:
+            return  # already nullable — nothing to do
+
+    # Foreign keys must be disabled outside the transaction; task_run_history
+    # references scheduled_tasks(id) and would otherwise block the DROP.
+    with engine.connect() as conn:
+        fk_was_on = bool(conn.execute(text("PRAGMA foreign_keys")).scalar())
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        conn.commit()
+        try:
+            with conn.begin():
+                conn.execute(text("""
+                    CREATE TABLE scheduled_tasks_new (
+                        id INTEGER NOT NULL,
+                        name VARCHAR(255) NOT NULL,
+                        source_tenant_id INTEGER NOT NULL,
+                        target_tenant_id INTEGER,
+                        resource_groups JSON NOT NULL,
+                        cron_expression VARCHAR(128) NOT NULL,
+                        sync_deletes BOOLEAN NOT NULL,
+                        enabled BOOLEAN NOT NULL,
+                        owner_email VARCHAR(512),
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        sync_mode VARCHAR(16) NOT NULL DEFAULT 'resource_type',
+                        label_name VARCHAR(255),
+                        label_resource_types JSON,
+                        task_type VARCHAR(16) NOT NULL DEFAULT 'sync',
+                        target_tenant_ids JSON,
+                        import_products JSON,
+                        PRIMARY KEY (id),
+                        UNIQUE (name),
+                        FOREIGN KEY(source_tenant_id) REFERENCES tenant_configs (id),
+                        FOREIGN KEY(target_tenant_id) REFERENCES tenant_configs (id)
+                    )
+                """))
+                conn.execute(text("""
+                    INSERT INTO scheduled_tasks_new (
+                        id, name, source_tenant_id, target_tenant_id, resource_groups,
+                        cron_expression, sync_deletes, enabled, owner_email,
+                        created_at, updated_at, sync_mode, label_name,
+                        label_resource_types, task_type, target_tenant_ids, import_products
+                    )
+                    SELECT
+                        id, name, source_tenant_id, target_tenant_id, resource_groups,
+                        cron_expression, sync_deletes, enabled, owner_email,
+                        created_at, updated_at, sync_mode, label_name,
+                        label_resource_types, task_type, target_tenant_ids, import_products
+                    FROM scheduled_tasks
+                """))
+                conn.execute(text("DROP TABLE scheduled_tasks"))
+                conn.execute(text("ALTER TABLE scheduled_tasks_new RENAME TO scheduled_tasks"))
+        except Exception:
+            with engine.connect() as cleanup:
+                try:
+                    cleanup.execute(text("DROP TABLE IF EXISTS scheduled_tasks_new"))
+                    cleanup.commit()
+                except Exception:
+                    cleanup.rollback()
+            raise
+        finally:
+            if fk_was_on:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.commit()
+
+
+def _table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:n"), {"n": name}
+    ).first()
+    return row is not None
+
+
+def _migrate_scim_groups_to_user_groups(engine) -> None:
+    """Move SCIM groups into the general user_groups tables and drop the old ones.
+
+    Groups used to exist only as something the IdP pushed, so they lived in
+    scim_groups / scim_group_members. Now that admins can create groups here as
+    well, both kinds share one table and a `source` column says which is which;
+    everything carried over is marked 'scim' because that is where it came from.
+
+    Ids are preserved, which is what lets plugin_entitlements.group_id keep
+    pointing at the same groups — only the table its foreign key names has to
+    change, and SQLite needs a rebuild for that.
+
+    Copy-then-drop rather than ALTER TABLE RENAME: create_all has already made
+    the empty user_groups table by the time this runs, so a rename would fail
+    and leave the data stranded in a table nothing reads any more.
+
+    Kept out of the additive `migrations` list because that loop swallows every
+    exception — this runs guarded and all-or-nothing instead.
+    """
+    with engine.connect() as conn:
+        legacy = _table_exists(conn, "scim_groups")
+        pe_sql = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='plugin_entitlements'")
+        ).scalar() or ""
+        stale_fk = "scim_groups" in pe_sql
+        if not legacy and not stale_fk:
+            return
+
+    # Foreign keys off for the duration: plugin_entitlements references
+    # scim_groups, which would otherwise block the DROP.
+    with engine.connect() as conn:
+        fk_was_on = bool(conn.execute(text("PRAGMA foreign_keys")).scalar())
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        conn.commit()
+        try:
+            with conn.begin():
+                if legacy:
+                    conn.execute(text("""
+                        INSERT OR IGNORE INTO user_groups
+                            (id, external_id, display_name, mapped_role, source,
+                             created_at, updated_at)
+                        SELECT id, external_id, display_name, mapped_role, 'scim',
+                               created_at, updated_at
+                        FROM scim_groups
+                    """))
+                    # WHERE group_id IN (...) drops any membership whose group lost
+                    # the display_name race with a group already created locally —
+                    # a dangling member row is worse than a missing one.
+                    conn.execute(text("""
+                        INSERT OR IGNORE INTO user_group_members
+                            (id, group_id, user_id, source, added_at)
+                        SELECT id, group_id, user_id, 'scim', CURRENT_TIMESTAMP
+                        FROM scim_group_members
+                        WHERE group_id IN (SELECT id FROM user_groups)
+                    """))
+                    conn.execute(text("DROP TABLE scim_group_members"))
+                    conn.execute(text("DROP TABLE scim_groups"))
+
+                if stale_fk:
+                    conn.execute(text("""
+                        CREATE TABLE plugin_entitlements_new (
+                            id INTEGER PRIMARY KEY,
+                            package VARCHAR(255) NOT NULL,
+                            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                            group_id INTEGER REFERENCES user_groups(id) ON DELETE CASCADE,
+                            granted_at DATETIME NOT NULL,
+                            granted_by VARCHAR(255)
+                        )
+                    """))
+                    conn.execute(text("""
+                        INSERT INTO plugin_entitlements_new
+                            (id, package, user_id, group_id, granted_at, granted_by)
+                        SELECT id, package, user_id, group_id, granted_at, granted_by
+                        FROM plugin_entitlements
+                    """))
+                    conn.execute(text("DROP TABLE plugin_entitlements"))
+                    conn.execute(text(
+                        "ALTER TABLE plugin_entitlements_new RENAME TO plugin_entitlements"
+                    ))
+                    # Dropped with the old table, so they have to be remade here.
+                    conn.execute(text("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_ent_user
+                        ON plugin_entitlements (package, user_id) WHERE user_id IS NOT NULL
+                    """))
+                    conn.execute(text("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_ent_group
+                        ON plugin_entitlements (package, group_id) WHERE group_id IS NOT NULL
+                    """))
+        except Exception:
+            with engine.connect() as cleanup:
+                try:
+                    cleanup.execute(text("DROP TABLE IF EXISTS plugin_entitlements_new"))
+                    cleanup.commit()
+                except Exception:
+                    cleanup.rollback()
+            raise
+        finally:
+            if fk_was_on:
+                conn.execute(text("PRAGMA foreign_keys=ON"))
+                conn.commit()
 
 
 def get_engine():

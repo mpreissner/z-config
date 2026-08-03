@@ -13,12 +13,27 @@ from api.dependencies import require_admin, AuthUser
 from api.auth_utils import hash_password
 from db.database import dispose_engine, get_session, get_setting, init_db, get_db_url
 from db.models import (
-    AuditLog, RestorePoint, ScimGroup, ScimGroupMember, ScimToken, SyncLog,
+    AuditLog, RestorePoint, ScimToken, SyncLog,
     TenantConfig, User, UserTenantEntitlement, ZCCResource, ZIAResource,
     ZPAResource,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+
+
+def _assert_admin_remains(session) -> None:
+    """Refuse a change that has just left the install with no active admin.
+
+    The self-edit guards below stop an admin demoting, deactivating or deleting
+    themselves, which covers the obvious lockout but not all of it: the caller
+    may hold admin only through a group, and a token outlives the change that
+    revoked the role it names. This asks the database instead of arguing from
+    who the caller is. `get_session` rolls the refused change back.
+    """
+    from services import role_service
+
+    if role_service.active_admin_count(session) == 0:
+        raise HTTPException(status_code=409, detail=role_service.LAST_ADMIN_MESSAGE)
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -75,12 +90,15 @@ class EntitlementBulkCreate(BaseModel):
 
 # ── Users ─────────────────────────────────────────────────────────────────────
 
-def _user_out(u: User) -> dict:
+def _user_out(u: User, available_roles: Optional[List[str]] = None) -> dict:
     return {
         "id": u.id,
         "username": u.username,
         "email": u.email,
+        # The account's own role. Groups can offer more without changing this,
+        # which is why the two are reported separately.
         "role": u.role,
+        "available_roles": available_roles if available_roles is not None else [u.role],
         "is_active": u.is_active,
         "force_password_change": u.force_password_change,
         "mfa_required": bool(u.mfa_required),
@@ -95,9 +113,12 @@ def _user_out(u: User) -> dict:
 
 @router.get("/users")
 def list_users(_: AuthUser = Depends(require_admin)):
+    from services.role_service import roles_for_users
+
     with get_session() as session:
         users = session.query(User).order_by(User.username).all()
-        return [_user_out(u) for u in users]
+        roles = roles_for_users(session, users)
+        return [_user_out(u, roles.get(u.id)) for u in users]
 
 
 @router.post("/users", status_code=201)
@@ -147,6 +168,7 @@ def update_user(user_id: int, body: UserUpdate, current: AuthUser = Depends(requ
             user.password_hash = hash_password(body.password)
         user.updated_at = datetime.utcnow()
         session.flush()
+        _assert_admin_remains(session)
         session.refresh(user)
         return _user_out(user)
 
@@ -160,6 +182,8 @@ def delete_user(user_id: int, current: AuthUser = Depends(require_admin)):
         if user.id == current.user_id:
             raise HTTPException(status_code=400, detail="Cannot delete your own account")
         session.delete(user)
+        session.flush()
+        _assert_admin_remains(session)
 
 
 # ── Entitlements ──────────────────────────────────────────────────────────────
@@ -547,10 +571,6 @@ class ScimTokenCreate(BaseModel):
     label: Optional[str] = None
 
 
-class ScimGroupMapping(BaseModel):
-    mapped_role: Optional[str] = None   # 'admin' | 'user' | null to unmap
-
-
 def _scim_token_out(t: ScimToken) -> dict:
     return {
         "id": t.id,
@@ -603,49 +623,6 @@ def revoke_scim_token(token_id: int, _: AuthUser = Depends(require_admin)):
         session.delete(token)
 
 
-@router.get("/scim/groups")
-def list_scim_groups(_: AuthUser = Depends(require_admin)):
-    with get_session() as session:
-        rows = session.query(ScimGroup).order_by(ScimGroup.display_name).all()
-        out = []
-        for g in rows:
-            count = session.query(ScimGroupMember).filter_by(group_id=g.id).count()
-            out.append({
-                "id": g.id,
-                "display_name": g.display_name,
-                "external_id": g.external_id,
-                "mapped_role": g.mapped_role,
-                "member_count": count,
-                "updated_at": g.updated_at.isoformat() if g.updated_at else None,
-            })
-        return out
-
-
-@router.put("/scim/groups/{group_id}")
-def map_scim_group(group_id: int, body: ScimGroupMapping, _: AuthUser = Depends(require_admin)):
-    """Point a provisioned group at a zs-config role, then re-apply it."""
-    if body.mapped_role not in (None, "", "admin", "user"):
-        raise HTTPException(status_code=422, detail="mapped_role must be 'admin', 'user' or null")
-
-    with get_session() as session:
-        group = session.query(ScimGroup).filter_by(id=group_id).first()
-        if not group:
-            raise HTTPException(status_code=404, detail="Group not found")
-        group.mapped_role = body.mapped_role or None
-        group.updated_at = datetime.utcnow()
-        session.flush()
-
-        # Members inherit the new mapping immediately rather than waiting for
-        # the IdP's next sync cycle.
-        from api.routers.scim import _reconcile_roles
-        _reconcile_roles(session, group_id)
-
-        count = session.query(ScimGroupMember).filter_by(group_id=group_id).count()
-        return {
-            "id": group.id,
-            "display_name": group.display_name,
-            "external_id": group.external_id,
-            "mapped_role": group.mapped_role,
-            "member_count": count,
-            "updated_at": group.updated_at.isoformat() if group.updated_at else None,
-        }
+# Groups — including the SCIM-provisioned ones this section used to serve —
+# live at /api/v1/admin/groups (api/routers/groups.py). They are no longer a
+# SCIM-only concept, so the endpoints moved with them.

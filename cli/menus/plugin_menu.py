@@ -506,7 +506,7 @@ def _branch_override_menu(installed: list[dict], overrides: dict) -> None:
 
 
 def _uninstall_plugin(installed: list[dict]) -> None:
-    from lib.plugin_manager import uninstall_plugin
+    from lib.plugin_manager import plugin_data_summary, uninstall_plugin
 
     choices = [
         questionary.Choice(f"{p['name']}  ({p['package']} {p['version']})", value=p)
@@ -526,8 +526,36 @@ def _uninstall_plugin(installed: list[dict]) -> None:
     if not confirmed:
         return
 
+    # Name the damage before offering to do it. Plugins that declare no tables
+    # and no teardown hook skip this entirely.
+    purge_data = False
+    summary = plugin_data_summary(plugin["package"])
+    if summary["tables"] or summary["candidates"]:
+        lines = []
+        if summary["tables"]:
+            lines.append(
+                f"  • drop {len(summary['tables'])} table(s) owned by the plugin "
+                f"({summary['rows']:,} rows)"
+            )
+        if summary["candidates"]:
+            lines.append(
+                f"  • delete {summary['candidates']:,} unpushed migration candidate(s)"
+            )
+        console.print(Panel(
+            "\n".join(lines) +
+            "\n\n[green]Objects already pushed to a tenant will NOT be touched.[/green]",
+            title="[yellow]Plugin data[/yellow]",
+            border_style="yellow",
+        ))
+        purge_data = questionary.confirm(
+            "Also remove this plugin's data?",
+            default=True,
+        ).ask()
+        if purge_data is None:
+            return
+
     with console.status(f"[cyan]Uninstalling {plugin['package']}...[/cyan]"):
-        success, message = uninstall_plugin(plugin["package"])
+        success, message = uninstall_plugin(plugin["package"], purge_data=purge_data)
 
     if success:
         console.print(f"[green]✓ {message}[/green]")

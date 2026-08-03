@@ -43,23 +43,43 @@ def verify_password(plaintext: str, hashed: str) -> bool:
     return bcrypt.checkpw(plaintext.encode(), hashed.encode())
 
 
-def issue_access_token(user, *, mfa_enroll: bool = False) -> str:
+def issue_access_token(user, *, mfa_enroll: bool = False, roles=None, active_role=None) -> str:
+    """Mint an access token for one active role.
+
+    `role` is the role this session is actually holding and the only thing any
+    authorisation check reads; `roles` is everything the account could switch
+    to. Callers already inside a session must pass `roles` themselves —
+    working it out here would open a second one.
+    """
+    from services.role_service import available_roles, resolve_active
+
+    if roles is None:
+        roles = available_roles(user.id, user.role)
+    active = resolve_active(roles, active_role)
+
     now = int(time.time())
     ttl = _access_ttl()
-    payload: dict = {"sub": str(user.id), "username": user.username, "role": user.role,
+    payload: dict = {"sub": str(user.id), "username": user.username, "role": active,
+                     "roles": list(roles),
                      "fpc": user.force_password_change, "iat": now, "exp": now + ttl}
     if mfa_enroll:
         payload["mfa_enroll"] = True
     return jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
 
 
-def issue_refresh_token(user) -> str:
+def issue_refresh_token(user, *, active_role=None) -> str:
+    """Mint a refresh token.
+
+    It carries the active role so a refresh lands the session back where it
+    was — without it, every five-minute refresh would silently drop an
+    assumed admin back to least privilege.
+    """
     now = int(time.time())
     ttl = _refresh_ttl()
-    return jwt.encode(
-        {"sub": str(user.id), "type": "refresh", "iat": now, "exp": now + ttl},
-        _secret(), algorithm=_ALGORITHM,
-    )
+    payload: dict = {"sub": str(user.id), "type": "refresh", "iat": now, "exp": now + ttl}
+    if active_role:
+        payload["role"] = active_role
+    return jwt.encode(payload, _secret(), algorithm=_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:

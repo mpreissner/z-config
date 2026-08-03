@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchSettings, patchSettings, SystemSettings, fetchSystemInfo, sendTestUpdateEmail } from "../api/system";
 import { importDatabase, ImportDbResult, clearData, ClearDataResult, rotateKey, RotateKeyResult } from "../api/admin";
@@ -12,10 +13,8 @@ import {
 } from "../api/ssl";
 import { useJobStream } from "../hooks/useJobStream";
 import { testSso, ssoMetadataUrl, discoverSso } from "../api/sso";
-import {
-  fetchScimTokens, createScimToken, revokeScimToken,
-  fetchScimGroups, mapScimGroup,
-} from "../api/scim";
+import { fetchScimTokens, createScimToken, revokeScimToken } from "../api/scim";
+import { fetchGroups } from "../api/groups";
 import { ApiError } from "../api/client";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
@@ -1830,7 +1829,9 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
   const [newToken, setNewToken] = useState<string | null>(null);
 
   const { data: tokens } = useQuery({ queryKey: ["scim-tokens"], queryFn: fetchScimTokens });
-  const { data: groups } = useQuery({ queryKey: ["scim-groups"], queryFn: fetchScimGroups });
+  // Only what the IdP pushed — locally created groups have nothing to do with SCIM.
+  const { data: allGroups } = useQuery({ queryKey: ["admin-groups"], queryFn: fetchGroups });
+  const groups = (allGroups ?? []).filter((g) => g.source === "scim");
 
   const create = useMutation({
     mutationFn: () => createScimToken(label.trim() || undefined),
@@ -1844,15 +1845,6 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
   const revoke = useMutation({
     mutationFn: revokeScimToken,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["scim-tokens"] }),
-  });
-
-  const map = useMutation({
-    mutationFn: ({ id, role }: { id: number; role: string | null }) => mapScimGroup(id, role),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["scim-groups"] });
-      // A remapped group can change roles, so the user list is stale too.
-      qc.invalidateQueries({ queryKey: ["admin-users"] });
-    },
   });
 
   const base = baseUrl || window.location.origin;
@@ -1961,12 +1953,16 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
       </div>
 
       <div className="pt-3 border-t border-gray-100 space-y-3">
-        <p className="text-sm font-medium text-gray-700">Group role mapping</p>
+        <p className="text-sm font-medium text-gray-700">Provisioned groups</p>
         <p className="text-xs text-gray-500">
-          Groups appear here once your IdP pushes them. Mapping one to a role applies it to
-          its members immediately. Unmapped groups leave members on the default role.
+          Groups appear here once your IdP pushes them. Role mapping, members and tenant
+          grants are managed on the{" "}
+          <Link to="/admin/groups" className="text-zs-600 hover:underline">
+            Groups
+          </Link>{" "}
+          page, alongside any groups you created yourself.
         </p>
-        {groups && groups.length > 0 ? (
+        {groups.length > 0 ? (
           <table className="w-full text-xs">
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-200">
@@ -1980,16 +1976,8 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
                 <tr key={g.id} className="border-b border-gray-100">
                   <td className="py-1.5 text-gray-700">{g.display_name}</td>
                   <td className="py-1.5 text-gray-500">{g.member_count}</td>
-                  <td className="py-1.5">
-                    <select
-                      value={g.mapped_role ?? ""}
-                      onChange={(e) => map.mutate({ id: g.id, role: e.target.value || null })}
-                      className="border border-gray-300 rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-zs-500"
-                    >
-                      <option value="">Not mapped</option>
-                      <option value="user">User</option>
-                      <option value="admin">Admin</option>
-                    </select>
+                  <td className="py-1.5 text-gray-500">
+                    {g.mapped_role || <span className="text-gray-400">not mapped</span>}
                   </td>
                 </tr>
               ))}
@@ -1997,9 +1985,6 @@ function ScimSection({ baseUrl }: { baseUrl: string }) {
           </table>
         ) : (
           <p className="text-xs text-gray-400">No groups have been provisioned yet.</p>
-        )}
-        {map.isError && (
-          <ErrorMessage message={map.error instanceof Error ? map.error.message : "Failed to update mapping"} />
         )}
       </div>
     </SectionCard>

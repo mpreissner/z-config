@@ -57,3 +57,6 @@ certs/
 
 # Other
 scripts/dump_tenant_creds.py
+
+# Local compose overrides
+docker-compose.override.yml

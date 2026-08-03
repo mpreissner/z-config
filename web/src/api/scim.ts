@@ -15,15 +15,6 @@ export interface ScimTokenCreated extends ScimTokenRow {
   token: string;
 }
 
-export interface ScimGroupRow {
-  id: number;
-  display_name: string;
-  external_id: string | null;
-  mapped_role: string | null;
-  member_count: number;
-  updated_at: string | null;
-}
-
 export function fetchScimTokens(): Promise<ScimTokenRow[]> {
   return apiFetch<ScimTokenRow[]>("/api/v1/admin/scim/tokens");
 }
@@ -39,13 +30,5 @@ export function revokeScimToken(id: number): Promise<void> {
   return apiFetch<void>(`/api/v1/admin/scim/tokens/${id}`, { method: "DELETE" });
 }
 
-export function fetchScimGroups(): Promise<ScimGroupRow[]> {
-  return apiFetch<ScimGroupRow[]>("/api/v1/admin/scim/groups");
-}
-
-export function mapScimGroup(id: number, mappedRole: string | null): Promise<ScimGroupRow> {
-  return apiFetch<ScimGroupRow>(`/api/v1/admin/scim/groups/${id}`, {
-    method: "PUT",
-    body: JSON.stringify({ mapped_role: mappedRole }),
-  });
-}
+// Groups moved to ./groups — they are no longer SCIM-only, and the endpoints
+// went with them.
