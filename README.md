@@ -9,15 +9,14 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ## What's New — v3.4.1
 
-> **v3.4.1 is the current release.** See the [changelog](CHANGELOG.md) for full details.
+> **v3.4.1 is the current release** — a maintenance release. See the [changelog](CHANGELOG.md) for full details.
 
-- **Groups as a first-class concept** — create groups locally and pick their members by hand, alongside the ones your IdP pushes over SCIM, which it keeps owning. Groups grant tenants as well as roles, and a hand-added member survives a SCIM sync.
-- **Effective roles with role switching** — a group's mapped role no longer overwrites your own; it adds to the set of roles you may assume. Sessions start at least privilege, and accounts holding more than one role get a picker in the sidebar. This fixes a locally created admin being silently demoted on joining a user-mapped group.
-- **ZIA snapshot restore in the web UI** — previously TUI-only. Preview what a restore would change, then run it with streaming progress: push creates and updates, delete resources absent from the snapshot, activate, and verify.
-- **Staged configuration changes** — proposed config can now be held in the local database and reviewed before anything reaches a tenant, with the push engines fed from the reviewed set rather than directly.
-- **ZPA push as a service** — the ZPA write engine moved out of the restore handler, which gains it a merge mode that matches by name and a preview that classifies without writing.
+- **ZIA snapshot restore in the web UI** — previously TUI-only, and with the TUI deprecating in v4.0.0 it needed a home. Preview what a restore would change, then run it with streaming progress: push creates and updates, delete resources absent from the snapshot, activate, and verify.
+- **SCIM group handling completed** — v3.4.0 provisioned groups from your IdP without giving you anywhere to manage them. Groups now have their own admin page for membership, role mapping, and tenant grants, and you can create one locally alongside the ones SCIM owns.
+- **Group role mappings no longer overwrite an account's own role** — a locally created admin who joined a user-mapped group was silently demoted. A mapped role now adds to the roles an account may assume; only one is live at a time, and accounts holding more than one get a picker in the sidebar.
+- **Fixes** — the last-admin guard now counts admins who hold the role through a group, scheduled import tasks create correctly on pre-3.3.3 databases, and secret-looking values are redacted from push error text.
 
-Also in this release: internal plumbing for the extension mechanism, and the last-admin guard finally counts admins who hold the role through a group.
+Internal plumbing: the ZPA write engine moved out of the restore handler into a service, staged resource rows are implemented behind the existing `source` and `candidate_status` columns, and the extension points gained a declarative contract.
 
 > [!NOTE]
 > **Heads-up:** the TUI will be formally deprecated in **v4.0.0**. It keeps working throughout 3.x, but new features are web-only from here — see [TUI Features](#tui-features).
@@ -143,7 +142,7 @@ All Devices (list/search/OTP), Trusted Networks, Forwarding Profiles, App Profil
 Users, Groups (with members), API Clients (details and secrets)
 
 **Admin (admin-only)**
-User Management, **Groups** (local or SCIM-provisioned; membership, role mapping, tenant grants), Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database
+User Management, Groups (local or SCIM-provisioned; membership, role mapping, tenant grants), Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database
 
 ---
 
