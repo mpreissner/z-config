@@ -192,23 +192,57 @@ export interface EntitledPlugin {
   version: string | null;
 }
 
+/** One row of a `selection` grid. Plain selects use only value and label. */
+export interface PluginOption {
+  value: string;
+  label: string;
+  /** A grid row's columns, in the order the parameter declared them. */
+  cells?: string[];
+  /** Whether the plugin considers this row already picked. */
+  selected?: boolean;
+  disabled?: boolean;
+  /** Heading this row sorts under in the grid. */
+  group?: string | null;
+  /** Aside shown beside the row — why it was grouped, why it is off by default. */
+  note?: string | null;
+}
+
+export interface PluginParamFilter {
+  name: string;
+  label: string;
+  options: { value: string; label: string }[];
+}
+
 export interface PluginParam {
   name: string;
   label: string;
-  type: "text" | "textarea" | "password" | "number" | "boolean" | "select" | "tenant" | "file";
+  type:
+    | "text"
+    | "textarea"
+    | "password"
+    | "number"
+    | "boolean"
+    | "select"
+    | "selection"
+    | "tenant"
+    | "file";
   required: boolean;
   help: string | null;
   placeholder: string | null;
-  options?: { value: string; label: string }[];
+  options?: PluginOption[];
   default?: unknown;
   /**
    * A select whose options the plugin computes rather than declares. `options`
    * arrives empty and the real list comes from fetchPluginActionOptions() once
-   * everything in `depends_on` has a value.
+   * everything in `depends_on` has a value. Always true for a selection grid.
    */
   dynamic?: boolean;
   /** Parameters this one reads. Changing any of them invalidates the list. */
   depends_on?: string[];
+  /** selection only: the grid's column headings. */
+  columns?: string[];
+  /** selection only: dropdowns that narrow the visible rows, matched on cells. */
+  filters?: PluginParamFilter[];
 }
 
 export interface PluginAction {
@@ -218,7 +252,23 @@ export interface PluginAction {
   /** Shown as a confirmation prompt before the action runs. */
   confirm: string | null;
   destructive: boolean;
+  /** Names of the page-level context values this action consumes. */
+  context?: string[];
   params: PluginParam[];
+}
+
+export interface PluginWorkflowStep {
+  key: string;
+  label: string;
+  description: string | null;
+  /** Actions drawn under this step, in the order the plugin listed them. */
+  actions: string[];
+}
+
+export interface PluginWorkflow {
+  steps: PluginWorkflowStep[];
+  /** Whether asking fetchPluginState() for per-step progress is worth a request. */
+  stateful: boolean;
 }
 
 /** Everything the page needs to draw itself. The plugin ships no markup. */
@@ -227,15 +277,71 @@ export interface PluginUi {
   package: string;
   version: string | null;
   description: string | null;
+  /** Values chosen once at the top of the page and kept across actions. */
+  context: PluginParam[];
+  workflow: PluginWorkflow | null;
   actions: PluginAction[];
 }
+
+export type PluginTone = "neutral" | "good" | "warn" | "bad";
+
+export type PluginSection =
+  | {
+      kind: "stats";
+      title: string | null;
+      subtitle: string | null;
+      items: { label: string; value: unknown; tone: PluginTone; detail: string | null }[];
+    }
+  | {
+      kind: "table";
+      title: string | null;
+      subtitle: string | null;
+      columns: string[];
+      rows: string[][];
+      /** Index of the column holding a tone name, used to colour the row. */
+      tone_column: number | null;
+    }
+  | {
+      kind: "groups";
+      title: string | null;
+      subtitle: string | null;
+      groups: {
+        key: string;
+        title: string;
+        subtitle: string | null;
+        badge: string | null;
+        tone: PluginTone;
+        columns: string[];
+        rows: string[][];
+      }[];
+    }
+  | {
+      kind: "notes";
+      title: string | null;
+      subtitle: string | null;
+      notes: {
+        tone: PluginTone;
+        text: string;
+        /** The action that resolves this note. Prefills the form; grants nothing. */
+        action: { key: string; label: string } | null;
+      }[];
+    };
 
 export interface PluginActionResult {
   message: string;
   table: { columns: string[]; rows: unknown[][] } | null;
+  /** Richer blocks the plugin asked for, drawn in order above the detail pairs. */
+  sections?: PluginSection[];
   details: Record<string, unknown>;
   /** Set when the action produced a file; fetch it with downloadPluginArtifact(). */
   download: { filename: string; content_type: string; size: number } | null;
+}
+
+export type PluginStepStatus = "pending" | "current" | "complete" | "blocked";
+
+export interface PluginStepState {
+  status: PluginStepStatus;
+  detail: string | null;
 }
 
 /**
@@ -295,12 +401,43 @@ export const fetchPluginActionOptions = (
   actionKey: string,
   param: string,
   params: Record<string, unknown>,
-): Promise<{ options: { value: string; label: string }[] }> =>
+): Promise<{ options: PluginOption[] }> =>
   apiFetch(
     `/api/v1/plugins/${packageName}/actions/${encodeURIComponent(actionKey)}` +
       `/options/${encodeURIComponent(param)}`,
     { method: "POST", body: JSON.stringify({ params }) },
   );
+
+/**
+ * The options for one page-level context value.
+ *
+ * Its own endpoint because the context bar is drawn before any action has been
+ * picked, so there is no action key to ask through. Same checks either way.
+ */
+export const fetchPluginContextOptions = (
+  packageName: string,
+  param: string,
+  params: Record<string, unknown>,
+): Promise<{ options: PluginOption[] }> =>
+  apiFetch(
+    `/api/v1/plugins/${packageName}/context/options/${encodeURIComponent(param)}`,
+    { method: "POST", body: JSON.stringify({ params }) },
+  );
+
+/**
+ * How far along each workflow step is for the given context.
+ *
+ * Cosmetic: it decides what the step strip looks like. A step reported blocked
+ * is still authorised on its own terms if something posts to it directly.
+ */
+export const fetchPluginState = (
+  packageName: string,
+  params: Record<string, unknown>,
+): Promise<{ state: Record<string, PluginStepState> }> =>
+  apiFetch(`/api/v1/plugins/${packageName}/state`, {
+    method: "POST",
+    body: JSON.stringify({ params }),
+  });
 
 /**
  * Save the file a finished action produced.

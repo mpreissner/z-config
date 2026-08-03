@@ -693,7 +693,13 @@ def plugin_ui(package: str, user: AuthUser = Depends(require_plugin_user)):
 
 
 def _resolve_action(package: str, action_key: str, user: AuthUser) -> tuple[dict, dict, dict]:
-    """`(plugin, described action, raw action)` for a package the caller may use."""
+    """`(plugin, described action, raw action)` for a package the caller may use.
+
+    Both actions come back with the plugin's page-level context folded in as
+    ordinary parameters, so a value the user entered once at the top of the page
+    is coerced, entitlement-checked and re-resolved on exactly the same path as
+    one typed into the action's own form.
+    """
     plugin = _entitled_plugin(package, user)
     described = plugin_web.describe(plugin)
     action = next(
@@ -705,7 +711,20 @@ def _resolve_action(package: str, action_key: str, user: AuthUser) -> tuple[dict
     raw_action = plugin_web.find_action(plugin, action_key)
     if not raw_action or not callable(raw_action.get("run")):
         raise HTTPException(status_code=500, detail=f"Action '{action_key}' has no runnable")
-    return plugin, action, raw_action
+
+    bound = plugin_web.bind_context(described, action)
+    return plugin, bound, plugin_web.bind_raw_context(plugin, raw_action, action)
+
+
+def _described(package: str, user: AuthUser) -> tuple[dict, dict]:
+    """`(plugin, described spec)` for a package the caller may use."""
+    plugin = _entitled_plugin(package, user)
+    described = plugin_web.describe(plugin)
+    if not described:
+        raise HTTPException(
+            status_code=404, detail=f"Plugin '{package}' has no web interface"
+        )
+    return plugin, described
 
 
 def _authorised_options(
@@ -762,6 +781,64 @@ def plugin_action_options(
     _, action, raw_action = _resolve_action(package, action_key, user)
     options = _authorised_options(action, raw_action, param, body.params, user)
     return {"options": options}
+
+
+@router.post("/{package}/context/options/{param}")
+def plugin_context_options(
+    package: str,
+    param: str,
+    body: OptionsRequest,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """The options for one page-level context value.
+
+    The context bar is drawn before any action has been chosen, so it cannot ask
+    through an action's endpoint. The synthetic action it resolves against holds
+    the context parameters and nothing else, which keeps the coercion and the
+    tenant check identical to every other option load.
+    """
+    plugin, described = _described(package, user)
+    action = plugin_web.context_action(described)
+    raw_action = plugin_web.raw_context_action(plugin)
+    options = _authorised_options(action, raw_action, param, body.params, user)
+    return {"options": options}
+
+
+@router.post("/{package}/state")
+def plugin_workflow_state(
+    package: str,
+    body: OptionsRequest,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """How far along each declared step is, for the context the caller names.
+
+    Advisory only: it decides what the step strip looks like, never what may be
+    run. A step the plugin calls blocked is still an action the caller can post
+    to directly, and it is authorised there on its own terms.
+    """
+    plugin, described = _described(package, user)
+    workflow = described.get("workflow")
+    if not workflow:
+        raise HTTPException(status_code=404, detail=f"Plugin '{package}' has no workflow")
+
+    state_fn = plugin_web.find_workflow_state(plugin)
+    if not state_fn:
+        return {"state": plugin_web.normalise_state(None, workflow)}
+
+    action = plugin_web.context_action(described)
+    try:
+        params = plugin_web.coerce_params(action, body.params, partial=True)
+    except plugin_web.PluginWebError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    for name in plugin_web.tenant_params(action):
+        if params.get(name) is not None:
+            check_tenant_access(int(params[name]), user)
+
+    try:
+        return {"state": plugin_web.normalise_state(state_fn(dict(params)), workflow)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read plugin state: {exc}")
 
 
 async def _collect_params(request, action: dict) -> tuple[dict, Optional[str]]:
@@ -852,17 +929,23 @@ async def run_plugin_action(
         # have offered. Without this, the dropdown is the only thing stopping a
         # caller naming a row belonging to someone else's tenant.
         for name in plugin_web.dynamic_params(action):
-            if params.get(name) is None:
+            # Nothing supplied and nothing ticked both mean there is no value to
+            # check, and loading a grid's rows to validate an empty list is work
+            # for its own sake.
+            if not params.get(name):
                 continue
             allowed = {
                 o["value"]
                 for o in _authorised_options(action, raw_action, name, supplied, user)
             }
-            if str(params[name]) not in allowed:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"'{name}' is not one of the offered options",
-                )
+            # A selection grid submits many values; each one has to have been on
+            # the list the plugin just produced, not merely most of them.
+            for value in plugin_web.submitted_values(action, name, params[name]):
+                if value not in allowed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'{name}' is not one of the offered options",
+                    )
     except Exception:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)

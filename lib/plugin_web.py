@@ -55,6 +55,48 @@ would. The page refetches whenever a dependency changes, and the router
 re-resolves the list when the action runs and refuses a value that is not in
 it — which is what stops a caller naming a row from a tenant they cannot reach.
 
+A value every action needs is declared once as page context instead of being
+re-entered on each form. Actions name the ones they consume:
+
+    "web": {
+        "context": [
+            {"name": "session", "label": "Migration", "type": "select",
+             "options": list_sessions},
+        ],
+        "actions": [
+            {"key": "analyse", "context": ["session"], "params": […], "run": …},
+        ],
+    }
+
+The page renders those in a bar above the actions and keeps them while the user
+moves around. Nothing else changes: a context parameter is folded back into the
+action's own parameters before validation, so it is coerced, entitlement-checked
+and re-resolved exactly as a parameter declared inline would be, and `run` sees
+one flat `params` dict.
+
+A plugin whose actions are steps of one job can say so, and the page draws them
+in order with the state the plugin reports:
+
+    "workflow": {
+        "steps": [{"key": "import", "label": "1 · Import", "actions": ["import_xml"]}],
+        "state": session_state,   # state(context: dict) -> {step_key: {...}}
+    }
+
+`state` is advisory — it decides what the step strip looks like, never what a
+caller is allowed to run. Every action is authorised on its own terms whichever
+step it is drawn under.
+
+A `selection` parameter is a checkbox grid rather than a field: the plugin
+loads the rows, the user ticks some, and `run` receives the list of values.
+
+    {"name": "units", "type": "selection", "options": load_units,
+     "depends_on": ["session"], "columns": ["Rule", "Target"],
+     "filters": [{"name": "target", "label": "Target", "options": [...]}]}
+
+The loader returns a row per line — `{"value", "cells", "selected", "group",
+"disabled", "note"}` — and is re-resolved on run like any other dynamic
+parameter, so a value the plugin did not offer is refused.
+
 Two rules the rest of the app depends on:
 
 *Nothing here is trusted for authorisation.* A `tenant` parameter resolves to a
@@ -85,9 +127,14 @@ PARAM_TYPES = (
     "number",
     "boolean",
     "select",
+    "selection",
     "tenant",
     "file",
 )
+
+#: How a result section, a stat or a note asks to be coloured. Anything else is
+#: read as `neutral` — a plugin inventing a tone gets a plain row, not an error.
+TONES = ("neutral", "good", "warn", "bad")
 
 
 class PluginWebError(Exception):
@@ -135,22 +182,52 @@ class PluginContext:
 
 
 def _normalise_options(options: Any) -> List[dict]:
-    """`[{"value", "label"}]` from either shape a plugin may offer.
+    """`[{"value", "label"}]` from any shape a plugin may offer.
 
     Accepts both `["a", "b"]` and `[{"value": "a", "label": "A"}]` so a plugin
     with nothing to say about labels does not have to repeat itself.
+
+    A `selection` grid's rows come through here too — an option carrying `cells`
+    keeps its row fields alongside `value` and `label`, so everything that reads
+    an offered list by value, the router's check included, works on a grid row
+    without knowing it is one.
     """
     if not isinstance(options, (list, tuple)):
         raise PluginWebError("options must be a list", 500)
     out = []
     for o in options:
-        if isinstance(o, dict):
-            if "value" not in o:
-                raise PluginWebError("an option is missing 'value'", 500)
-            out.append({"value": str(o["value"]), "label": str(o.get("label", o["value"]))})
-        else:
+        if not isinstance(o, dict):
             out.append({"value": str(o), "label": str(o)})
+            continue
+        if "value" not in o:
+            raise PluginWebError("an option is missing 'value'", 500)
+        if "cells" not in o:
+            out.append({"value": str(o["value"]), "label": str(o.get("label", o["value"]))})
+            continue
+
+        cells = [("" if c is None else str(c)) for c in (o.get("cells") or [])]
+        out.append({
+            "value": str(o["value"]),
+            "label": str(o.get("label") or (cells[0] if cells else o["value"])),
+            "cells": cells,
+            "selected": bool(o.get("selected", False)),
+            "disabled": bool(o.get("disabled", False)),
+            "group": str(o["group"]) if o.get("group") else None,
+            "note": str(o["note"]) if o.get("note") else None,
+        })
     return out
+
+
+def _describe_filter(raw: Any, name: str) -> dict:
+    """One column filter offered above a selection grid."""
+    if not isinstance(raw, dict) or not str(raw.get("name") or "").strip():
+        raise PluginWebError(f"param '{name}': each filter needs a 'name'", 500)
+    key = str(raw["name"]).strip()
+    return {
+        "name": key,
+        "label": str(raw.get("label") or key),
+        "options": _normalise_options(raw.get("options") or []),
+    }
 
 
 def _describe_param(raw: Any, action_key: str) -> dict:
@@ -201,6 +278,47 @@ def _describe_param(raw: Any, action_key: str) -> dict:
             out["depends_on"] = []
             out["options"] = _normalise_options(options)
 
+    if ptype == "selection":
+        # A grid is always loaded, never declared: its rows are the plugin's
+        # current state — which rules exist, which are already ticked — and a
+        # literal list in a spec could only ever be stale.
+        loader = raw.get("options")
+        if not callable(loader):
+            raise PluginWebError(
+                f"action '{action_key}', param '{name}': selection needs a callable "
+                "'options' that loads its rows", 500
+            )
+        depends = raw.get("depends_on") or []
+        if not isinstance(depends, (list, tuple)):
+            raise PluginWebError(
+                f"action '{action_key}', param '{name}': 'depends_on' must be a list", 500
+            )
+        columns = raw.get("columns") or []
+        if not isinstance(columns, (list, tuple)) or not columns:
+            raise PluginWebError(
+                f"action '{action_key}', param '{name}': selection needs 'columns'", 500
+            )
+        filters = raw.get("filters") or []
+        if not isinstance(filters, (list, tuple)):
+            raise PluginWebError(
+                f"action '{action_key}', param '{name}': 'filters' must be a list", 500
+            )
+        out["dynamic"] = True
+        out["depends_on"] = [str(d) for d in depends]
+        out["options"] = []
+        out["columns"] = [str(c) for c in columns]
+        out["filters"] = [_describe_filter(f, name) for f in filters]
+
+        # A filter narrows on one of the grid's columns. Naming a column that is
+        # not there gives a dropdown that hides every row whatever is picked.
+        headings = {c.lower() for c in out["columns"]}
+        for f in out["filters"]:
+            if f["name"].lower() not in headings:
+                raise PluginWebError(
+                    f"action '{action_key}', param '{name}': filter '{f['name']}' "
+                    "does not name one of the declared columns", 500
+                )
+
     # A file has nowhere sensible to put a default, and a password default
     # would be a credential sitting in a GET response.
     if ptype not in ("file", "password") and raw.get("default") is not None:
@@ -209,7 +327,7 @@ def _describe_param(raw: Any, action_key: str) -> dict:
     return out
 
 
-def _describe_action(raw: Any) -> dict:
+def _describe_action(raw: Any, context_names: Tuple[str, ...] = ()) -> dict:
     if not isinstance(raw, dict):
         raise PluginWebError("each action must be a dict", 500)
 
@@ -223,16 +341,37 @@ def _describe_action(raw: Any) -> dict:
     if not isinstance(params, (list, tuple)):
         raise PluginWebError(f"action '{key}': 'params' must be a list", 500)
 
+    wanted = raw.get("context") or []
+    if not isinstance(wanted, (list, tuple)):
+        raise PluginWebError(f"action '{key}': 'context' must be a list", 500)
+    wanted = [str(c) for c in wanted]
+    for name in wanted:
+        if name not in context_names:
+            raise PluginWebError(
+                f"action '{key}': context names '{name}', which the plugin does "
+                "not declare under 'web.context'", 500
+            )
+
     described = [_describe_param(p, key) for p in params]
     names = [p["name"] for p in described]
     if len(names) != len(set(names)):
         raise PluginWebError(f"action '{key}': duplicate param names", 500)
 
+    # A parameter shadowing a context value would be filled in twice from two
+    # different places, and which one reached `run` would come down to ordering.
+    clash = set(names) & set(wanted)
+    if clash:
+        raise PluginWebError(
+            f"action '{key}': {sorted(clash)[0]!r} is both a context value and a "
+            "parameter of this action", 500
+        )
+
     # A dependency naming a parameter that does not exist would never fire, and
     # the symptom is a dropdown that stays empty forever with nothing to read.
+    visible = set(names) | set(wanted)
     for p in described:
         for dep in p.get("depends_on") or []:
-            if dep not in names:
+            if dep not in visible:
                 raise PluginWebError(
                     f"action '{key}', param '{p['name']}': depends_on names "
                     f"'{dep}', which is not a parameter of this action", 500
@@ -248,8 +387,82 @@ def _describe_action(raw: Any) -> dict:
         "description": raw.get("description") or None,
         "confirm": raw.get("confirm") or None,
         "destructive": bool(raw.get("destructive", False)),
+        "context": wanted,
         "params": described,
     }
+
+
+def _describe_context(raw: Any) -> List[dict]:
+    """The page-level values, described as ordinary parameters.
+
+    Same shape and same validation as an action's own — the only difference is
+    where they are drawn and that they outlive the form.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise PluginWebError("'web.context' must be a list", 500)
+
+    described = [_describe_param(p, "context") for p in raw]
+    names = [p["name"] for p in described]
+    if len(names) != len(set(names)):
+        raise PluginWebError("duplicate context param names", 500)
+    for p in described:
+        if p["type"] in ("file", "selection"):
+            raise PluginWebError(
+                f"context '{p['name']}': a {p['type']} cannot be page context", 500
+            )
+        for dep in p.get("depends_on") or []:
+            if dep not in names or dep == p["name"]:
+                raise PluginWebError(
+                    f"context '{p['name']}': depends_on names '{dep}', which is not "
+                    "another context value", 500
+                )
+    return described
+
+
+def _describe_workflow(raw: Any, action_keys: Tuple[str, ...]) -> Optional[dict]:
+    """The ordered steps the actions belong to, or None if the plugin is flat.
+
+    `stateful` tells the page whether asking for per-step state is worth a
+    request. The `state` callable itself stays on the server.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise PluginWebError("'web.workflow' must be a dict", 500)
+
+    steps = raw.get("steps") or []
+    if not isinstance(steps, (list, tuple)) or not steps:
+        raise PluginWebError("'web.workflow' needs a non-empty 'steps' list", 500)
+
+    out = []
+    for step in steps:
+        if not isinstance(step, dict):
+            raise PluginWebError("each workflow step must be a dict", 500)
+        key = str(step.get("key") or "").strip()
+        if not key:
+            raise PluginWebError("a workflow step is missing 'key'", 500)
+        keys = step.get("actions") or []
+        if not isinstance(keys, (list, tuple)) or not keys:
+            raise PluginWebError(f"workflow step '{key}': needs an 'actions' list", 500)
+        for a in keys:
+            if str(a) not in action_keys:
+                raise PluginWebError(
+                    f"workflow step '{key}': names action '{a}', which does not exist", 500
+                )
+        out.append({
+            "key": key,
+            "label": str(step.get("label") or key),
+            "description": step.get("description") or None,
+            "actions": [str(a) for a in keys],
+        })
+
+    step_keys = [s["key"] for s in out]
+    if len(step_keys) != len(set(step_keys)):
+        raise PluginWebError("duplicate workflow step keys", 500)
+
+    return {"steps": out, "stateful": callable(raw.get("state"))}
 
 
 def describe(plugin: dict) -> Optional[dict]:
@@ -269,7 +482,9 @@ def describe(plugin: dict) -> Optional[dict]:
         return None
 
     try:
-        actions = [_describe_action(a) for a in raw_actions]
+        context = _describe_context(spec.get("context"))
+        names = tuple(c["name"] for c in context)
+        actions = [_describe_action(a, names) for a in raw_actions]
     except PluginWebError as exc:
         log.warning("plugin %s: unusable web spec — %s", plugin.get("package"), exc)
         return None
@@ -281,11 +496,22 @@ def describe(plugin: dict) -> Optional[dict]:
     if not actions:
         return None
 
+    # A broken workflow costs the step strip, not the plugin: the actions are
+    # all still individually runnable, and a flat tab strip is what the page
+    # falls back to anyway.
+    try:
+        workflow = _describe_workflow(spec.get("workflow"), tuple(keys))
+    except PluginWebError as exc:
+        log.warning("plugin %s: ignoring unusable workflow — %s", plugin.get("package"), exc)
+        workflow = None
+
     return {
         "name": plugin.get("name"),
         "package": plugin.get("package"),
         "version": plugin.get("version"),
         "description": spec.get("description") or None,
+        "context": context,
+        "workflow": workflow,
         "actions": actions,
     }
 
@@ -299,6 +525,74 @@ def find_action(plugin: dict, key: str) -> Optional[dict]:
         if isinstance(raw, dict) and str(raw.get("key") or "") == key:
             return raw
     return None
+
+
+def find_workflow_state(plugin: dict) -> Optional[Any]:
+    """The plugin's per-step state callable, if it declared one."""
+    spec = (plugin or {}).get("web")
+    if not isinstance(spec, dict):
+        return None
+    workflow = spec.get("workflow")
+    if not isinstance(workflow, dict):
+        return None
+    state = workflow.get("state")
+    return state if callable(state) else None
+
+
+def bind_context(described: dict, action: dict) -> dict:
+    """One action with the context values it named folded in as parameters.
+
+    Everything downstream — coercion, the tenant check, re-resolving a dynamic
+    option list — reads an action's `params`, and a context value has to be
+    subject to all three. Folding it in here means none of that code learns
+    there is such a thing as context, and no path can validate an inline
+    parameter one way and a page-level one another.
+    """
+    wanted = action.get("context") or []
+    if not wanted:
+        return action
+    by_name = {c["name"]: c for c in described.get("context") or []}
+    extra = [by_name[n] for n in wanted if n in by_name]
+    return {**action, "params": extra + list(action.get("params") or [])}
+
+
+def bind_raw_context(plugin: dict, raw_action: dict, action: dict) -> dict:
+    """The same folding against the raw spec, so option loaders stay reachable.
+
+    `resolve_options` looks a parameter up by name in the raw action it was
+    handed; a context parameter lives in the raw spec's `context` list instead,
+    and would otherwise be unknown to it.
+    """
+    wanted = action.get("context") or []
+    if not wanted:
+        return raw_action
+    spec = (plugin or {}).get("web") or {}
+    raw_context = [
+        c for c in (spec.get("context") or [])
+        if isinstance(c, dict) and str(c.get("name") or "") in wanted
+    ]
+    return {**raw_action, "params": raw_context + list(raw_action.get("params") or [])}
+
+
+def context_action(described: dict) -> dict:
+    """A synthetic action holding just the page's context values.
+
+    Lets the state endpoint validate and authorise a set of context values with
+    the same code an action's parameters go through, without inventing a second
+    path that could drift from it.
+    """
+    return {
+        "key": "__context__",
+        "label": "context",
+        "params": list(described.get("context") or []),
+    }
+
+
+def raw_context_action(plugin: dict) -> dict:
+    """The raw counterpart of `context_action`, for resolving option loaders."""
+    spec = (plugin or {}).get("web") or {}
+    raw = [c for c in (spec.get("context") or []) if isinstance(c, dict)]
+    return {"key": "__context__", "params": raw}
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +633,20 @@ def _coerce_one(spec: dict, value: Any) -> Any:
             raise PluginWebError(f"'{spec['label']}' is not one of the offered options")
         return text
 
+    if ptype == "selection":
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set)):
+            raise PluginWebError(f"'{spec['label']}' must be a list of values")
+        # Order is the user's, duplicates are not meaningful, and the values a
+        # grid offered are checked by the router once its dependencies have been
+        # authorised — same as any other dynamic parameter.
+        seen, out = set(), []
+        for v in value:
+            text = str(v)
+            if text not in seen:
+                seen.add(text)
+                out.append(text)
+        return out
+
     return str(value)
 
 
@@ -360,7 +668,13 @@ def coerce_params(
     for spec in action.get("params", []):
         name = spec["name"]
         raw = supplied.get(name)
-        missing = raw is None or (isinstance(raw, str) and not raw.strip())
+        missing = (
+            raw is None
+            or (isinstance(raw, str) and not raw.strip())
+            # Nothing ticked is a grid with no answer in it, not a grid the
+            # caller left alone — a required selection has to say so.
+            or (spec["type"] == "selection" and isinstance(raw, (list, tuple)) and not raw)
+        )
 
         if missing:
             if "default" in spec:
@@ -370,7 +684,12 @@ def coerce_params(
                 raise PluginWebError(f"'{spec['label']}' is required")
             # An unsupplied optional boolean is false, not absent — an
             # unchecked box sends nothing at all.
-            out[name] = False if spec["type"] == "boolean" else None
+            if spec["type"] == "boolean":
+                out[name] = False
+            elif spec["type"] == "selection":
+                out[name] = []
+            else:
+                out[name] = None
             continue
 
         out[name] = _coerce_one(spec, raw)
@@ -390,6 +709,21 @@ def file_params(action: dict) -> List[str]:
 def dynamic_params(action: dict) -> List[str]:
     """Names of the action's dynamically-populated selects, for the router to check."""
     return [p["name"] for p in action.get("params", []) if p.get("dynamic")]
+
+
+def submitted_values(action: dict, param_name: str, value: Any) -> List[str]:
+    """The values of one parameter to check against what the plugin offered.
+
+    A select contributes the one thing it holds; a selection grid contributes
+    every row that was ticked. Returning a list either way keeps the router's
+    check one loop rather than a type switch.
+    """
+    if value is None:
+        return []
+    for p in action.get("params", []):
+        if p["name"] == param_name and p["type"] == "selection":
+            return [str(v) for v in value]
+    return [str(value)]
 
 
 def depends_on(action: dict, param_name: str) -> List[str]:
@@ -492,21 +826,114 @@ def take_artifact(value: Any, spool: str) -> Tuple[Any, Optional[dict]]:
     }
 
 
+def _tone(value: Any) -> str:
+    tone = str(value or "neutral")
+    return tone if tone in TONES else "neutral"
+
+
+def _cells(row: Any) -> List[str]:
+    if isinstance(row, (list, tuple)):
+        return [("" if c is None else str(c)) for c in row]
+    return ["" if row is None else str(row)]
+
+
+def _describe_section(raw: Any) -> Optional[dict]:
+    """One block of a rich result, or None if it is not one this page can draw.
+
+    Skipped rather than raised on: the action has already run and its work is
+    done, and losing the whole result over a mislabelled section would throw
+    away the part that was fine.
+    """
+    if not isinstance(raw, dict):
+        return None
+    kind = str(raw.get("kind") or "").strip()
+    title = str(raw["title"]) if raw.get("title") else None
+    subtitle = str(raw["subtitle"]) if raw.get("subtitle") else None
+    base = {"kind": kind, "title": title, "subtitle": subtitle}
+
+    if kind == "stats":
+        items = [
+            {
+                "label": str(i.get("label") or ""),
+                "value": i.get("value") if _jsonable(i.get("value")) else str(i.get("value")),
+                "tone": _tone(i.get("tone")),
+                "detail": str(i["detail"]) if i.get("detail") else None,
+            }
+            for i in (raw.get("items") or []) if isinstance(i, dict)
+        ]
+        return {**base, "items": items} if items else None
+
+    if kind == "table":
+        columns = [str(c) for c in (raw.get("columns") or [])]
+        if not columns:
+            return None
+        return {
+            **base,
+            "columns": columns,
+            "rows": [_cells(r) for r in (raw.get("rows") or [])],
+            "tone_column": raw.get("tone_column") if isinstance(raw.get("tone_column"), int) else None,
+        }
+
+    if kind == "groups":
+        groups = []
+        for g in raw.get("groups") or []:
+            if not isinstance(g, dict):
+                continue
+            groups.append({
+                "key": str(g.get("key") or g.get("title") or len(groups)),
+                "title": str(g.get("title") or ""),
+                "subtitle": str(g["subtitle"]) if g.get("subtitle") else None,
+                "badge": str(g["badge"]) if g.get("badge") else None,
+                "tone": _tone(g.get("tone")),
+                "columns": [str(c) for c in (g.get("columns") or [])],
+                "rows": [_cells(r) for r in (g.get("rows") or [])],
+            })
+        return {**base, "groups": groups} if groups else None
+
+    if kind == "notes":
+        notes = []
+        for n in raw.get("notes") or []:
+            if not isinstance(n, dict) or not n.get("text"):
+                continue
+            # A note may point at the action that resolves it. It carries no
+            # authority — the page prefills that form, and running it is
+            # checked exactly as it would be if the user had navigated there.
+            action = n.get("action")
+            notes.append({
+                "tone": _tone(n.get("tone")),
+                "text": str(n["text"]),
+                "action": {
+                    "key": str(action.get("key") or ""),
+                    "label": str(action.get("label") or "Resolve"),
+                } if isinstance(action, dict) and action.get("key") else None,
+            })
+        return {**base, "notes": notes} if notes else None
+
+    return None
+
+
+#: Result keys with a rendering of their own, kept out of the key/value detail.
+_RESERVED_RESULT_KEYS = ("message", "table", "sections", ARTIFACT_KEY)
+
+
 def normalise_result(value: Any) -> dict:
     """Shape whatever an action returned into what the page renders.
 
     `message` is a headline, `table` is `{columns, rows}` rendered as a grid,
-    and everything else lands in `details` as key/value pairs. An action that
-    returns nothing at all still succeeded — it just has nothing to show.
+    `sections` is an ordered list of richer blocks — stat tiles, grouped rows,
+    callouts — and everything else lands in `details` as key/value pairs. An
+    action that returns nothing at all still succeeded, it just has nothing to
+    show.
 
     `download` is always present and always None here: only the router knows
     whether an artifact survived to be served, so it fills this in. Declaring
     it means the result shape is one thing, described in one place.
     """
+    empty = {"message": "Done.", "table": None, "sections": [], "details": {}, "download": None}
     if value is None:
-        return {"message": "Done.", "table": None, "details": {}, "download": None}
+        return empty
     if not isinstance(value, dict):
-        return {"message": str(value), "table": None, "details": {}, "download": None}
+        return {**empty, "message": str(value)}
 
     table = value.get("table")
     if isinstance(table, dict):
@@ -516,16 +943,47 @@ def normalise_result(value: Any) -> dict:
     else:
         table = None
 
+    raw_sections = value.get("sections")
+    sections = []
+    if isinstance(raw_sections, (list, tuple)):
+        sections = [s for s in (_describe_section(s) for s in raw_sections) if s]
+
     details = {
         k: v for k, v in value.items()
-        if k not in ("message", "table", ARTIFACT_KEY) and _jsonable(v)
+        if k not in _RESERVED_RESULT_KEYS and _jsonable(v)
     }
     return {
         "message": str(value.get("message") or "Done."),
         "table": table,
+        "sections": sections,
         "details": details,
         "download": None,
     }
+
+
+#: How a workflow step reports itself. Anything else is read as `pending`.
+STEP_STATUSES = ("pending", "current", "complete", "blocked")
+
+
+def normalise_state(value: Any, workflow: Optional[dict]) -> dict:
+    """One entry per declared step, whatever the plugin actually returned.
+
+    Filled in for steps the plugin said nothing about, so the page never has to
+    reason about a missing key, and keyed only by steps that exist — a state for
+    a step that was never declared has nothing to attach itself to.
+    """
+    steps = (workflow or {}).get("steps") or []
+    reported = value if isinstance(value, dict) else {}
+    out = {}
+    for step in steps:
+        raw = reported.get(step["key"])
+        raw = raw if isinstance(raw, dict) else {}
+        status = str(raw.get("status") or "pending")
+        out[step["key"]] = {
+            "status": status if status in STEP_STATUSES else "pending",
+            "detail": str(raw["detail"]) if raw.get("detail") else None,
+        }
+    return out
 
 
 def _jsonable(value: Any) -> bool:
