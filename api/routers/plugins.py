@@ -34,7 +34,16 @@ grant list lives in `services/plugin_entitlement_service.py`.
 their parameters; it ships no markup and no JavaScript, and its `run` callables
 never leave the server.  `lib/plugin_web.py` holds that contract.  Every tenant
 parameter is checked against the caller's own entitlements before an action
-starts, so a plugin cannot widen the reach of the account running it.
+starts, so a plugin cannot widen the reach of the account running it.  A select
+whose options the plugin computes is re-resolved when the action runs and the
+submitted value checked against the result, because the dropdown that offered
+it is on the far side of the request and proves nothing.
+
+*An action may produce a file.*  Anything an action returns under `file` is
+moved into a per-run spool directory and served from `/downloads/{job_id}` to
+the account that started the job, until it ages out on the same clock the job
+store uses.  The path never reaches the browser and the job id alone is not
+authority to read it.
 
 *A GitHub auth failure is never a 401.*  The web client logs the user out when
 an authenticated call comes back 401 (`web/src/api/client.ts`), and "your
@@ -52,10 +61,13 @@ effect.
 """
 
 import os
+import shutil
 import threading
-from typing import List, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api.dependencies import require_auth, check_tenant_access, AuthUser
@@ -74,6 +86,15 @@ MANAGER_ENV = "ZS_EXT_MODULES"
 _PIP_JOB_KEY = "plugin:pip"
 
 _NOT_AUTHENTICATED = "Not authenticated to GitHub — log in first."
+
+# Files produced by plugin actions, keyed by the job that made them, kept until
+# the job itself would have aged out of the store. Held here rather than in the
+# job result because the entry carries a server path and the owning account:
+# neither belongs in something the browser reads, and the job store has no
+# notion of who a job was for.
+_ARTIFACT_TTL_SECONDS = 3600            # api.jobs._FINISHED_TTL_SECONDS
+_artifacts: Dict[str, dict] = {}
+_artifacts_lock = threading.Lock()
 
 
 def manager_enabled() -> bool:
@@ -140,6 +161,25 @@ def _require_installed(package: str) -> dict:
         if plugin.get("package") == package:
             return plugin
     raise HTTPException(status_code=404, detail=f"Plugin '{package}' is not installed")
+
+
+def _prune_artifacts_locked() -> None:
+    """Drop spooled files past their TTL. Caller must hold the lock.
+
+    Downloads are not deleted on read: a browser that retries, or a user who
+    clicks twice, should get the file both times. Age is the only thing that
+    removes one, which is also what bounds the disk this can hold.
+    """
+    cutoff = time.time() - _ARTIFACT_TTL_SECONDS
+    for job_id in [j for j, a in _artifacts.items() if a["created_at"] < cutoff]:
+        shutil.rmtree(_artifacts.pop(job_id)["spool"], ignore_errors=True)
+
+
+def _register_artifact(job_id: str, spool: str, artifact: dict, user_id: int) -> None:
+    with _artifacts_lock:
+        _prune_artifacts_locked()
+        _artifacts[job_id] = {**artifact, "spool": spool, "user_id": user_id,
+                              "created_at": time.time()}
 
 
 def _github_error(message: str) -> HTTPException:
@@ -652,6 +692,78 @@ def plugin_ui(package: str, user: AuthUser = Depends(require_plugin_user)):
     return spec
 
 
+def _resolve_action(package: str, action_key: str, user: AuthUser) -> tuple[dict, dict, dict]:
+    """`(plugin, described action, raw action)` for a package the caller may use."""
+    plugin = _entitled_plugin(package, user)
+    described = plugin_web.describe(plugin)
+    action = next(
+        (a for a in (described or {}).get("actions", []) if a["key"] == action_key), None
+    )
+    if not action:
+        raise HTTPException(status_code=404, detail=f"Unknown action '{action_key}'")
+
+    raw_action = plugin_web.find_action(plugin, action_key)
+    if not raw_action or not callable(raw_action.get("run")):
+        raise HTTPException(status_code=500, detail=f"Action '{action_key}' has no runnable")
+    return plugin, action, raw_action
+
+
+def _authorised_options(
+    action: dict, raw_action: dict, param: str, supplied: Dict[str, Any], user: AuthUser
+) -> List[dict]:
+    """The current options for one dynamic select, with its tenant checked first.
+
+    The only value a plugin gets to see here is one the caller was already
+    entitled to, so a loader that scopes its query by tenant — which is the
+    whole reason a snapshot list is per-tenant — cannot be pointed at a tenant
+    the account could not have opened itself.
+    """
+    if param not in plugin_web.dynamic_params(action):
+        raise HTTPException(status_code=404, detail=f"'{param}' has no options to load")
+
+    try:
+        params = plugin_web.coerce_params(action, supplied, partial=True)
+    except plugin_web.PluginWebError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    for name in plugin_web.tenant_params(action):
+        if params.get(name) is not None:
+            check_tenant_access(int(params[name]), user)
+
+    try:
+        return plugin_web.resolve_options(raw_action, param, params)
+    except plugin_web.PluginWebError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except Exception as exc:
+        # A plugin that throws while listing its own options is a broken
+        # plugin, not a broken request — 502 keeps that distinction, and the
+        # message lands next to the empty dropdown it explains.
+        raise HTTPException(status_code=502, detail=f"Could not load options: {exc}")
+
+
+class OptionsRequest(BaseModel):
+    params: Dict[str, Any] = {}
+
+
+@router.post("/{package}/actions/{action_key}/options/{param}")
+def plugin_action_options(
+    package: str,
+    action_key: str,
+    param: str,
+    body: OptionsRequest,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """The options for one dynamic select, given the form as it stands.
+
+    POST rather than GET because the answer depends on a body of arbitrary
+    parameter values, and because a tenant id has no business in a URL that
+    ends up in an access log.
+    """
+    _, action, raw_action = _resolve_action(package, action_key, user)
+    options = _authorised_options(action, raw_action, param, body.params, user)
+    return {"options": options}
+
+
 async def _collect_params(request, action: dict) -> tuple[dict, Optional[str]]:
     """Pull the caller's values off the request, saving uploads to disk.
 
@@ -719,33 +831,42 @@ async def run_plugin_action(
     before the action starts. A plugin cannot widen the reach of the account
     running it, whatever tenant id it was handed.
     """
-    import shutil
-
-    plugin = _entitled_plugin(package, user)
-    described = plugin_web.describe(plugin)
-    action = next(
-        (a for a in (described or {}).get("actions", []) if a["key"] == action_key), None
-    )
-    if not action:
-        raise HTTPException(status_code=404, detail=f"Unknown action '{action_key}'")
-
-    raw_action = plugin_web.find_action(plugin, action_key)
-    if not raw_action or not callable(raw_action.get("run")):
-        raise HTTPException(status_code=500, detail=f"Action '{action_key}' has no runnable")
+    _, action, raw_action = _resolve_action(package, action_key, user)
 
     supplied, tmpdir = await _collect_params(request, action)
     try:
-        params = plugin_web.coerce_params(action, supplied)
-    except plugin_web.PluginWebError as exc:
+        try:
+            params = plugin_web.coerce_params(action, supplied)
+        except plugin_web.PluginWebError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc))
+
+        # No admin exemption, unlike the tenant routers: an admin session cannot
+        # reach this endpoint at all, so every caller here is entitlement-checked.
+        for name in plugin_web.tenant_params(action):
+            if params.get(name) is not None:
+                check_tenant_access(int(params[name]), user)
+
+        # A dynamic select was validated against nothing when it was coerced —
+        # its options did not exist yet. Ask for them now that the tenant among
+        # the params has been checked, and refuse anything the plugin would not
+        # have offered. Without this, the dropdown is the only thing stopping a
+        # caller naming a row belonging to someone else's tenant.
+        for name in plugin_web.dynamic_params(action):
+            if params.get(name) is None:
+                continue
+            allowed = {
+                o["value"]
+                for o in _authorised_options(action, raw_action, name, supplied, user)
+            }
+            if str(params[name]) not in allowed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{name}' is not one of the offered options",
+                )
+    except Exception:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
-        raise HTTPException(status_code=exc.status, detail=str(exc))
-
-    # No admin exemption, unlike the tenant routers: an admin session cannot
-    # reach this endpoint at all, so every caller here is entitlement-checked.
-    for name in plugin_web.tenant_params(action):
-        if params.get(name) is not None:
-            check_tenant_access(int(params[name]), user)
+        raise
 
     job_id = store.create(key=f"plugin:{package}:{action_key}")
     run_callable = raw_action["run"]
@@ -774,12 +895,63 @@ async def run_plugin_action(
             if tmpdir:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
-        store.complete(job_id, plugin_web.normalise_result(result))
+        import tempfile
+
+        # Its own directory per run, so pruning one artifact cannot touch another
+        # and a plugin that names its file anything at all cannot collide.
+        spool = tempfile.mkdtemp(prefix="zs-plugin-dl-")
+        try:
+            rest, artifact = plugin_web.take_artifact(result, spool)
+        except plugin_web.PluginWebError as exc:
+            shutil.rmtree(spool, ignore_errors=True)
+            store.fail(job_id, str(exc))
+            _audit("plugin_action", "EXECUTE", "FAILED", package,
+                   plugin_action=action_key, by=user.username, error=str(exc))
+            return
+
+        payload = plugin_web.normalise_result(rest)
+        if artifact:
+            _register_artifact(job_id, spool, artifact, user.user_id)
+            payload["download"] = {
+                "filename": artifact["filename"],
+                "content_type": artifact["content_type"],
+                "size": artifact["size"],
+            }
+        else:
+            shutil.rmtree(spool, ignore_errors=True)
+
+        store.complete(job_id, payload)
         _audit("plugin_action", "EXECUTE", "SUCCESS", package,
                plugin_action=action_key, by=user.username)
 
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id, "already_running": False}
+
+
+@router.get("/downloads/{job_id}")
+def download_artifact(job_id: str, user: AuthUser = Depends(require_plugin_user)):
+    """The file one of this account's plugin runs produced.
+
+    Owned by the account that started the job, not by whoever holds the id: a
+    job id is short and appears in the SSE stream, and an export is a whole
+    tenant's configuration. Someone else's artifact answers exactly as an
+    expired one does.
+
+    Declared after the `/{package}/…` routes but never shadowed by them — the
+    two-segment ones all end in a literal, and a job id is twelve hex digits.
+    """
+    with _artifacts_lock:
+        _prune_artifacts_locked()
+        entry = _artifacts.get(job_id)
+        if not entry or entry["user_id"] != user.user_id:
+            raise HTTPException(status_code=404, detail="No download for that job")
+        path, filename, content_type = (
+            entry["path"], entry["filename"], entry["content_type"]
+        )
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="No download for that job")
+    return FileResponse(path, media_type=content_type, filename=filename)
 
 
 @router.get("/entitlements")

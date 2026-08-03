@@ -14,6 +14,8 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchPluginUi,
   runPluginAction,
+  fetchPluginActionOptions,
+  downloadPluginArtifact,
   PluginAction,
   PluginParam,
   PluginActionResult,
@@ -41,9 +43,13 @@ function initialValues(action: PluginAction): Values {
   return out;
 }
 
-function ParamField({ param, value, onChange, onFile }: {
+function ParamField({ param, value, siblings, pkg, actionKey, onChange, onFile }: {
   param: PluginParam;
   value: unknown;
+  /** The rest of the form — what a dynamic select's options are computed from. */
+  siblings: Values;
+  pkg: string;
+  actionKey: string;
   onChange: (v: unknown) => void;
   onFile: (f: File | null) => void;
 }) {
@@ -55,6 +61,42 @@ function ParamField({ param, value, onChange, onFile }: {
     enabled: param.type === "tenant",
     staleTime: 60_000,
   });
+
+  // What a dynamic select reads, and whether it has been given enough to ask.
+  const deps = useMemo(() => {
+    const out: Values = {};
+    for (const name of param.depends_on ?? []) out[name] = siblings[name];
+    return out;
+  }, [param.depends_on, siblings]);
+  const ready = (param.depends_on ?? []).every(
+    (n) => deps[n] !== "" && deps[n] !== null && deps[n] !== undefined,
+  );
+
+  const {
+    data: loaded,
+    isFetching: loadingOptions,
+    error: optionsError,
+  } = useQuery({
+    queryKey: ["plugin-options", pkg, actionKey, param.name, deps],
+    queryFn: () => fetchPluginActionOptions(pkg, actionKey, param.name, deps),
+    enabled: !!param.dynamic && ready,
+    retry: false,
+  });
+
+  const options = param.dynamic ? loaded?.options ?? [] : param.options ?? [];
+
+  // A choice made before a dependency changed is not a choice in the new list.
+  // Left alone it would sit there looking selected and be refused on submit.
+  useEffect(() => {
+    if (!param.dynamic || !value) return;
+    if (!loaded) {
+      if (!ready) onChange("");
+      return;
+    }
+    if (!loaded.options.some((o) => o.value === String(value))) onChange("");
+    // onChange is a fresh closure each render; depending on it would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, ready, param.dynamic]);
 
   const label = (
     <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -94,16 +136,38 @@ function ParamField({ param, value, onChange, onFile }: {
         />
       )}
       {param.type === "select" && (
-        <select
-          value={String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
-          className={inputClass}
-        >
-          <option value="">Select…</option>
-          {(param.options ?? []).map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
+        <>
+          <select
+            value={String(value ?? "")}
+            onChange={(e) => onChange(e.target.value)}
+            disabled={!!param.dynamic && (!ready || loadingOptions)}
+            className={`${inputClass} disabled:bg-gray-50 disabled:text-gray-400`}
+          >
+            <option value="">
+              {!param.dynamic
+                ? "Select…"
+                : !ready
+                  ? `Choose ${(param.depends_on ?? []).join(" and ")} first…`
+                  : loadingOptions
+                    ? "Loading…"
+                    : "Select…"}
+            </option>
+            {options.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          {param.dynamic && optionsError && (
+            <p className="mt-1 text-xs text-red-600">
+              {optionsError instanceof Error
+                ? optionsError.message
+                : "Could not load the options"}
+            </p>
+          )}
+          {param.dynamic && ready && !loadingOptions && !optionsError &&
+            options.length === 0 && (
+              <p className="mt-1 text-xs text-gray-500">Nothing to choose from here yet.</p>
+            )}
+        </>
       )}
       {param.type === "tenant" && (
         <select
@@ -139,11 +203,43 @@ function ParamField({ param, value, onChange, onFile }: {
   );
 }
 
-function ResultView({ result }: { result: PluginActionResult }) {
+/** Bytes as something a person reads, for the size beside a download button. */
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let n = bytes / 1024;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+function ResultView({ result, jobId }: { result: PluginActionResult; jobId: string }) {
   const details = Object.entries(result.details ?? {});
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const download = result.download;
+
   return (
     <div className="mt-4 rounded-md border border-green-200 bg-green-50 p-4">
       <p className="text-sm font-medium text-green-900">{result.message}</p>
+
+      {download && (
+        <div className="mt-3">
+          <button
+            onClick={() =>
+              downloadPluginArtifact(jobId, download.filename)
+                .then(() => setDownloadError(null))
+                .catch((e) =>
+                  setDownloadError(e instanceof Error ? e.message : "Download failed"),
+                )
+            }
+            className="inline-flex items-center gap-2 rounded-md bg-zs-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-zs-600"
+          >
+            Download {download.filename}
+            <span className="text-xs text-white/70">{humanSize(download.size)}</span>
+          </button>
+          {downloadError && <p className="mt-1 text-xs text-red-600">{downloadError}</p>}
+        </div>
+      )}
 
       {details.length > 0 && (
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-3">
@@ -234,6 +330,9 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
               key={p.name}
               param={p}
               value={values[p.name]}
+              siblings={values}
+              pkg={pkg}
+              actionKey={action.key}
               onChange={(v) => setValues((prev) => ({ ...prev, [p.name]: v }))}
               onFile={(f) =>
                 setFiles((prev) => {
@@ -284,7 +383,9 @@ function ActionCard({ pkg, action }: { pkg: string; action: PluginAction }) {
       {jobStatus === "error" && streamError && (
         <div className="mt-4"><ErrorMessage message={streamError} /></div>
       )}
-      {jobStatus === "done" && result && <ResultView result={result} />}
+      {jobStatus === "done" && result && jobId && (
+        <ResultView result={result} jobId={jobId} />
+      )}
     </div>
   );
 }
