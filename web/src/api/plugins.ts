@@ -8,7 +8,7 @@
  * route hang off its answer.
  */
 
-import { apiFetch } from "./client";
+import { apiFetch, getAuthHeaders } from "./client";
 
 export interface InstalledPlugin {
   name: string | null;
@@ -201,6 +201,14 @@ export interface PluginParam {
   placeholder: string | null;
   options?: { value: string; label: string }[];
   default?: unknown;
+  /**
+   * A select whose options the plugin computes rather than declares. `options`
+   * arrives empty and the real list comes from fetchPluginActionOptions() once
+   * everything in `depends_on` has a value.
+   */
+  dynamic?: boolean;
+  /** Parameters this one reads. Changing any of them invalidates the list. */
+  depends_on?: string[];
 }
 
 export interface PluginAction {
@@ -226,6 +234,8 @@ export interface PluginActionResult {
   message: string;
   table: { columns: string[]; rows: unknown[][] } | null;
   details: Record<string, unknown>;
+  /** Set when the action produced a file; fetch it with downloadPluginArtifact(). */
+  download: { filename: string; content_type: string; size: number } | null;
 }
 
 /**
@@ -270,4 +280,51 @@ export function runPluginAction(
   for (const name of names) form.append(name, files[name]);
   // No Content-Type header: the browser has to set the multipart boundary.
   return apiFetch(path, { method: "POST", body: form });
+}
+
+/**
+ * The current options for one dynamically-populated select.
+ *
+ * POST because the answer depends on the rest of the form, which can hold a
+ * tenant id — not something to leave in a URL and an access log. The server
+ * checks that tenant before the plugin sees it, and checks the chosen value
+ * again when the action runs: this list is a convenience, not the gate.
+ */
+export const fetchPluginActionOptions = (
+  packageName: string,
+  actionKey: string,
+  param: string,
+  params: Record<string, unknown>,
+): Promise<{ options: { value: string; label: string }[] }> =>
+  apiFetch(
+    `/api/v1/plugins/${packageName}/actions/${encodeURIComponent(actionKey)}` +
+      `/options/${encodeURIComponent(param)}`,
+    { method: "POST", body: JSON.stringify({ params }) },
+  );
+
+/**
+ * Save the file a finished action produced.
+ *
+ * Not apiFetch: the body is bytes, not JSON. The server owns the copy until the
+ * job ages out, so this can be clicked more than once, and it answers only to
+ * the account whose run made the file.
+ */
+export async function downloadPluginArtifact(jobId: string, filename: string): Promise<void> {
+  const res = await fetch(`/api/v1/plugins/downloads/${encodeURIComponent(jobId)}`, {
+    headers: getAuthHeaders(),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(
+      res.status === 404
+        ? "That download is no longer available — run the action again."
+        : `Download failed (HTTP ${res.status})`,
+    );
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }

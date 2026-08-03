@@ -30,6 +30,31 @@ as a path to a temporary file that is deleted once the call returns. The return
 value is JSON — `message` and `table` are rendered specially (see
 `normalise_result`), anything else is shown as key/value detail.
 
+An action that produces a document rather than a screenful returns it under
+`file`, and the page shows a download button instead of trying to render it:
+
+    return {
+        "message": "Exported 1,284 resources",
+        "file": {"filename": "acme-ZIA.json", "path": "/tmp/…/export.json"},
+    }
+
+`path` is handed over, not borrowed — zs-config moves the file into a spool it
+owns and deletes it when the job ages out, so the plugin must not touch it
+again. Small payloads can skip the temp file and pass `content` (str or bytes)
+instead. See `take_artifact`.
+
+A `select` whose options are not known until the user has filled in the rest of
+the form gives `options` a callable and names what it reads:
+
+    {"name": "snapshot", "type": "select", "options": load_snapshots,
+     "depends_on": ["tenant", "product"]}
+
+The callable is `options(params: dict) -> list`, taking the declared
+dependencies as they stand and returning the same shape a static `options`
+would. The page refetches whenever a dependency changes, and the router
+re-resolves the list when the action runs and refuses a value that is not in
+it — which is what stops a caller naming a row from a tenant they cannot reach.
+
 Two rules the rest of the app depends on:
 
 *Nothing here is trusted for authorisation.* A `tenant` parameter resolves to a
@@ -43,7 +68,10 @@ item and nothing else.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import os
+import re
+import shutil
+from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +134,25 @@ class PluginContext:
 # ---------------------------------------------------------------------------
 
 
+def _normalise_options(options: Any) -> List[dict]:
+    """`[{"value", "label"}]` from either shape a plugin may offer.
+
+    Accepts both `["a", "b"]` and `[{"value": "a", "label": "A"}]` so a plugin
+    with nothing to say about labels does not have to repeat itself.
+    """
+    if not isinstance(options, (list, tuple)):
+        raise PluginWebError("options must be a list", 500)
+    out = []
+    for o in options:
+        if isinstance(o, dict):
+            if "value" not in o:
+                raise PluginWebError("an option is missing 'value'", 500)
+            out.append({"value": str(o["value"]), "label": str(o.get("label", o["value"]))})
+        else:
+            out.append({"value": str(o), "label": str(o)})
+    return out
+
+
 def _describe_param(raw: Any, action_key: str) -> dict:
     if not isinstance(raw, dict):
         raise PluginWebError(f"action '{action_key}': each param must be a dict", 500)
@@ -131,17 +178,28 @@ def _describe_param(raw: Any, action_key: str) -> dict:
 
     if ptype == "select":
         options = raw.get("options") or []
-        if not isinstance(options, (list, tuple)) or not options:
-            raise PluginWebError(
-                f"action '{action_key}', param '{name}': select needs a non-empty 'options'", 500
-            )
-        # Accept both ["a", "b"] and [{"value": "a", "label": "A"}] so a plugin
-        # with nothing to say about labels does not have to repeat itself.
-        out["options"] = [
-            {"value": str(o["value"]), "label": str(o.get("label", o["value"]))}
-            if isinstance(o, dict) else {"value": str(o), "label": str(o)}
-            for o in options
-        ]
+        depends = raw.get("depends_on") or []
+
+        if callable(options):
+            # The list does not exist yet — it is whatever the plugin computes
+            # from the values the user has filled in so far. Described as empty
+            # and fetched per request; see `resolve_options`.
+            if not isinstance(depends, (list, tuple)):
+                raise PluginWebError(
+                    f"action '{action_key}', param '{name}': 'depends_on' must be a list", 500
+                )
+            out["dynamic"] = True
+            out["depends_on"] = [str(d) for d in depends]
+            out["options"] = []
+        else:
+            if not isinstance(options, (list, tuple)) or not options:
+                raise PluginWebError(
+                    f"action '{action_key}', param '{name}': select needs a non-empty "
+                    "'options' list or a callable", 500
+                )
+            out["dynamic"] = False
+            out["depends_on"] = []
+            out["options"] = _normalise_options(options)
 
     # A file has nowhere sensible to put a default, and a password default
     # would be a credential sitting in a GET response.
@@ -169,6 +227,20 @@ def _describe_action(raw: Any) -> dict:
     names = [p["name"] for p in described]
     if len(names) != len(set(names)):
         raise PluginWebError(f"action '{key}': duplicate param names", 500)
+
+    # A dependency naming a parameter that does not exist would never fire, and
+    # the symptom is a dropdown that stays empty forever with nothing to read.
+    for p in described:
+        for dep in p.get("depends_on") or []:
+            if dep not in names:
+                raise PluginWebError(
+                    f"action '{key}', param '{p['name']}': depends_on names "
+                    f"'{dep}', which is not a parameter of this action", 500
+                )
+            if dep == p["name"]:
+                raise PluginWebError(
+                    f"action '{key}', param '{p['name']}': depends on itself", 500
+                )
 
     return {
         "key": key,
@@ -256,8 +328,13 @@ def _coerce_one(spec: dict, value: Any) -> Any:
             raise PluginWebError(f"'{spec['label']}' must be a tenant id")
 
     if ptype == "select":
-        allowed = {o["value"] for o in spec.get("options", [])}
         text = str(value)
+        # A dynamic select has no list to check against here — its options do
+        # not exist until the plugin is asked for them, which the router does
+        # separately once the tenant among the params has been authorised.
+        if spec.get("dynamic"):
+            return text
+        allowed = {o["value"] for o in spec.get("options", [])}
         if text not in allowed:
             raise PluginWebError(f"'{spec['label']}' is not one of the offered options")
         return text
@@ -265,12 +342,19 @@ def _coerce_one(spec: dict, value: Any) -> Any:
     return str(value)
 
 
-def coerce_params(action: dict, supplied: Dict[str, Any]) -> Dict[str, Any]:
+def coerce_params(
+    action: dict, supplied: Dict[str, Any], *, partial: bool = False
+) -> Dict[str, Any]:
     """Validate the caller's values against a described action's parameters.
 
     Only declared parameters survive — anything extra the caller sent is
     dropped rather than passed through, so a plugin's `run` only ever sees the
     keys it asked for.
+
+    `partial` lets a half-filled form through, for resolving a dynamic select
+    while the user is still working: the form is by definition incomplete at
+    that point, and refusing it would mean the dropdown could never populate.
+    Never use it for a run.
     """
     out: Dict[str, Any] = {}
     for spec in action.get("params", []):
@@ -282,7 +366,7 @@ def coerce_params(action: dict, supplied: Dict[str, Any]) -> Dict[str, Any]:
             if "default" in spec:
                 out[name] = spec["default"]
                 continue
-            if spec["required"]:
+            if spec["required"] and not partial:
                 raise PluginWebError(f"'{spec['label']}' is required")
             # An unsupplied optional boolean is false, not absent — an
             # unchecked box sends nothing at all.
@@ -303,9 +387,109 @@ def file_params(action: dict) -> List[str]:
     return [p["name"] for p in action.get("params", []) if p["type"] == "file"]
 
 
+def dynamic_params(action: dict) -> List[str]:
+    """Names of the action's dynamically-populated selects, for the router to check."""
+    return [p["name"] for p in action.get("params", []) if p.get("dynamic")]
+
+
+def depends_on(action: dict, param_name: str) -> List[str]:
+    """What one dynamic parameter reads. Empty for anything else."""
+    for p in action.get("params", []):
+        if p["name"] == param_name:
+            return list(p.get("depends_on") or [])
+    return []
+
+
+def resolve_options(raw_action: dict, param_name: str, params: Dict[str, Any]) -> List[dict]:
+    """Ask the plugin for one dynamic select's current options.
+
+    Called twice for every value that reaches a plugin: once to draw the
+    dropdown, and again when the action runs, to check the value came from it.
+    The second call is the one that matters — the first is a convenience, and
+    nothing stops a caller POSTing a value the dropdown never offered.
+
+    `params` should already be coerced and, for any tenant among them,
+    entitlement-checked: a plugin resolving options for a tenant id is trusted
+    to have been handed one the caller can reach.
+    """
+    for raw in raw_action.get("params") or []:
+        if not isinstance(raw, dict) or str(raw.get("name") or "") != param_name:
+            continue
+        loader = raw.get("options")
+        if not callable(loader):
+            raise PluginWebError(f"'{param_name}' does not load its options dynamically", 400)
+        return _normalise_options(loader(dict(params)))
+    raise PluginWebError(f"unknown parameter '{param_name}'", 400)
+
+
 # ---------------------------------------------------------------------------
 # Reading back what the action returned
 # ---------------------------------------------------------------------------
+
+
+#: Result key an action puts a downloadable document under. Consumed by
+#: `take_artifact` before the rest of the result is rendered, so it never
+#: reaches the browser as detail — the value holds a server path.
+ARTIFACT_KEY = "file"
+
+
+def safe_filename(raw: Any, fallback: str = "download") -> str:
+    """A filename that is safe to write and safe to name in a header.
+
+    Basename only, and nothing outside a conservative alphabet: the plugin
+    chose this string, and on plenty of paths the user chose it for the plugin.
+    A name that reduces to nothing falls back rather than producing an empty
+    `filename=""` for the browser to guess at.
+    """
+    name = os.path.basename(str(raw or "")).strip()
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip(".")
+    return name[:120] or fallback
+
+
+def take_artifact(value: Any, spool: str) -> Tuple[Any, Optional[dict]]:
+    """Split a downloadable file off an action's result, if it returned one.
+
+    Returns `(rest, artifact)` where `artifact` is
+    `{"path", "filename", "content_type", "size"}` and `rest` is the result
+    with the `file` key removed — the path is a server filesystem location and
+    has no business being rendered as a detail row.
+
+    A `path` is *moved* into `spool`, which the caller owns and eventually
+    deletes: the plugin cannot know when the download happens, so it cannot be
+    responsible for cleaning up after it. `content` is written out instead,
+    which also gets a large payload out of the job result and off the heap.
+    """
+    if not isinstance(value, dict) or ARTIFACT_KEY not in value:
+        return value, None
+
+    spec = value[ARTIFACT_KEY]
+    rest = {k: v for k, v in value.items() if k != ARTIFACT_KEY}
+    if spec is None:
+        return rest, None
+    if not isinstance(spec, dict):
+        raise PluginWebError(f"'{ARTIFACT_KEY}' must be a dict", 500)
+
+    dest = os.path.join(spool, "artifact")
+    source, content = spec.get("path"), spec.get("content")
+
+    if source:
+        try:
+            shutil.move(str(source), dest)
+        except OSError as exc:
+            raise PluginWebError(f"could not read the file the action produced: {exc}", 500)
+    elif content is not None:
+        data = content.encode("utf-8") if isinstance(content, str) else bytes(content)
+        with open(dest, "wb") as fh:
+            fh.write(data)
+    else:
+        raise PluginWebError(f"'{ARTIFACT_KEY}' needs either 'path' or 'content'", 500)
+
+    return rest, {
+        "path": dest,
+        "filename": safe_filename(spec.get("filename")),
+        "content_type": str(spec.get("content_type") or "application/octet-stream"),
+        "size": os.path.getsize(dest),
+    }
 
 
 def normalise_result(value: Any) -> dict:
@@ -314,11 +498,15 @@ def normalise_result(value: Any) -> dict:
     `message` is a headline, `table` is `{columns, rows}` rendered as a grid,
     and everything else lands in `details` as key/value pairs. An action that
     returns nothing at all still succeeded — it just has nothing to show.
+
+    `download` is always present and always None here: only the router knows
+    whether an artifact survived to be served, so it fills this in. Declaring
+    it means the result shape is one thing, described in one place.
     """
     if value is None:
-        return {"message": "Done.", "table": None, "details": {}}
+        return {"message": "Done.", "table": None, "details": {}, "download": None}
     if not isinstance(value, dict):
-        return {"message": str(value), "table": None, "details": {}}
+        return {"message": str(value), "table": None, "details": {}, "download": None}
 
     table = value.get("table")
     if isinstance(table, dict):
@@ -330,12 +518,13 @@ def normalise_result(value: Any) -> dict:
 
     details = {
         k: v for k, v in value.items()
-        if k not in ("message", "table") and _jsonable(v)
+        if k not in ("message", "table", ARTIFACT_KEY) and _jsonable(v)
     }
     return {
         "message": str(value.get("message") or "Done."),
         "table": table,
         "details": details,
+        "download": None,
     }
 
 
