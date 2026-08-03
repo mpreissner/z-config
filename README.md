@@ -7,16 +7,17 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.4.0
+## What's New — v3.4.1
 
-> **v3.4.0 is the current release.** See the [changelog](CHANGELOG.md) for full details.
+> **v3.4.1 is the current release.** See the [changelog](CHANGELOG.md) for full details.
 
-- **Single sign-on (SAML 2.0 / OIDC)** — sign in through your IdP with auto-provisioning, a configurable default role, and group-claim mapping. OIDC uses the authorization-code flow with PKCE and JWKS validation, with a Discovery URL lookup that fills in the endpoints for you; SAML ships an SP metadata endpoint plus ACS and SLO routes.
-- **Inbound SCIM 2.0 provisioning** — a SCIM server at `/scim/v2` for Users and Groups, so your IdP can create, update, and deprovision accounts directly. Bearer tokens are generated and revoked from Admin Settings and stored hashed; group-to-role mapping applies to members immediately.
-- **Let's Encrypt certificates** — issue and auto-renew a publicly trusted certificate via ACME dns-01 with Cloudflare, without exposing the instance to the internet. Useful behind ZPA Browser Access, where the client validates the certificate and cannot reach an internal CRL.
-- **Native GovCloud support** — GovCloud tenants now take the same code path as commercial ones via `zscaler-sdk-python` 1.9.39. Pick a FedRAMP tier (High or Moderate) instead of typing OneAPI URLs; ZPA works on GovCloud, and the old `ZS_ENABLE_GOVCLOUD` flag is gone.
-- **Reverse proxy and ZPA Browser Access** — HSTS, health probes, passkey origins, and the HTTP→HTTPS redirect no longer assume port 8443, so the app works correctly when published on 443 through a proxy. Set `ZS_PUBLIC_ORIGIN` to pin the external origin. Responses are now gzipped, cutting the frontend bundle from ~700 KB to ~160 KB over the wire.
-- **Import job resume** — closing the import modal no longer loses the run. Reopening reattaches to the in-flight job and replays buffered progress, and duplicate import requests return the running job instead of starting a second one.
+- **Groups as a first-class concept** — create groups locally and pick their members by hand, alongside the ones your IdP pushes over SCIM, which it keeps owning. Groups grant tenants as well as roles, and a hand-added member survives a SCIM sync.
+- **Effective roles with role switching** — a group's mapped role no longer overwrites your own; it adds to the set of roles you may assume. Sessions start at least privilege, and accounts holding more than one role get a picker in the sidebar. This fixes a locally created admin being silently demoted on joining a user-mapped group.
+- **ZIA snapshot restore in the web UI** — previously TUI-only. Preview what a restore would change, then run it with streaming progress: push creates and updates, delete resources absent from the snapshot, activate, and verify.
+- **Staged configuration changes** — proposed config can now be held in the local database and reviewed before anything reaches a tenant, with the push engines fed from the reviewed set rather than directly.
+- **ZPA push as a service** — the ZPA write engine moved out of the restore handler, which gains it a merge mode that matches by name and a preview that classifies without writing.
+
+Also in this release: internal plumbing for the extension mechanism, and the last-admin guard finally counts admins who hold the role through a group.
 
 > [!NOTE]
 > **Heads-up:** the TUI will be formally deprecated in **v4.0.0**. It keeps working throughout 3.x, but new features are web-only from here — see [TUI Features](#tui-features).
@@ -127,7 +128,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save, restore with preview, delete), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals
@@ -142,7 +143,7 @@ All Devices (list/search/OTP), Trusted Networks, Forwarding Profiles, App Profil
 Users, Groups (with members), API Clients (details and secrets)
 
 **Admin (admin-only)**
-User Management, Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database
+User Management, **Groups** (local or SCIM-provisioned; membership, role mapping, tenant grants), Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database
 
 ---
 
@@ -152,6 +153,7 @@ User Management, Tenant Entitlements (multi-select grant), **Single Sign-On** (S
 - All tokens invalidated immediately on container restart
 - Idle timeout: configurable inactivity threshold (default 15 min) triggers a 2-minute warning, then automatic logout
 - Hardware security key support (WebAuthn/passkey) — register a YubiKey or platform authenticator from your profile page
+- Roles are effective, not fixed — an account may hold several (its own plus any its groups map), but only one is live at a time. Sessions start at least privilege and switch explicitly, and a role revoked mid-session is not honoured from a stale token
 - Single sign-on via SAML 2.0 or OIDC — the JWT is handed off through a one-time code, so it never appears in the URL bar, browser history, or `Referer` headers
 - IdP secrets (OIDC client secret, SAML SP private key, Cloudflare API token, SCIM bearer tokens) are write-only: encrypted at rest and never returned by the API. SCIM tokens are stored sha256-hashed and compared in constant time; the plaintext is shown once at creation
 
@@ -190,7 +192,7 @@ zs-config/
 | Layer | Key files |
 |---|---|
 | API clients | `lib/zpa_client.py`, `zia_client.py`, `zcc_client.py`, `zdx_client.py`, `zidentity_client.py` |
-| DB models | `db/models.py` — TenantConfig, ZPA/ZIA/ZCCResource, RestorePoint, AuditLog, SyncLog, WebUser, Setting, ScimToken |
+| DB models | `db/models.py` — TenantConfig, ZPA/ZIA/ZCCResource, RestorePoint, AuditLog, SyncLog, WebUser, UserGroup, Setting, ScimToken |
 | Services | `services/zia_push_service.py`, `zpa_policy_service.py`, `zia_import_service.py`, `sso_service.py`, `ssl_service.py`, `acme_service.py`, etc. |
 | API routers | `api/routers/` — tenants, zia, zpa, zcc, zdx, zid, auth, sso, scim, ssl, admin, system |
 | Frontend | `web/src/pages/` — TenantWorkspacePage, AdminSettingsPage, ScheduledTasksPage, AuditPage |
