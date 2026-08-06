@@ -378,12 +378,12 @@ function ResultView({
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const download = result.download;
   const sections = result.sections ?? [];
-  // A question to answer is the way on; offering a way past it as well would be
-  // offering to skip it.
+  // Whether a form on the card has to be dealt with first is the plugin's to
+  // know: a gate it stopped at is not the same thing as a form left standing
+  // for corrections nobody may want to make. So a result that declares both a
+  // prompt and a way on gets both, and one that stopped declares no way on.
   const next =
-    !result.prompt && result.next && (canAction?.(result.next.action) ?? true)
-      ? result.next
-      : null;
+    result.next && (canAction?.(result.next.action) ?? true) ? result.next : null;
 
   return (
     <div className="mt-4 rounded-md border border-green-200 bg-green-50 p-4">
@@ -455,6 +455,18 @@ function ResultView({
         </div>
       )}
 
+      {/* Above the form, not below it: when there is a way on at all the form
+          is optional, and a button under a long list of fields reads as the
+          thing that submits them. */}
+      {next && onNext && (
+        <button
+          onClick={() => onNext(next.action)}
+          className="mt-4 rounded-md bg-zs-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zs-600"
+        >
+          {next.label}
+        </button>
+      )}
+
       {result.prompt && (
         <PromptForm
           pkg={pkg}
@@ -464,15 +476,6 @@ function ResultView({
           disabled={running}
           onJob={onJob}
         />
-      )}
-
-      {next && onNext && (
-        <button
-          onClick={() => onNext(next.action)}
-          className="mt-4 rounded-md bg-zs-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zs-600"
-        >
-          {next.label}
-        </button>
       )}
     </div>
   );
@@ -487,8 +490,9 @@ function ActionCard({
   /** Page-level values this action named. Submitted alongside its own. */
   context: Values;
   contextParams: PluginParam[];
-  /** Fires when a run completes, so the step strip can catch up. */
-  onFinished?: () => void;
+  /** Fires when a run completes, so the step strip can catch up. The flag says
+   *  whether the result offers its own way on. */
+  onFinished?: (offersNext: boolean) => void;
   /** The context the run handed back, for the page to adopt. */
   onContext: (values: Record<string, string>) => void;
   onAction?: (key: string) => void;
@@ -556,14 +560,15 @@ function ActionCard({
       adopting.current = true;
       onContext(adopted);
     }
-    onFinished?.();
+    onFinished?.(!!result.next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobStatus, jobId, result]);
 
   // Sent here to be run, not just to be looked at. Held back for anything the
   // user still has to decide — a missing context value, a confirmation, a file
-  // to choose — because starting then would either fail or ask a question they
-  // did not open.
+  // to choose, a required field nothing has filled in — because starting then
+  // would either fail or answer a question they did not open. A grid of things
+  // to tick, run before anything is ticked, records that nothing was chosen.
   const started = useRef<string | null>(null);
   useEffect(() => {
     if (!autoStart || started.current === autoStart) return;
@@ -571,6 +576,13 @@ function ActionCard({
     onAutoStarted?.();
     if (missingContext.length > 0 || action.confirm) return;
     if (action.params.some((p) => p.type === "file")) return;
+    const unfilled = action.params.some((p) => {
+      if (p.required === false || p.type === "boolean") return false;
+      const v = values[p.name];
+      return v === undefined || v === null || v === "" ||
+        (Array.isArray(v) && v.length === 0);
+    });
+    if (unfilled) return;
     start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart]);
@@ -919,9 +931,13 @@ export default function PluginPage() {
           action={a}
           context={context}
           contextParams={contextParams}
-          onFinished={() => {
+          onFinished={(offersNext) => {
             if (workflow?.stateful && contextReady) {
-              advance.current = true;
+              // A result with its own button is read where it was produced.
+              // Moving the page off it the moment the step ticks over takes it
+              // away before anyone has looked at it, and makes the button a
+              // thing that appears on a screen nobody is on any more.
+              advance.current = !offersNext;
               refetchState();
             }
           }}
