@@ -359,7 +359,9 @@ function PromptForm({ pkg, prompt, jobId, context, disabled, onJob }: {
   );
 }
 
-function ResultView({ result, jobId, pkg, context, running, onAction, canAction, onJob }: {
+function ResultView({
+  result, jobId, pkg, context, running, onAction, canAction, onNext, onJob,
+}: {
   result: PluginActionResult;
   jobId: string;
   pkg: string;
@@ -368,12 +370,20 @@ function ResultView({ result, jobId, pkg, context, running, onAction, canAction,
   running: boolean;
   onAction?: (key: string) => void;
   canAction?: (key: string) => boolean;
+  /** Go to the named action and start it. See the result's `next`. */
+  onNext?: (key: string) => void;
   onJob: (jobId: string) => void;
 }) {
   const details = Object.entries(result.details ?? {});
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const download = result.download;
   const sections = result.sections ?? [];
+  // A question to answer is the way on; offering a way past it as well would be
+  // offering to skip it.
+  const next =
+    !result.prompt && result.next && (canAction?.(result.next.action) ?? true)
+      ? result.next
+      : null;
 
   return (
     <div className="mt-4 rounded-md border border-green-200 bg-green-50 p-4">
@@ -455,12 +465,22 @@ function ResultView({ result, jobId, pkg, context, running, onAction, canAction,
           onJob={onJob}
         />
       )}
+
+      {next && onNext && (
+        <button
+          onClick={() => onNext(next.action)}
+          className="mt-4 rounded-md bg-zs-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zs-600"
+        >
+          {next.label}
+        </button>
+      )}
     </div>
   );
 }
 
 function ActionCard({
   pkg, action, context, contextParams, onFinished, onContext, onAction, canAction,
+  onNext, autoStart, onAutoStarted,
 }: {
   pkg: string;
   action: PluginAction;
@@ -473,6 +493,10 @@ function ActionCard({
   onContext: (values: Record<string, string>) => void;
   onAction?: (key: string) => void;
   canAction?: (key: string) => boolean;
+  onNext?: (key: string) => void;
+  /** Set when another result sent the user here to run this. Fired once. */
+  autoStart?: string | null;
+  onAutoStarted?: () => void;
 }) {
   const queryClient = useQueryClient();
   const [values, setValues] = useState<Values>(() => initialValues(action.params));
@@ -535,6 +559,21 @@ function ActionCard({
     onFinished?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobStatus, jobId, result]);
+
+  // Sent here to be run, not just to be looked at. Held back for anything the
+  // user still has to decide — a missing context value, a confirmation, a file
+  // to choose — because starting then would either fail or ask a question they
+  // did not open.
+  const started = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoStart || started.current === autoStart) return;
+    started.current = autoStart;
+    onAutoStarted?.();
+    if (missingContext.length > 0 || action.confirm) return;
+    if (action.params.some((p) => p.type === "file")) return;
+    start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart]);
 
   async function start() {
     if (action.confirm && !window.confirm(action.confirm)) return;
@@ -642,6 +681,7 @@ function ActionCard({
           running={running}
           onAction={onAction}
           canAction={canAction}
+          onNext={onNext}
           // Answering replaces this result with the next one, in place: a
           // pipeline that stops three times is still one card on one screen.
           onJob={setJobId}
@@ -810,6 +850,16 @@ export default function PluginPage() {
     if (step) setStepKey(step.key);
   }
 
+  // Which card has been sent work, and once — the token is what the card
+  // recognizes as new, so being sent to the same place twice runs it twice and
+  // coming back to it later on your own does not.
+  const [pending, setPending] = useState<{ key: string; token: string } | null>(null);
+
+  function runAction(key: string) {
+    goToAction(key);
+    setPending({ key, token: String(Date.now()) });
+  }
+
   if (isLoading) return <LoadingSpinner />;
   if (error) {
     return (
@@ -878,6 +928,9 @@ export default function PluginPage() {
           onContext={adoptContext}
           onAction={goToAction}
           canAction={canReach}
+          onNext={runAction}
+          autoStart={pending?.key === a.key ? pending.token : null}
+          onAutoStarted={() => setPending(null)}
         />
       ))}
 
