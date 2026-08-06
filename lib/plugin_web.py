@@ -28,7 +28,7 @@ The run callable is `run(params: dict, ctx: PluginContext) -> dict`. `params`
 holds the validated values keyed by parameter name; a `file` parameter arrives
 as a path to a temporary file that is deleted once the call returns. The return
 value is JSON — `message` and `table` are rendered specially (see
-`normalise_result`), anything else is shown as key/value detail.
+`normalize_result`), anything else is shown as key/value detail.
 
 An action that produces a document rather than a screenful returns it under
 `file`, and the page shows a download button instead of trying to render it:
@@ -64,7 +64,7 @@ re-entered on each form. Actions name the ones they consume:
              "options": list_sessions},
         ],
         "actions": [
-            {"key": "analyse", "context": ["session"], "params": […], "run": …},
+            {"key": "analyze", "context": ["session"], "params": […], "run": …},
         ],
     }
 
@@ -73,6 +73,14 @@ moves around. Nothing else changes: a context parameter is folded back into the
 action's own parameters before validation, so it is coerced, entitlement-checked
 and re-resolved exactly as a parameter declared inline would be, and `run` sees
 one flat `params` dict.
+
+An action that creates the thing the page is about hands it back as context
+instead of leaving the user to find it in a dropdown:
+
+    return {"message": "Imported 412 rules", "context": {"session": "7"}}
+
+The page adopts those values as its own. Only declared context names are
+accepted; anything else is dropped with a warning.
 
 A plugin whose actions are steps of one job can say so, and the page draws them
 in order with the state the plugin reports:
@@ -83,8 +91,41 @@ in order with the state the plugin reports:
     }
 
 `state` is advisory — it decides what the step strip looks like, never what a
-caller is allowed to run. Every action is authorised on its own terms whichever
+caller is allowed to run. Every action is authorized on its own terms whichever
 step it is drawn under.
+
+A step is a screen, not a tab: every action a step lists is drawn on it, one
+under the other. An action left out of every step is still runnable — it just
+has no place of its own, which is what a gate answer wants.
+
+*A stage that cannot go on without a decision asks for it in place.* Rather
+than reporting that the user should go and find another action, the result
+carries the question, and the page draws it as a form under the result that
+explains it:
+
+    return {
+        "message": "Paused — 3 zones could not be classified",
+        "prompt": {
+            "action": "zones",              # runs when the form is submitted
+            "title": "Classify these zones",
+            "params": [
+                {"name": "dmz", "label": "dmz", "type": "select",
+                 "options": ["internal", "external"]},
+            ],
+        },
+    }
+
+The fields are built while the action runs — three uncertain zones make three
+fields — so unlike a spec's parameters they are *data*: their options are a
+plain list rather than a loader, because the run that could have answered a
+loader is over. zs-config keeps its own copy of the question and checks the
+answer against that, then invokes the named action with those values and the
+page's context folded in. The action's own declared parameters are not part of
+that call, so an action written to be prompted for reads what the prompt asked.
+
+Answering re-runs and replaces the result in place, so a pipeline that stops
+three times is still one screen. `notes[].action` is the same mechanism with
+nothing to fill in.
 
 A `selection` parameter is a checkbox grid rather than a field: the plugin
 loads the rows, the user ticks some, and `run` receives the list of values.
@@ -99,7 +140,7 @@ parameter, so a value the plugin did not offer is refused.
 
 Two rules the rest of the app depends on:
 
-*Nothing here is trusted for authorisation.* A `tenant` parameter resolves to a
+*Nothing here is trusted for authorization.* A `tenant` parameter resolves to a
 tenant id, and the router entitlement-checks it against the calling account
 before the action ever runs. A plugin naming a tenant it was handed cannot
 reach one the user could not reach themselves.
@@ -181,7 +222,7 @@ class PluginContext:
 # ---------------------------------------------------------------------------
 
 
-def _normalise_options(options: Any) -> List[dict]:
+def _normalize_options(options: Any) -> List[dict]:
     """`[{"value", "label"}]` from any shape a plugin may offer.
 
     Accepts both `["a", "b"]` and `[{"value": "a", "label": "A"}]` so a plugin
@@ -226,11 +267,19 @@ def _describe_filter(raw: Any, name: str) -> dict:
     return {
         "name": key,
         "label": str(raw.get("label") or key),
-        "options": _normalise_options(raw.get("options") or []),
+        "options": _normalize_options(raw.get("options") or []),
     }
 
 
-def _describe_param(raw: Any, action_key: str) -> dict:
+def _describe_param(raw: Any, action_key: str, *, literal: bool = False) -> dict:
+    """One parameter, described for the page.
+
+    `literal` describes a parameter that is *data*, not spec — the fields of a
+    follow-up prompt, which the plugin builds while it runs. Those cannot load
+    anything later: the run that produced them is over, and there is no form for
+    a loader to read. So their options are a plain list, given here, and are the
+    list the value is checked against when the prompt is submitted.
+    """
     if not isinstance(raw, dict):
         raise PluginWebError(f"action '{action_key}': each param must be a dict", 500)
 
@@ -253,9 +302,21 @@ def _describe_param(raw: Any, action_key: str) -> dict:
         "placeholder": raw.get("placeholder") or None,
     }
 
+    if literal and (raw.get("depends_on") or []):
+        raise PluginWebError(
+            f"action '{action_key}', param '{name}': a prompt's fields cannot "
+            "depend on anything — there is nothing left to read", 500
+        )
+
     if ptype == "select":
         options = raw.get("options") or []
         depends = raw.get("depends_on") or []
+
+        if callable(options) and literal:
+            raise PluginWebError(
+                f"action '{action_key}', param '{name}': a prompt's options must be "
+                "a list, not a callable", 500
+            )
 
         if callable(options):
             # The list does not exist yet — it is whatever the plugin computes
@@ -276,14 +337,23 @@ def _describe_param(raw: Any, action_key: str) -> dict:
                 )
             out["dynamic"] = False
             out["depends_on"] = []
-            out["options"] = _normalise_options(options)
+            out["options"] = _normalize_options(options)
 
     if ptype == "selection":
         # A grid is always loaded, never declared: its rows are the plugin's
         # current state — which rules exist, which are already ticked — and a
         # literal list in a spec could only ever be stale.
         loader = raw.get("options")
-        if not callable(loader):
+        if literal:
+            # A prompt's grid is already loaded — the rows are the ones the run
+            # that emitted it found. There is nothing to call and nothing to
+            # call it with.
+            if not isinstance(loader, (list, tuple)):
+                raise PluginWebError(
+                    f"action '{action_key}', param '{name}': a prompt's selection "
+                    "needs its rows as a list", 500
+                )
+        elif not callable(loader):
             raise PluginWebError(
                 f"action '{action_key}', param '{name}': selection needs a callable "
                 "'options' that loads its rows", 500
@@ -303,9 +373,9 @@ def _describe_param(raw: Any, action_key: str) -> dict:
             raise PluginWebError(
                 f"action '{action_key}', param '{name}': 'filters' must be a list", 500
             )
-        out["dynamic"] = True
+        out["dynamic"] = not literal
         out["depends_on"] = [str(d) for d in depends]
-        out["options"] = []
+        out["options"] = _normalize_options(loader) if literal else []
         out["columns"] = [str(c) for c in columns]
         out["filters"] = [_describe_filter(f, name) for f in filters]
 
@@ -577,7 +647,7 @@ def bind_raw_context(plugin: dict, raw_action: dict, action: dict) -> dict:
 def context_action(described: dict) -> dict:
     """A synthetic action holding just the page's context values.
 
-    Lets the state endpoint validate and authorise a set of context values with
+    Lets the state endpoint validate and authorize a set of context values with
     the same code an action's parameters go through, without inventing a second
     path that could drift from it.
     """
@@ -625,7 +695,7 @@ def _coerce_one(spec: dict, value: Any) -> Any:
         text = str(value)
         # A dynamic select has no list to check against here — its options do
         # not exist until the plugin is asked for them, which the router does
-        # separately once the tenant among the params has been authorised.
+        # separately once the tenant among the params has been authorized.
         if spec.get("dynamic"):
             return text
         allowed = {o["value"] for o in spec.get("options", [])}
@@ -638,13 +708,22 @@ def _coerce_one(spec: dict, value: Any) -> Any:
             raise PluginWebError(f"'{spec['label']}' must be a list of values")
         # Order is the user's, duplicates are not meaningful, and the values a
         # grid offered are checked by the router once its dependencies have been
-        # authorised — same as any other dynamic parameter.
+        # authorized — same as any other dynamic parameter.
         seen, out = set(), []
         for v in value:
             text = str(v)
             if text not in seen:
                 seen.add(text)
                 out.append(text)
+        if not spec.get("dynamic"):
+            # A prompt's grid carries its rows with it, so the check the router
+            # does by re-loading a dynamic grid happens here instead.
+            allowed = {o["value"] for o in spec.get("options", [])}
+            for text in out:
+                if text not in allowed:
+                    raise PluginWebError(
+                        f"'{spec['label']}' includes a row that was not offered"
+                    )
         return out
 
     return str(value)
@@ -697,7 +776,7 @@ def coerce_params(
 
 
 def tenant_params(action: dict) -> List[str]:
-    """Names of the action's tenant parameters, for the router to authorise."""
+    """Names of the action's tenant parameters, for the router to authorize."""
     return [p["name"] for p in action.get("params", []) if p["type"] == "tenant"]
 
 
@@ -752,7 +831,7 @@ def resolve_options(raw_action: dict, param_name: str, params: Dict[str, Any]) -
         loader = raw.get("options")
         if not callable(loader):
             raise PluginWebError(f"'{param_name}' does not load its options dynamically", 400)
-        return _normalise_options(loader(dict(params)))
+        return _normalize_options(loader(dict(params)))
     raise PluginWebError(f"unknown parameter '{param_name}'", 400)
 
 
@@ -912,11 +991,115 @@ def _describe_section(raw: Any) -> Optional[dict]:
     return None
 
 
+def _result_context(raw: Any, context_names: Tuple[str, ...]) -> Dict[str, str]:
+    """The page context an action asked to change, keeping only declared names.
+
+    An action that creates the thing the page is about — the import that makes
+    the migration the rest of the workflow runs against — says so in its result
+    rather than leaving the user to find it in a dropdown that has not heard of
+    it yet. Values are strings because that is what a context value is: it comes
+    back off the query string on the next reload either way.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in raw.items():
+        name = str(key)
+        if name not in context_names:
+            log.warning("plugin result sets context '%s', which it does not declare", name)
+            continue
+        out[name] = "" if value is None else str(value)
+    return out
+
+
+def _describe_prompt(raw: Any, action_keys: Tuple[str, ...]) -> Optional[dict]:
+    """The follow-up question an action stopped on, or None if it is unusable.
+
+    This is what keeps a workflow on one screen: a stage that cannot go on
+    without a decision returns the decision as a form, rendered under the result
+    that explains it, and answering it runs the named action. The fields are
+    built while the action runs — three uncertain zones make three fields — so
+    they are `literal` parameters and are checked against the list they carry.
+
+    The action named here is invoked by key, so it must exist; it does not have
+    to appear anywhere in the workflow, and a gate answer generally should not.
+
+    Dropped rather than raised on, like a section: the run itself succeeded, and
+    the message explaining what it is waiting for is worth more than a 500.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    key = str(raw.get("action") or "").strip()
+    if key not in action_keys:
+        log.warning("plugin result prompts for action '%s', which does not exist", key)
+        return None
+
+    params = raw.get("params") or []
+    if not isinstance(params, (list, tuple)):
+        log.warning("plugin prompt for '%s': 'params' must be a list", key)
+        return None
+
+    try:
+        described = [_describe_param(p, f"prompt:{key}", literal=True) for p in params]
+    except PluginWebError as exc:
+        log.warning("plugin prompt for '%s' is unusable — %s", key, exc)
+        return None
+
+    names = [p["name"] for p in described]
+    if len(names) != len(set(names)):
+        log.warning("plugin prompt for '%s': duplicate param names", key)
+        return None
+
+    return {
+        "action": key,
+        "title": str(raw["title"]) if raw.get("title") else None,
+        "help": str(raw["help"]) if raw.get("help") else None,
+        "submit": str(raw.get("submit") or "Continue"),
+        "params": described,
+    }
+
+
+def prompt_action(described: dict, action: dict, prompt: dict) -> dict:
+    """The action a prompt submits to, described as the form the user answered.
+
+    The target action's own parameters are deliberately dropped: what the user
+    filled in is the prompt, which the plugin composed for this one pause, and
+    the values are checked against that. What stays is the page context the
+    action named — it is validated, entitlement-checked and re-resolved on the
+    same path as any other run, because the browser is the one supplying it.
+    """
+    wanted = action.get("context") or []
+    by_name = {c["name"]: c for c in described.get("context") or []}
+    context = [by_name[n] for n in wanted if n in by_name]
+
+    # A field sharing a context value's name would be filled in from two places
+    # and coerced against whichever spec came first. Context wins: it is the
+    # thing the rest of the workflow is keyed on, and a prompt asking for it
+    # again is the plugin repeating itself.
+    taken = {c["name"] for c in context}
+    fields = []
+    for p in prompt.get("params") or []:
+        if p["name"] in taken:
+            log.warning(
+                "plugin prompt for '%s': field '%s' shadows page context — ignored",
+                action.get("key"), p["name"],
+            )
+            continue
+        fields.append(p)
+    return {**action, "params": context + fields}
+
+
 #: Result keys with a rendering of their own, kept out of the key/value detail.
-_RESERVED_RESULT_KEYS = ("message", "table", "sections", ARTIFACT_KEY)
+_RESERVED_RESULT_KEYS = ("message", "table", "sections", "context", "prompt", ARTIFACT_KEY)
 
 
-def normalise_result(value: Any) -> dict:
+def normalize_result(
+    value: Any,
+    *,
+    context_names: Tuple[str, ...] = (),
+    action_keys: Tuple[str, ...] = (),
+) -> dict:
     """Shape whatever an action returned into what the page renders.
 
     `message` is a headline, `table` is `{columns, rows}` rendered as a grid,
@@ -925,11 +1108,23 @@ def normalise_result(value: Any) -> dict:
     action that returns nothing at all still succeeded, it just has nothing to
     show.
 
+    `context` is what the page should adopt as its own — the migration an import
+    just created — and `prompt` is a follow-up form to draw under the result,
+    both checked against what the plugin declared.
+
     `download` is always present and always None here: only the router knows
     whether an artifact survived to be served, so it fills this in. Declaring
     it means the result shape is one thing, described in one place.
     """
-    empty = {"message": "Done.", "table": None, "sections": [], "details": {}, "download": None}
+    empty = {
+        "message": "Done.",
+        "table": None,
+        "sections": [],
+        "details": {},
+        "download": None,
+        "context": {},
+        "prompt": None,
+    }
     if value is None:
         return empty
     if not isinstance(value, dict):
@@ -958,6 +1153,12 @@ def normalise_result(value: Any) -> dict:
         "sections": sections,
         "details": details,
         "download": None,
+        "context": _result_context(value.get("context"), tuple(context_names)),
+        "prompt": (
+            _describe_prompt(value["prompt"], tuple(action_keys))
+            if value.get("prompt") is not None
+            else None
+        ),
     }
 
 
@@ -965,7 +1166,7 @@ def normalise_result(value: Any) -> dict:
 STEP_STATUSES = ("pending", "current", "complete", "blocked")
 
 
-def normalise_state(value: Any, workflow: Optional[dict]) -> dict:
+def normalize_state(value: Any, workflow: Optional[dict]) -> dict:
     """One entry per declared step, whatever the plugin actually returned.
 
     Filled in for steps the plugin said nothing about, so the page never has to
