@@ -774,7 +774,7 @@ def _described(package: str, user: AuthUser) -> tuple[dict, dict]:
     return plugin, described
 
 
-def _authorised_options(
+def _authorized_options(
     action: dict, raw_action: dict, param: str, supplied: Dict[str, Any], user: AuthUser
 ) -> List[dict]:
     """The current options for one dynamic select, with its tenant checked first.
@@ -826,7 +826,7 @@ def plugin_action_options(
     ends up in an access log.
     """
     _, _, action, raw_action = _resolve_action(package, action_key, user)
-    options = _authorised_options(action, raw_action, param, body.params, user)
+    options = _authorized_options(action, raw_action, param, body.params, user)
     return {"options": options}
 
 
@@ -847,7 +847,7 @@ def plugin_context_options(
     plugin, described = _described(package, user)
     action = plugin_web.context_action(described)
     raw_action = plugin_web.raw_context_action(plugin)
-    options = _authorised_options(action, raw_action, param, body.params, user)
+    options = _authorized_options(action, raw_action, param, body.params, user)
     return {"options": options}
 
 
@@ -861,7 +861,7 @@ def plugin_workflow_state(
 
     Advisory only: it decides what the step strip looks like, never what may be
     run. A step the plugin calls blocked is still an action the caller can post
-    to directly, and it is authorised there on its own terms.
+    to directly, and it is authorized there on its own terms.
     """
     plugin, described = _described(package, user)
     workflow = described.get("workflow")
@@ -870,7 +870,7 @@ def plugin_workflow_state(
 
     state_fn = plugin_web.find_workflow_state(plugin)
     if not state_fn:
-        return {"state": plugin_web.normalise_state(None, workflow)}
+        return {"state": plugin_web.normalize_state(None, workflow)}
 
     action = plugin_web.context_action(described)
     try:
@@ -883,7 +883,7 @@ def plugin_workflow_state(
             check_tenant_access(int(params[name]), user)
 
     try:
-        return {"state": plugin_web.normalise_state(state_fn(dict(params)), workflow)}
+        return {"state": plugin_web.normalize_state(state_fn(dict(params)), workflow)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not read plugin state: {exc}")
 
@@ -983,7 +983,7 @@ async def run_plugin_action(
 def _checked_params(
     action: dict, raw_action: dict, supplied: Dict[str, Any], user: AuthUser
 ) -> Dict[str, Any]:
-    """Coerce what the caller sent and authorise every value that carries reach.
+    """Coerce what the caller sent and authorize every value that carries reach.
 
     Shared by a run and a prompt answer, which differ only in where the form
     came from: both arrive from the browser, and neither is trusted further than
@@ -1015,7 +1015,7 @@ def _checked_params(
             continue
         allowed = {
             o["value"]
-            for o in _authorised_options(action, raw_action, name, supplied, user)
+            for o in _authorized_options(action, raw_action, name, supplied, user)
         }
         # A selection grid submits many values; each one has to have been on the
         # list the plugin just produced, not merely most of them.
@@ -1086,7 +1086,7 @@ def _start_action_job(
                    plugin_action=action_key, by=user.username, error=str(exc))
             return
 
-        payload = plugin_web.normalise_result(
+        payload = plugin_web.normalize_result(
             rest, context_names=context_names, action_keys=action_keys
         )
         if artifact:

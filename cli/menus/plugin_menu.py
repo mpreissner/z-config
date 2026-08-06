@@ -194,7 +194,7 @@ def _switch_channel(current: str) -> None:
             Panel(
                 "[yellow][bold]Warning — dev channel[/bold]\n\n"
                 "Dev builds are pre-release and may contain incomplete features, "
-                "breaking changes, or unexpected behaviour.\n\n"
+                "breaking changes, or unexpected behavior.\n\n"
                 "Do not use dev builds in production environments.[/yellow]",
                 border_style="yellow",
             )

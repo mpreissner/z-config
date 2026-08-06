@@ -136,7 +136,7 @@ def revoke_package(package: str) -> int:
     """Drop every grant for a package. Returns how many were removed.
 
     Called when a plugin is uninstalled with its data purged: keeping grants
-    for a package whose tables are gone would silently re-authorise everyone
+    for a package whose tables are gone would silently re-authorize everyone
     if it were ever reinstalled.
     """
     with get_session() as session:

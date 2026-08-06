@@ -467,7 +467,7 @@ export const fetchPluginContextOptions = (
  * How far along each workflow step is for the given context.
  *
  * Cosmetic: it decides what the step strip looks like. A step reported blocked
- * is still authorised on its own terms if something posts to it directly.
+ * is still authorized on its own terms if something posts to it directly.
  */
 export const fetchPluginState = (
   packageName: string,

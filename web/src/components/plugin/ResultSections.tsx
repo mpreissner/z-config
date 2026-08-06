@@ -3,8 +3,8 @@
  * proposals and callouts.
  *
  * A plugin picks the shape and the tone, never the markup — everything drawn
- * here comes from a fixed set the server normalises against (see
- * `normalise_result` in lib/plugin_web.py), so a section it gets wrong is
+ * here comes from a fixed set the server normalizes against (see
+ * `normalize_result` in lib/plugin_web.py), so a section it gets wrong is
  * dropped rather than rendered.
  */
 

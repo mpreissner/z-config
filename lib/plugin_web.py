@@ -28,7 +28,7 @@ The run callable is `run(params: dict, ctx: PluginContext) -> dict`. `params`
 holds the validated values keyed by parameter name; a `file` parameter arrives
 as a path to a temporary file that is deleted once the call returns. The return
 value is JSON — `message` and `table` are rendered specially (see
-`normalise_result`), anything else is shown as key/value detail.
+`normalize_result`), anything else is shown as key/value detail.
 
 An action that produces a document rather than a screenful returns it under
 `file`, and the page shows a download button instead of trying to render it:
@@ -64,7 +64,7 @@ re-entered on each form. Actions name the ones they consume:
              "options": list_sessions},
         ],
         "actions": [
-            {"key": "analyse", "context": ["session"], "params": […], "run": …},
+            {"key": "analyze", "context": ["session"], "params": […], "run": …},
         ],
     }
 
@@ -91,7 +91,7 @@ in order with the state the plugin reports:
     }
 
 `state` is advisory — it decides what the step strip looks like, never what a
-caller is allowed to run. Every action is authorised on its own terms whichever
+caller is allowed to run. Every action is authorized on its own terms whichever
 step it is drawn under.
 
 A step is a screen, not a tab: every action a step lists is drawn on it, one
@@ -140,7 +140,7 @@ parameter, so a value the plugin did not offer is refused.
 
 Two rules the rest of the app depends on:
 
-*Nothing here is trusted for authorisation.* A `tenant` parameter resolves to a
+*Nothing here is trusted for authorization.* A `tenant` parameter resolves to a
 tenant id, and the router entitlement-checks it against the calling account
 before the action ever runs. A plugin naming a tenant it was handed cannot
 reach one the user could not reach themselves.
@@ -222,7 +222,7 @@ class PluginContext:
 # ---------------------------------------------------------------------------
 
 
-def _normalise_options(options: Any) -> List[dict]:
+def _normalize_options(options: Any) -> List[dict]:
     """`[{"value", "label"}]` from any shape a plugin may offer.
 
     Accepts both `["a", "b"]` and `[{"value": "a", "label": "A"}]` so a plugin
@@ -267,7 +267,7 @@ def _describe_filter(raw: Any, name: str) -> dict:
     return {
         "name": key,
         "label": str(raw.get("label") or key),
-        "options": _normalise_options(raw.get("options") or []),
+        "options": _normalize_options(raw.get("options") or []),
     }
 
 
@@ -337,7 +337,7 @@ def _describe_param(raw: Any, action_key: str, *, literal: bool = False) -> dict
                 )
             out["dynamic"] = False
             out["depends_on"] = []
-            out["options"] = _normalise_options(options)
+            out["options"] = _normalize_options(options)
 
     if ptype == "selection":
         # A grid is always loaded, never declared: its rows are the plugin's
@@ -375,7 +375,7 @@ def _describe_param(raw: Any, action_key: str, *, literal: bool = False) -> dict
             )
         out["dynamic"] = not literal
         out["depends_on"] = [str(d) for d in depends]
-        out["options"] = _normalise_options(loader) if literal else []
+        out["options"] = _normalize_options(loader) if literal else []
         out["columns"] = [str(c) for c in columns]
         out["filters"] = [_describe_filter(f, name) for f in filters]
 
@@ -647,7 +647,7 @@ def bind_raw_context(plugin: dict, raw_action: dict, action: dict) -> dict:
 def context_action(described: dict) -> dict:
     """A synthetic action holding just the page's context values.
 
-    Lets the state endpoint validate and authorise a set of context values with
+    Lets the state endpoint validate and authorize a set of context values with
     the same code an action's parameters go through, without inventing a second
     path that could drift from it.
     """
@@ -695,7 +695,7 @@ def _coerce_one(spec: dict, value: Any) -> Any:
         text = str(value)
         # A dynamic select has no list to check against here — its options do
         # not exist until the plugin is asked for them, which the router does
-        # separately once the tenant among the params has been authorised.
+        # separately once the tenant among the params has been authorized.
         if spec.get("dynamic"):
             return text
         allowed = {o["value"] for o in spec.get("options", [])}
@@ -708,7 +708,7 @@ def _coerce_one(spec: dict, value: Any) -> Any:
             raise PluginWebError(f"'{spec['label']}' must be a list of values")
         # Order is the user's, duplicates are not meaningful, and the values a
         # grid offered are checked by the router once its dependencies have been
-        # authorised — same as any other dynamic parameter.
+        # authorized — same as any other dynamic parameter.
         seen, out = set(), []
         for v in value:
             text = str(v)
@@ -776,7 +776,7 @@ def coerce_params(
 
 
 def tenant_params(action: dict) -> List[str]:
-    """Names of the action's tenant parameters, for the router to authorise."""
+    """Names of the action's tenant parameters, for the router to authorize."""
     return [p["name"] for p in action.get("params", []) if p["type"] == "tenant"]
 
 
@@ -831,7 +831,7 @@ def resolve_options(raw_action: dict, param_name: str, params: Dict[str, Any]) -
         loader = raw.get("options")
         if not callable(loader):
             raise PluginWebError(f"'{param_name}' does not load its options dynamically", 400)
-        return _normalise_options(loader(dict(params)))
+        return _normalize_options(loader(dict(params)))
     raise PluginWebError(f"unknown parameter '{param_name}'", 400)
 
 
@@ -1094,7 +1094,7 @@ def prompt_action(described: dict, action: dict, prompt: dict) -> dict:
 _RESERVED_RESULT_KEYS = ("message", "table", "sections", "context", "prompt", ARTIFACT_KEY)
 
 
-def normalise_result(
+def normalize_result(
     value: Any,
     *,
     context_names: Tuple[str, ...] = (),
@@ -1166,7 +1166,7 @@ def normalise_result(
 STEP_STATUSES = ("pending", "current", "complete", "blocked")
 
 
-def normalise_state(value: Any, workflow: Optional[dict]) -> dict:
+def normalize_state(value: Any, workflow: Optional[dict]) -> dict:
     """One entry per declared step, whatever the plugin actually returned.
 
     Filled in for steps the plugin said nothing about, so the page never has to
