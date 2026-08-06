@@ -15,10 +15,15 @@
  * A step is a screen. Everything a step lists is drawn on it, one card under
  * the next, and the strip moves between steps rather than between actions — so
  * a job of four steps is four screens however many actions it takes to do them.
- * Two things follow. Until the context exists there is nothing to fold in, so
- * the page opens on the actions that need none and nothing above them; and an
- * action that stops on a decision asks for it in its own result, which is
- * answered where it was asked and replaced by what came next.
+ * Two things follow. Until the context exists only the actions needing none can
+ * run, so those are all the page opens with; and an action that stops on a
+ * decision asks for it in its own result, which is answered where it was asked
+ * and replaced by what came next.
+ *
+ * The context bar sits at the top from the first paint and never moves. What it
+ * holds is what the whole page is about, so it reads as a heading — and a
+ * control that arrives late, or somewhere else than last time, is one the user
+ * has to find twice.
  */
 
 import { useState, useEffect, useMemo, useRef } from "react";
@@ -694,7 +699,6 @@ export default function PluginPage() {
   // one. Null until they choose, so the page can follow the work instead.
   const [stepKey, setStepKey] = useState<string | null>(null);
   const [actionKey, setActionKey] = useState<string | null>(null);
-  const [showContext, setShowContext] = useState(false);
 
   const actions = useMemo(() => ui?.actions ?? [], [ui]);
   const contextParams = useMemo(() => ui?.context ?? [], [ui]);
@@ -774,7 +778,6 @@ export default function PluginPage() {
   useEffect(() => {
     setStepKey(null);
     setActionKey(null);
-    setShowContext(false);
   }, [pkg]);
 
   function setContext(name: string, value: unknown) {
@@ -825,13 +828,6 @@ export default function PluginPage() {
       onChange={setContext}
     />
   );
-  // On the first screen the bar is the way back to earlier work rather than the
-  // way in, so it waits behind a link unless there is nothing else to show.
-  const revealed = showContext || starters.length === 0;
-  const contextLabels = contextParams
-    .filter((p) => p.required !== false)
-    .map((p) => p.label)
-    .join(" and ");
 
   return (
     <div className="space-y-6">
@@ -843,7 +839,7 @@ export default function PluginPage() {
         </p>
       </div>
 
-      {!firstScreen && contextParams.length > 0 && contextBar}
+      {contextParams.length > 0 && contextBar}
 
       {!firstScreen &&
         (workflow ? (
@@ -895,18 +891,6 @@ export default function PluginPage() {
       {shown.length === 0 && !firstScreen && !currentStep && (
         <p className="text-sm italic text-gray-400">This plugin offers no actions.</p>
       )}
-
-      {firstScreen &&
-        (revealed ? (
-          contextBar
-        ) : (
-          <button
-            onClick={() => setShowContext(true)}
-            className="text-sm font-medium text-zs-600 hover:text-zs-700"
-          >
-            Continue with an existing {contextLabels.toLowerCase() || "one"} →
-          </button>
-        ))}
     </div>
   );
 }
