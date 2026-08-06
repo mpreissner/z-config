@@ -11,14 +11,23 @@
  * context bar and a step strip around the same machinery: the values in the bar
  * are chosen once and folded into every action that named them, which the
  * server does — not this — so they are checked exactly like any other parameter.
+ *
+ * A step is a screen. Everything a step lists is drawn on it, one card under
+ * the next, and the strip moves between steps rather than between actions — so
+ * a job of four steps is four screens however many actions it takes to do them.
+ * Two things follow. Until the context exists there is nothing to fold in, so
+ * the page opens on the actions that need none and nothing above them; and an
+ * action that stops on a decision asks for it in its own result, which is
+ * answered where it was asked and replaced by what came next.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchPluginUi,
   runPluginAction,
+  answerPluginPrompt,
   fetchPluginActionOptions,
   fetchPluginContextOptions,
   fetchPluginState,
@@ -26,6 +35,7 @@ import {
   PluginAction,
   PluginParam,
   PluginActionResult,
+  PluginPrompt,
   PluginStepStatus,
   PluginUi,
 } from "../api/plugins";
@@ -43,16 +53,20 @@ type Files = Record<string, File>;
 const inputClass =
   "w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-zs-500 focus:border-zs-500";
 
-/** Starting values for one action's form, honouring any declared defaults. */
-function initialValues(action: PluginAction): Values {
+/** Starting values for one form, honoring any declared defaults. */
+function initialValues(params: PluginParam[]): Values {
   const out: Values = {};
-  for (const p of action.params) {
+  for (const p of params) {
     if (p.default !== undefined) out[p.name] = p.default;
     else if (p.type === "boolean") out[p.name] = false;
-    // A grid is left undefined until its rows load, so the ticks the plugin
-    // arrives with can seed it without overwriting a choice already made.
-    else if (p.type === "selection") out[p.name] = undefined;
-    else out[p.name] = "";
+    // A grid whose rows are still to load is left undefined, so the ticks that
+    // arrive with them can seed it without overwriting a choice already made.
+    // A prompt's grid came with its rows, so its ticks are honored here.
+    else if (p.type === "selection") {
+      out[p.name] = p.dynamic
+        ? undefined
+        : (p.options ?? []).filter((o) => o.selected).map((o) => o.value);
+    } else out[p.name] = "";
   }
   return out;
 }
@@ -267,10 +281,89 @@ function humanSize(bytes: number): string {
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
-function ResultView({ result, jobId, onAction }: {
+/**
+ * The question an action stopped on, drawn under the result that explains it.
+ *
+ * Its fields were built while the action ran, so nothing here is fetched and
+ * nothing is dynamic — the options came with the question. Answering starts
+ * another job and the card swaps its own job for it, so the reply lands where
+ * the question was instead of somewhere further down the page.
+ */
+function PromptForm({ pkg, prompt, jobId, context, disabled, onJob }: {
+  pkg: string;
+  prompt: PluginPrompt;
+  /** The job whose result carried the question — how the server finds it again. */
+  jobId: string;
+  /** The whole page context; the server keeps whatever the action named. */
+  context: Values;
+  disabled: boolean;
+  onJob: (jobId: string) => void;
+}) {
+  const [values, setValues] = useState<Values>(() => initialValues(prompt.params));
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setError(null);
+    setSending(true);
+    try {
+      const payload: Values = {};
+      for (const p of prompt.params) {
+        payload[p.name] = p.type === "selection" ? (values[p.name] ?? []) : values[p.name];
+      }
+      const r = await answerPluginPrompt(pkg, jobId, payload, context);
+      onJob(r.job_id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not send that answer");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-gray-200 bg-white p-4">
+      {prompt.title && <h3 className="text-sm font-medium text-gray-900">{prompt.title}</h3>}
+      {prompt.help && <p className="mt-1 text-sm text-gray-500">{prompt.help}</p>}
+
+      {prompt.params.length > 0 && (
+        <div className="mt-3 space-y-4">
+          {prompt.params.map((p) => (
+            <ParamField
+              key={p.name}
+              param={p}
+              value={values[p.name]}
+              siblings={values}
+              pkg={pkg}
+              actionKey={null}
+              onChange={(v) => setValues((prev) => ({ ...prev, [p.name]: v }))}
+              onFile={() => {}}
+            />
+          ))}
+        </div>
+      )}
+
+      <button
+        onClick={submit}
+        disabled={sending || disabled}
+        className="mt-4 rounded-md bg-zs-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zs-600 disabled:opacity-60"
+      >
+        {sending ? "Sending…" : prompt.submit}
+      </button>
+      {error && <div className="mt-3"><ErrorMessage message={error} /></div>}
+    </div>
+  );
+}
+
+function ResultView({ result, jobId, pkg, context, running, onAction, canAction, onJob }: {
   result: PluginActionResult;
   jobId: string;
+  pkg: string;
+  context: Values;
+  /** A follow-up is already on its way; don't let it be sent twice. */
+  running: boolean;
   onAction?: (key: string) => void;
+  canAction?: (key: string) => boolean;
+  onJob: (jobId: string) => void;
 }) {
   const details = Object.entries(result.details ?? {});
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -302,7 +395,7 @@ function ResultView({ result, jobId, onAction }: {
 
       {sections.length > 0 && (
         <div className="mt-3">
-          <ResultSections sections={sections} onAction={onAction} />
+          <ResultSections sections={sections} onAction={onAction} canAction={canAction} />
         </div>
       )}
 
@@ -346,11 +439,24 @@ function ResultView({ result, jobId, onAction }: {
           )}
         </div>
       )}
+
+      {result.prompt && (
+        <PromptForm
+          pkg={pkg}
+          prompt={result.prompt}
+          jobId={jobId}
+          context={context}
+          disabled={running}
+          onJob={onJob}
+        />
+      )}
     </div>
   );
 }
 
-function ActionCard({ pkg, action, context, contextParams, onFinished, onAction }: {
+function ActionCard({
+  pkg, action, context, contextParams, onFinished, onContext, onAction, canAction,
+}: {
   pkg: string;
   action: PluginAction;
   /** Page-level values this action named. Submitted alongside its own. */
@@ -358,9 +464,13 @@ function ActionCard({ pkg, action, context, contextParams, onFinished, onAction 
   contextParams: PluginParam[];
   /** Fires when a run completes, so the step strip can catch up. */
   onFinished?: () => void;
+  /** The context the run handed back, for the page to adopt. */
+  onContext: (values: Record<string, string>) => void;
   onAction?: (key: string) => void;
+  canAction?: (key: string) => boolean;
 }) {
-  const [values, setValues] = useState<Values>(() => initialValues(action));
+  const queryClient = useQueryClient();
+  const [values, setValues] = useState<Values>(() => initialValues(action.params));
   const [files, setFiles] = useState<Files>({});
   const [jobId, setJobId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -385,10 +495,41 @@ function ActionCard({ pkg, action, context, contextParams, onFinished, onAction 
     return spec?.required !== false && (v === undefined || v === null || v === "");
   });
 
+  // A form filled in for one migration has nothing to say about the next, so a
+  // change to the context clears this card — unless the change came from this
+  // card's own result, which is the thing the user is reading.
+  const contextKey = JSON.stringify(context);
+  const lastContext = useRef(contextKey);
+  const adopting = useRef(false);
   useEffect(() => {
-    if (jobStatus === "done") onFinished?.();
+    if (contextKey === lastContext.current) return;
+    lastContext.current = contextKey;
+    if (adopting.current) {
+      adopting.current = false;
+      return;
+    }
+    setValues(initialValues(action.params));
+    setFiles({});
+    setJobId(null);
+    setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobStatus]);
+  }, [contextKey]);
+
+  const handled = useRef<string | null>(null);
+  useEffect(() => {
+    if (jobStatus !== "done" || !jobId || !result || handled.current === jobId) return;
+    handled.current = jobId;
+    // Whatever it did, it may have changed what every list on this page would
+    // say: an import belongs in the picker without waiting for a page reload.
+    queryClient.invalidateQueries({ queryKey: ["plugin-options", pkg] });
+    const adopted = result.context ?? {};
+    if (Object.keys(adopted).length > 0) {
+      adopting.current = true;
+      onContext(adopted);
+    }
+    onFinished?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobStatus, jobId, result]);
 
   async function start() {
     if (action.confirm && !window.confirm(action.confirm)) return;
@@ -488,7 +629,18 @@ function ActionCard({ pkg, action, context, contextParams, onFinished, onAction 
         <div className="mt-4"><ErrorMessage message={streamError} /></div>
       )}
       {jobStatus === "done" && result && jobId && (
-        <ResultView result={result} jobId={jobId} onAction={onAction} />
+        <ResultView
+          result={result}
+          jobId={jobId}
+          pkg={pkg}
+          context={context}
+          running={running}
+          onAction={onAction}
+          canAction={canAction}
+          // Answering replaces this result with the next one, in place: a
+          // pipeline that stops three times is still one card on one screen.
+          onJob={setJobId}
+        />
       )}
     </div>
   );
@@ -538,10 +690,17 @@ export default function PluginPage() {
     retry: false,
   });
 
-  const [activeKey, setActiveKey] = useState<string | null>(null);
+  // Where the user is: a step for a workflow, an action for a plugin without
+  // one. Null until they choose, so the page can follow the work instead.
+  const [stepKey, setStepKey] = useState<string | null>(null);
+  const [actionKey, setActionKey] = useState<string | null>(null);
+  const [showContext, setShowContext] = useState(false);
+
   const actions = useMemo(() => ui?.actions ?? [], [ui]);
   const contextParams = useMemo(() => ui?.context ?? [], [ui]);
   const workflow = ui?.workflow ?? null;
+  const steps = useMemo(() => workflow?.steps ?? [], [workflow]);
+  const byKey = useMemo(() => new Map(actions.map((a) => [a.key, a])), [actions]);
 
   // Context lives in the query string, so a reload or a shared link comes back
   // to the same migration rather than an empty bar.
@@ -551,9 +710,9 @@ export default function PluginPage() {
     return out;
   }, [contextParams, search]);
 
-  const contextReady =
-    contextParams.length > 0 &&
-    contextParams.every((p) => p.required === false || context[p.name]);
+  const needsContext = contextParams.some((p) => p.required !== false);
+  // Vacuously ready for a plugin that asks for nothing.
+  const contextReady = contextParams.every((p) => p.required === false || context[p.name]);
 
   const { data: state, refetch: refetchState } = useQuery({
     queryKey: ["plugin-state", pkg, context],
@@ -561,21 +720,91 @@ export default function PluginPage() {
     enabled: !!workflow?.stateful && contextReady,
     retry: false,
   });
+  const stepState = state?.state;
+  const statusOf = (key: string): PluginStepStatus => stepState?.[key]?.status ?? "pending";
 
-  const active = actions.find((a) => a.key === activeKey) ?? actions[0] ?? null;
-  const activeStep = useMemo(() => {
-    if (!workflow || !active) return null;
-    return workflow.steps.find((s) => s.actions.includes(active.key)) ?? null;
-  }, [workflow, active]);
+  // The step the user picked while it still exists, otherwise the one the
+  // plugin calls current — so a reload lands on the work, not back at step one.
+  const currentStep = useMemo(() => {
+    if (!steps.length) return null;
+    const picked = steps.find((s) => s.key === stepKey);
+    if (picked) return picked;
+    return (
+      steps.find((s) => (stepState?.[s.key]?.status ?? "pending") === "current") ??
+      steps.find((s) => (stepState?.[s.key]?.status ?? "pending") !== "complete") ??
+      steps[0]
+    );
+  }, [steps, stepKey, stepState]);
 
-  // The nav switched plugins under us; fall back to the new plugin's first action.
-  useEffect(() => setActiveKey(null), [pkg]);
+  // Nothing can be folded in before the context exists, so the first screen
+  // offers only what runs without any — and nothing above it to explain.
+  const firstScreen = needsContext && !contextReady;
+  const starters = useMemo(
+    () => actions.filter((a) => (a.context ?? []).length === 0),
+    [actions],
+  );
+  const flatActive = actions.find((a) => a.key === actionKey) ?? actions[0] ?? null;
+
+  // A step is a screen: every action it lists is drawn on it, one card under
+  // the next. Without a workflow there are no steps, so it is one at a time.
+  const shown = useMemo<PluginAction[]>(() => {
+    if (firstScreen) return starters;
+    if (!workflow) return flatActive ? [flatActive] : [];
+    if (currentStep && (stepState?.[currentStep.key]?.status ?? "pending") === "blocked") {
+      return [];
+    }
+    return (currentStep?.actions ?? [])
+      .map((k) => byKey.get(k))
+      .filter((a): a is PluginAction => !!a);
+  }, [firstScreen, starters, workflow, currentStep, byKey, flatActive, stepState]);
+
+  // Finishing a step moves the user on. It stays a move — the strip is still
+  // clickable, and a step they picked themselves is never taken away.
+  const advance = useRef(false);
+  useEffect(() => {
+    if (!advance.current || !stepState || !currentStep) return;
+    advance.current = false;
+    if ((stepState[currentStep.key]?.status ?? "pending") !== "complete") return;
+    const next = steps.find((s) => (stepState[s.key]?.status ?? "pending") !== "complete");
+    if (next && next.key !== currentStep.key) setStepKey(next.key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepState]);
+
+  // The nav switched plugins under us; start the new one where it starts.
+  useEffect(() => {
+    setStepKey(null);
+    setActionKey(null);
+    setShowContext(false);
+  }, [pkg]);
 
   function setContext(name: string, value: unknown) {
     const next = new URLSearchParams(search);
     if (value === "" || value === null || value === undefined) next.delete(name);
     else next.set(name, String(value));
     setSearch(next, { replace: true });
+  }
+
+  /** Context an action made: adopted, so the user never goes looking for it. */
+  function adoptContext(values: Record<string, string>) {
+    const next = new URLSearchParams(search);
+    for (const [name, value] of Object.entries(values)) {
+      if (value === "") next.delete(name);
+      else next.set(name, value);
+    }
+    setSearch(next, { replace: true });
+  }
+
+  const canReach = (key: string) =>
+    workflow ? steps.some((s) => s.actions.includes(key)) : byKey.has(key);
+
+  function goToAction(key: string) {
+    advance.current = false;
+    if (!workflow) {
+      if (byKey.has(key)) setActionKey(key);
+      return;
+    }
+    const step = steps.find((s) => s.actions.includes(key));
+    if (step) setStepKey(step.key);
   }
 
   if (isLoading) return <LoadingSpinner />;
@@ -588,6 +817,22 @@ export default function PluginPage() {
   }
   if (!ui) return null;
 
+  const contextBar = (
+    <ContextBar
+      pkg={ui.package}
+      params={contextParams}
+      values={context}
+      onChange={setContext}
+    />
+  );
+  // On the first screen the bar is the way back to earlier work rather than the
+  // way in, so it waits behind a link unless there is nothing else to show.
+  const revealed = showContext || starters.length === 0;
+  const contextLabels = contextParams
+    .filter((p) => p.required !== false)
+    .map((p) => p.label)
+    .join(" and ");
+
   return (
     <div className="space-y-6">
       <div>
@@ -598,133 +843,155 @@ export default function PluginPage() {
         </p>
       </div>
 
-      {contextParams.length > 0 && (
-        <ContextBar
-          pkg={ui.package}
-          params={contextParams}
-          values={context}
-          onChange={setContext}
-        />
-      )}
+      {!firstScreen && contextParams.length > 0 && contextBar}
 
-      {workflow ? (
-        <StepStrip
-          ui={ui}
-          workflow={workflow}
-          state={state?.state}
-          activeStep={activeStep?.key ?? null}
-          activeAction={active?.key ?? null}
-          onPick={setActiveKey}
-        />
-      ) : (
-        actions.length > 1 && (
-          <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
-            {actions.map((a) => (
-              <button
-                key={a.key}
-                onClick={() => setActiveKey(a.key)}
-                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  active?.key === a.key
-                    ? "bg-zs-500 text-white"
-                    : "text-gray-600 hover:bg-gray-100"
-                }`}
-              >
-                {a.label}
-              </button>
-            ))}
-          </div>
-        )
-      )}
+      {!firstScreen &&
+        (workflow ? (
+          <StepStrip
+            steps={steps}
+            state={stepState}
+            current={currentStep?.key ?? null}
+            onPick={(key) => {
+              advance.current = false;
+              setStepKey(key);
+            }}
+          />
+        ) : (
+          actions.length > 1 && (
+            <TabRail
+              actions={actions}
+              current={flatActive?.key ?? null}
+              onPick={setActionKey}
+            />
+          )
+        ))}
 
-      {active ? (
+      {shown.map((a) => (
         <ActionCard
-          // Remounted per action and per context: a form filled in for one
-          // migration has nothing to say about the next one.
-          key={`${ui.package}:${active.key}:${JSON.stringify(context)}`}
+          key={`${ui.package}:${a.key}`}
           pkg={ui.package}
-          action={active}
+          action={a}
           context={context}
           contextParams={contextParams}
-          onFinished={() => { if (workflow?.stateful && contextReady) refetchState(); }}
-          onAction={(key) => {
-            if (actions.some((a) => a.key === key)) setActiveKey(key);
+          onFinished={() => {
+            if (workflow?.stateful && contextReady) {
+              advance.current = true;
+              refetchState();
+            }
           }}
+          onContext={adoptContext}
+          onAction={goToAction}
+          canAction={canReach}
         />
-      ) : (
+      ))}
+
+      {shown.length === 0 && !firstScreen && currentStep &&
+        statusOf(currentStep.key) === "blocked" && (
+          <p className="rounded-lg border border-dashed border-gray-300 px-4 py-6 text-center text-sm text-gray-500">
+            {stepState?.[currentStep.key]?.detail ?? "Not ready for this step yet."}
+          </p>
+        )}
+
+      {shown.length === 0 && !firstScreen && !currentStep && (
         <p className="text-sm italic text-gray-400">This plugin offers no actions.</p>
       )}
+
+      {firstScreen &&
+        (revealed ? (
+          contextBar
+        ) : (
+          <button
+            onClick={() => setShowContext(true)}
+            className="text-sm font-medium text-zs-600 hover:text-zs-700"
+          >
+            Continue with an existing {contextLabels.toLowerCase() || "one"} →
+          </button>
+        ))}
     </div>
   );
 }
 
-function StepStrip({ ui, workflow, state, activeStep, activeAction, onPick }: {
-  ui: PluginUi;
-  workflow: NonNullable<PluginUi["workflow"]>;
+/**
+ * How far along the job is, and the way between its steps.
+ *
+ * These are not controls that do something — they are where you are and where
+ * else you could be. A step nobody can start yet says so and stays put.
+ */
+function StepStrip({ steps, state, current, onPick }: {
+  steps: NonNullable<PluginUi["workflow"]>["steps"];
   state?: Record<string, { status: PluginStepStatus; detail: string | null }>;
-  activeStep: string | null;
-  activeAction: string | null;
-  onPick: (actionKey: string) => void;
+  current: string | null;
+  onPick: (stepKey: string) => void;
 }) {
-  const byKey = useMemo(
-    () => Object.fromEntries(ui.actions.map((a) => [a.key, a])),
-    [ui.actions],
-  );
-  const step = workflow.steps.find((s) => s.key === activeStep) ?? workflow.steps[0];
-  const siblings = (step?.actions ?? []).map((k) => byKey[k]).filter(Boolean);
-
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-stretch gap-2">
-        {workflow.steps.map((s) => {
-          const st = state?.[s.key];
-          const on = s.key === activeStep;
-          return (
-            <button
-              key={s.key}
-              onClick={() => onPick(s.actions[0])}
-              className={`flex-1 rounded-md border px-3 py-2 text-left transition-colors ${
-                on
-                  ? "border-zs-500 bg-zs-500/5"
+    <div className="flex flex-wrap items-stretch gap-2">
+      {steps.map((s) => {
+        const st = state?.[s.key];
+        const on = s.key === current;
+        const blocked = st?.status === "blocked";
+        return (
+          <button
+            key={s.key}
+            onClick={() => onPick(s.key)}
+            disabled={blocked}
+            className={`flex-1 rounded-md border px-3 py-2 text-left transition-colors ${
+              on
+                ? "border-zs-500 bg-zs-500/5"
+                : blocked
+                  ? "cursor-default border-gray-200 bg-gray-50"
                   : "border-gray-200 bg-white hover:border-gray-300"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${STEP_DOT[st?.status ?? "pending"]}`}
-                />
-                <span
-                  className={`truncate text-sm font-medium ${
-                    on ? "text-zs-600" : "text-gray-700"
-                  }`}
-                >
-                  {s.label}
-                </span>
-              </div>
-              <p className="mt-0.5 truncate text-xs text-gray-500">
-                {st?.detail ?? s.description ?? " "}
-              </p>
-            </button>
-          );
-        })}
-      </div>
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full ${STEP_DOT[st?.status ?? "pending"]}`}
+              />
+              <span
+                className={`truncate text-sm font-medium ${
+                  on ? "text-zs-600" : blocked ? "text-gray-400" : "text-gray-700"
+                }`}
+              >
+                {s.label}
+              </span>
+            </div>
+            <p className="mt-0.5 truncate text-xs text-gray-500">
+              {st?.detail ?? s.description ?? " "}
+            </p>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
-      {siblings.length > 1 && (
-        <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
-          {siblings.map((a) => (
-            <button
-              key={a.key}
-              onClick={() => onPick(a.key)}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                activeAction === a.key
-                  ? "bg-zs-500 text-white"
-                  : "text-gray-600 hover:bg-gray-100"
-              }`}
-            >
-              {a.label}
-            </button>
-          ))}
-        </div>
-      )}
+/**
+ * The way between the actions of a plugin that has no workflow.
+ *
+ * Text on a rail, like every other set of tabs in this app: filled and rounded
+ * is a thing that happens, and choosing where to look is not one.
+ */
+function TabRail({ actions, current, onPick }: {
+  actions: PluginAction[];
+  current: string | null;
+  onPick: (key: string) => void;
+}) {
+  return (
+    <div className="border-b border-gray-200">
+      <nav className="-mb-px flex gap-6">
+        {actions.map((a) => (
+          <button
+            key={a.key}
+            onClick={() => onPick(a.key)}
+            className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
+              current === a.key
+                ? "border-zs-500 text-zs-600"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {a.label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }

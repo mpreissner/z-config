@@ -327,6 +327,23 @@ export type PluginSection =
       }[];
     };
 
+/**
+ * A question the action stopped on, drawn as a form under its own result.
+ *
+ * The fields were built by the plugin while it ran, so they are values rather
+ * than spec — their options come with them and nothing here is fetched. The
+ * answer goes back with the job id, and the server checks it against its own
+ * copy of this: what arrives here is for drawing, not for deciding.
+ */
+export interface PluginPrompt {
+  /** The action the answer runs. Chosen by the plugin, not by this page. */
+  action: string;
+  title: string | null;
+  help: string | null;
+  submit: string;
+  params: PluginParam[];
+}
+
 export interface PluginActionResult {
   message: string;
   table: { columns: string[]; rows: unknown[][] } | null;
@@ -335,6 +352,10 @@ export interface PluginActionResult {
   details: Record<string, unknown>;
   /** Set when the action produced a file; fetch it with downloadPluginArtifact(). */
   download: { filename: string; content_type: string; size: number } | null;
+  /** Page context the action created — adopted by the page when it finishes. */
+  context?: Record<string, string>;
+  /** Set when the action paused on a decision. */
+  prompt?: PluginPrompt | null;
 }
 
 export type PluginStepStatus = "pending" | "current" | "complete" | "blocked";
@@ -387,6 +408,24 @@ export function runPluginAction(
   // No Content-Type header: the browser has to set the multipart boundary.
   return apiFetch(path, { method: "POST", body: form });
 }
+
+/**
+ * Answer the question a finished action stopped on. Starts another job.
+ *
+ * The action that runs comes from the prompt the server recorded against this
+ * job, so there is no action key to send: a gate answer generally is not an
+ * action the page could navigate to at all.
+ */
+export const answerPluginPrompt = (
+  packageName: string,
+  jobId: string,
+  params: Record<string, unknown>,
+  context: Record<string, unknown>,
+): Promise<JobStart> =>
+  apiFetch(`/api/v1/plugins/${packageName}/prompts/${encodeURIComponent(jobId)}`, {
+    method: "POST",
+    body: JSON.stringify({ params, context }),
+  });
 
 /**
  * The current options for one dynamically-populated select.

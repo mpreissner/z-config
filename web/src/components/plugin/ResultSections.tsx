@@ -103,10 +103,16 @@ function GroupBlock({ group }: { group: Extract<PluginSection, { kind: "groups" 
   );
 }
 
-export default function ResultSections({ sections, onAction }: {
+export default function ResultSections({ sections, onAction, canAction }: {
   sections: PluginSection[];
-  /** Jumps to the action a note points at. Prefills a form; authorises nothing. */
+  /** Goes to the action a note points at. Opens a form; authorizes nothing. */
   onAction?: (key: string) => void;
+  /**
+   * Whether that action has a screen to go to. An action left out of every step
+   * has nowhere to send anyone, so its note is drawn as the sentence it is
+   * rather than as a button that would do nothing.
+   */
+  canAction?: (key: string) => boolean;
 }) {
   if (sections.length === 0) return null;
 
@@ -152,7 +158,7 @@ export default function ResultSections({ sections, onAction }: {
                   className={`flex items-center gap-3 rounded-md border px-3 py-2 text-sm ${TONE_NOTE[note.tone]}`}
                 >
                   <span className="flex-1">{note.text}</span>
-                  {note.action && onAction && (
+                  {note.action && onAction && (canAction?.(note.action.key) ?? true) && (
                     <button
                       type="button"
                       onClick={() => onAction(note.action!.key)}
