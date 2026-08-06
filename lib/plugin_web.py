@@ -127,6 +127,20 @@ Answering re-runs and replaces the result in place, so a pipeline that stops
 three times is still one screen. `notes[].action` is the same mechanism with
 nothing to fill in.
 
+*A stage that only ever leads to one place says so, and takes the user there.*
+A result can name what comes next, and the page draws it as a button that both
+moves to the step holding that action and runs it:
+
+    return {"message": "Imported 412 rules", "context": {"session": "7"},
+            "next": {"action": "analyze", "label": "Proceed to Analysis"}}
+
+That is the difference between this and `notes[].action`, which only moves: a
+note points at work the user may or may not want, while `next` is the one thing
+they came here to do next. It is skipped rather than fired for an action that
+still needs context, one whose button carries a `confirm`, or one asking for a
+file — nothing that needs a person is decided on their behalf, so those land on
+the card with the form in front of them.
+
 A `selection` parameter is a checkbox grid rather than a field: the plugin
 loads the rows, the user ticks some, and `run` receives the list of values.
 
@@ -1090,8 +1104,34 @@ def prompt_action(described: dict, action: dict, prompt: dict) -> dict:
     return {**action, "params": context + fields}
 
 
+def _describe_next(raw: Any, action_keys: Tuple[str, ...]) -> Optional[dict]:
+    """Where this result leads, or None if it does not lead anywhere usable.
+
+    A pipeline whose stages hand off in one direction should not make the user
+    restate that by finding the next stage themselves and pressing its button:
+    the result names it, and the page both goes there and starts it.
+
+    Only the key and the words on the button, because that is all there is to
+    decide — the target reads the same page context it always reads, and it is
+    authorized on its own terms like any other run. Dropped with a warning
+    rather than raised on: naming a step that does not exist is a mistake in the
+    plugin, and losing the button is a smaller wrong than losing the result.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    key = str(raw.get("action") or "").strip()
+    if key not in action_keys:
+        log.warning("plugin result leads to action '%s', which does not exist", key)
+        return None
+
+    return {"action": key, "label": str(raw.get("label") or "Continue")}
+
+
 #: Result keys with a rendering of their own, kept out of the key/value detail.
-_RESERVED_RESULT_KEYS = ("message", "table", "sections", "context", "prompt", ARTIFACT_KEY)
+_RESERVED_RESULT_KEYS = (
+    "message", "table", "sections", "context", "prompt", "next", ARTIFACT_KEY,
+)
 
 
 def normalize_result(
@@ -1109,8 +1149,9 @@ def normalize_result(
     show.
 
     `context` is what the page should adopt as its own — the migration an import
-    just created — and `prompt` is a follow-up form to draw under the result,
-    both checked against what the plugin declared.
+    just created — `prompt` is a follow-up form to draw under the result, and
+    `next` is the action this one leads to, drawn as a button that goes there
+    and runs it. All three are checked against what the plugin declared.
 
     `download` is always present and always None here: only the router knows
     whether an artifact survived to be served, so it fills this in. Declaring
@@ -1124,6 +1165,7 @@ def normalize_result(
         "download": None,
         "context": {},
         "prompt": None,
+        "next": None,
     }
     if value is None:
         return empty
@@ -1157,6 +1199,11 @@ def normalize_result(
         "prompt": (
             _describe_prompt(value["prompt"], tuple(action_keys))
             if value.get("prompt") is not None
+            else None
+        ),
+        "next": (
+            _describe_next(value["next"], tuple(action_keys))
+            if value.get("next") is not None
             else None
         ),
     }

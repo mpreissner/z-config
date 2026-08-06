@@ -356,6 +356,11 @@ export interface PluginActionResult {
   context?: Record<string, string>;
   /** Set when the action paused on a decision. */
   prompt?: PluginPrompt | null;
+  /**
+   * The action this result leads to. Unlike a note's action, which only moves
+   * the page, this one moves it and starts the run.
+   */
+  next?: { action: string; label: string } | null;
 }
 
 export type PluginStepStatus = "pending" | "current" | "complete" | "blocked";
