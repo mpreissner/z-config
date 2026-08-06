@@ -43,8 +43,9 @@ _PLUGIN_GROUP   = "zs_config.plugins"
 _MANIFEST_REPO  = "mpreissner/zs-plugins"
 _MANIFEST_FILE  = "manifest.json"
 
-# Keyword used to filter feature branches per plugin package.
-# Branches under feature/ are included only if the keyword appears in the name.
+# Keyword used to filter work-in-progress branches per plugin package.
+# Branches under feature/ and fix/ are included only if the keyword appears in
+# the name — so a branch meant to be installed has to carry it.
 # Add an entry here whenever a new plugin is added to zs-plugins.
 _PLUGIN_BRANCH_FILTERS: dict[str, str] = {
     "palo-tools":          "pan",
@@ -158,11 +159,16 @@ def fetch_manifest(ref: Optional[str] = None) -> tuple[Optional[list], Optional[
 
 
 def fetch_plugin_branches(package_name: str) -> tuple[list[str], Optional[str]]:
-    """Fetch feature branches for a plugin from the zs-plugins repo.
+    """Fetch work-in-progress branches for a plugin from the zs-plugins repo.
 
-    Filters to branches starting with 'feature/' and containing the keyword
-    defined in _PLUGIN_BRANCH_FILTERS for the given package.  If no keyword is
-    defined the full feature/* list is returned unfiltered.
+    Filters to branches starting with 'feature/' or 'fix/' and containing the
+    keyword defined in _PLUGIN_BRANCH_FILTERS for the given package.  If no
+    keyword is defined the full list is returned unfiltered.
+
+    Both prefixes, because what is being offered here is a branch to test
+    against before it lands, and a fix waiting on confirmation is exactly that.
+    Leaving 'fix/' out meant a correction could only be tried by merging it
+    first, which is the wrong way round.
 
     Returns (sorted_branch_list, None) on success or ([], error_message) on failure.
     """
@@ -190,7 +196,8 @@ def fetch_plugin_branches(package_name: str) -> tuple[list[str], Optional[str]]:
             return [], "Repository not found."
         resp.raise_for_status()
 
-        branches = [b["name"] for b in resp.json() if b["name"].startswith("feature/")]
+        branches = [b["name"] for b in resp.json()
+                    if b["name"].startswith(("feature/", "fix/"))]
         if keyword:
             branches = [b for b in branches if keyword in b]
         return sorted(branches), None
