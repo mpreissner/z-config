@@ -6246,260 +6246,212 @@ type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid" | "sim";
 
 const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
 
-function SimulatorFlowDiagram({ result, networkCtx, setNetworkCtx }: {
+function SimulatorFlowDiagram({ result, results, networkCtx, setNetworkCtx, profileName }: {
   result: SimulationResult | null;
+  results: SimulationResultAll | null;
   networkCtx: "on" | "vpn" | "off";
   setNetworkCtx: (v: "on" | "vpn" | "off") => void;
+  profileName: string | null;
 }) {
-  const active = result
-    ? result.verdict === "ZCC_BYPASS" || result.verdict === "ZCC_INACTIVE" ? "bypass"
-      : result.verdict === "ZPA" ? "zpa"
-      : "zia"
-    : null;
-  const ziaBlocked = result ? result.verdict.includes("BLOCK") : false;
-  const zccInactive = result?.verdict === "ZCC_INACTIVE";
+  const verdict = result?.verdict ?? null;
+  const localActive = verdict === "ZCC_BYPASS" || verdict === "ZCC_INACTIVE";
+  const zpaActive   = verdict === "ZPA";
+  const ziaActive   = !!verdict && verdict.startsWith("ZIA_");
+  const ziaBlocked  = !!verdict && verdict.includes("BLOCK");
+  const zccInactive = verdict === "ZCC_INACTIVE";
+  const zccOn       = !!result && !zccInactive;
 
-  function branchColor(id: string) {
-    if (id === "bypass") return "#f97316";
-    if (id === "zpa")    return "#6366f1";
-    return ziaBlocked ? "#ef4444" : "#22c55e";
+  // Colour of the winning end-to-end path.
+  const pathColor = !verdict ? "#9ca3af"
+    : localActive ? "#f97316"
+    : zpaActive ? "#4f46e5"
+    : ziaBlocked ? "#ef4444" : "#22c55e";
+  const pathMk = !verdict ? "url(#sfd-gray)"
+    : localActive ? "url(#sfd-ora)"
+    : zpaActive ? "url(#sfd-ind)"
+    : ziaBlocked ? "url(#sfd-red)" : "url(#sfd-grn)";
+
+  const CTX = { on: "#7c3aed", vpn: "#4f46e5", off: "#0d9488" } as const;
+  const CTX_MK = { on: "url(#sfd-vio)", vpn: "url(#sfd-ind)", off: "url(#sfd-teal)" } as const;
+  const ctxColor = CTX[networkCtx];
+
+  const ctxY = networkCtx === "on" ? 50 : networkCtx === "vpn" ? 108 : 166;
+  const destY = localActive ? 166 : zpaActive ? 108 : ziaActive ? 50 : null;
+  const pacBypass = !!result?.zcc_bypass?.reason && /\bPAC\b/i.test(result.zcc_bypass.reason);
+
+  // Short per-context outcome label for the network-context node subtitles.
+  function shortVerdict(v?: string): { txt: string; color: string } {
+    switch (v) {
+      case "ZCC_BYPASS":   return { txt: "→ Direct (bypass)",   color: "#c2410c" };
+      case "ZCC_INACTIVE": return { txt: "→ Direct (inactive)", color: "#6b7280" };
+      case "ZPA":          return { txt: "→ ZPA private app",   color: "#4338ca" };
+      case "ZIA_ALLOW":    return { txt: "→ ZIA allow",         color: "#15803d" };
+      case "ZIA_BLOCK_FIREWALL":
+      case "ZIA_BLOCK_DNS":
+      case "ZIA_BLOCK_URL":
+      case "ZIA_BLOCK_CLOUDAPP": return { txt: "→ ZIA block", color: "#b91c1c" };
+      default: return { txt: "", color: "#9ca3af" };
+    }
   }
 
-  // ZIA engines for detail box — in evaluation order
-  const ziaEngines = [
-    { key: "zia_firewall",   label: "Firewall"  },
-    { key: "zia_dns",        label: "DNS"        },
-    { key: "zia_cloud_app",  label: "Cloud App" },
-    { key: "zia_url",        label: "URL Filter" },
-    { key: "zia_exceptions", label: "Exceptions" },
-    { key: "zia_ssl",        label: "SSL"        },
+  // Destination-node subtitles derived from the winning verdict.
+  const ziaSub = !ziaActive ? "Internet gateway"
+    : ziaBlocked
+      ? ((verdict === "ZIA_BLOCK_FIREWALL" ? result!.zia_firewall.rule_name
+          : verdict === "ZIA_BLOCK_DNS" ? result!.zia_dns.rule_name
+          : verdict === "ZIA_BLOCK_URL" ? result!.zia_url.rule_name
+          : result!.zia_cloud_app.rule_name) || "Blocked by ZIA")
+      : "Allowed through ZIA to internet";
+  const zpaSub = zpaActive ? (result!.zpa.rule_name || "App segment matched") : "ZPA-enrolled private access";
+  const localSub = localActive
+    ? (zccInactive ? "ZCC inactive on this network — direct" : (result!.zcc_bypass.rule_name || "Direct — tunnel bypass"))
+    : "PAC DIRECT / tunnel bypass";
+
+  const ctxNodes = [
+    { id: "on"  as const, y: 27, cy: 50,  fill: "#faf5ff", stroke: "#7c3aed", title: "On Trusted Network"  },
+    { id: "vpn" as const, y: 85, cy: 108, fill: "#eef2ff", stroke: "#4f46e5", title: "VPN Trusted Network" },
+    { id: "off" as const, y: 143, cy: 166, fill: "#f0fdfa", stroke: "#0d9488", title: "Off Trusted Network" },
   ];
-  function engineDotColor(key: string): string {
-    // ZIA not evaluated when traffic goes via ZPA or ZCC bypass
-    if (!result || active !== "zia") return "#e5e7eb";
-    const c = (result as unknown as Record<string, PolicyCheck>)[key];
-    if (!c?.matched) return "#e5e7eb";
-    const a = (c.action || "").toUpperCase();
-    if (["BLOCK","BLOCK_DROP","BLOCK_ICMP","BLOCK_RESET"].some(x => a.includes(x))) return "#ef4444";
-    return "#22c55e";
-  }
-
-  // Layout constants
-  const bH = 48, bGap = 60;
-  const bYs  = [10, 10+bH+bGap, 10+2*(bH+bGap)];
-  const bCYs = bYs.map(y => y + bH/2);
-  const uCY  = bCYs[1];
-
-  // Column X positions — spread wide so viewBox aspect ratio keeps height reasonable
-  const uX=10,  uW=90,  uH=50;
-  const rdX=120, rdW=160;
-  const rdY=bYs[0], rdH=bYs[2]+bH-bYs[0];
-  const rdCY=rdY+rdH/2;
-  const trunkX=292;
-  const bX=308, bW=130;
-  const detX=468;
-
-  // ZIA detail box height (6 engines × 20px + padding)
-  const ziaDetH = 6*20+22;
-  const ziaDetY = bCYs[2] - ziaDetH/2;
-  const detSmH  = bH;
-  const detW    = 230;
-
-  const svgH = Math.max(bYs[2]+bH, ziaDetY+ziaDetH) + 16;
-  const svgW  = detX + detW + 16;
-
-  const uY = uCY - uH/2;
-
-  // ZCC bypass detail text
-  const bypassRule = result?.zcc_bypass?.matched ? (result.zcc_bypass.rule_name || "Bypass rule matched") : null;
-  // ZPA detail text
-  const zpaSegment = result?.zpa?.matched ? (result.zpa.rule_name || "App segment matched") : null;
 
   return (
     <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white overflow-hidden select-none">
-      <svg viewBox={`0 0 ${svgW} ${svgH}`} xmlns="http://www.w3.org/2000/svg" style={{ display: "block", width: "100%" }}>
+      <svg viewBox="0 0 908 225" xmlns="http://www.w3.org/2000/svg" className="w-full" style={{ display: "block" }}>
         <defs>
-          <marker id="fd-gry" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
-          <marker id="fd-ora" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
-          <marker id="fd-ind" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#6366f1"/></marker>
-          <marker id="fd-grn" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#22c55e"/></marker>
-          <marker id="fd-red" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#ef4444"/></marker>
-          <marker id="fd-dk"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#6b7280"/></marker>
-          <filter id="fd-shd"><feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.08"/></filter>
-          <clipPath id="fd-det-clip"><rect x={detX+5} y="0" width={detW-10} height={svgH}/></clipPath>
+          <marker id="sfd-gray" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
+          <marker id="sfd-ora"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
+          <marker id="sfd-ind"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#4f46e5"/></marker>
+          <marker id="sfd-grn"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#22c55e"/></marker>
+          <marker id="sfd-red"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#ef4444"/></marker>
+          <marker id="sfd-vio"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#7c3aed"/></marker>
+          <marker id="sfd-teal" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#0d9488"/></marker>
+          <filter id="sfd-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.08"/></filter>
         </defs>
 
-        {/* ── User box ── */}
-        <g filter="url(#fd-shd)">
-          <rect x={uX} y={uY} width={uW} height={uH} rx="8" fill="#1f2937" stroke="#374151" strokeWidth="1.5"/>
+        {/* ── Left edges: Device → ZCC → junction → selected context ── */}
+        <line x1="108" y1="108" x2="186" y2="108" stroke={pathColor} strokeWidth="2" markerEnd={result ? pathMk : "url(#sfd-gray)"}/>
+        <line x1="336" y1="108" x2="358" y2="108" stroke={result ? pathColor : "#d1d5db"} strokeWidth="2"/>
+        <line x1="358" y1="50"  x2="358" y2="166" stroke="#e5e7eb" strokeWidth="2"/>
+        {ctxY !== 108 && (
+          <line x1="358" y1="108" x2="358" y2={ctxY} stroke={ctxColor} strokeWidth="2"/>
+        )}
+        <line x1="358" y1={ctxY} x2="385" y2={ctxY} stroke={ctxColor} strokeWidth="1.5" markerEnd={CTX_MK[networkCtx]}/>
+
+        {/* ── Right fork: gray structure + coloured winning path ── */}
+        <line x1="596" y1="50" x2="596" y2="166" stroke="#e5e7eb" strokeWidth="2"/>
+        {[50, 108, 166].map(y => (
+          <line key={y} x1="596" y1={y} x2="644" y2={y} stroke="#e5e7eb" strokeWidth="1.5" markerEnd="url(#sfd-gray)"/>
+        ))}
+        {destY !== null && (
+          <>
+            <line x1="566" y1={ctxY} x2="596" y2={ctxY} stroke={pathColor} strokeWidth="2"/>
+            {ctxY !== destY && <line x1="596" y1={ctxY} x2="596" y2={destY} stroke={pathColor} strokeWidth="2"/>}
+            <line x1="596" y1={destY} x2="644" y2={destY} stroke={pathColor} strokeWidth="2" markerEnd={pathMk}/>
+          </>
+        )}
+
+        {/* ── Node: Device ── */}
+        <g filter="url(#sfd-shadow)">
+          <rect x="8" y="86" width="100" height="44" rx="8" fill="white" stroke="#e5e7eb" strokeWidth="1.5"/>
         </g>
-        <rect x={uX+7} y={uY+8} width={16} height={11} rx="2" fill="none" stroke="#9ca3af" strokeWidth="1.2"/>
-        <line x1={uX+4} y1={uY+19} x2={uX+27} y2={uY+19} stroke="#9ca3af" strokeWidth="1.2"/>
-        <text x={uX+32} y={uY+17} fontSize="8.5" fontWeight="700" fill="white">User</text>
-        <text x={uX+32} y={uY+29} fontSize="7" fill="#9ca3af">Traffic</text>
-        {/* Arrow: User → Route Decision */}
-        <line x1={uX+uW} y1={uCY} x2={rdX} y2={uCY}
-          stroke={active ? branchColor(active) : "#6b7280"} strokeWidth={active ? 2 : 1.5}
-          markerEnd={active ? (active==="bypass"?"url(#fd-ora)":active==="zpa"?"url(#fd-ind)":active==="zia"&&ziaBlocked?"url(#fd-red)":"url(#fd-grn)") : "url(#fd-dk)"}/>
+        <rect x="16" y="95" width="18" height="12" rx="1.5" fill="none" stroke="#9ca3af" strokeWidth="1.3"/>
+        <line x1="13" y1="107" x2="37" y2="107" stroke="#9ca3af" strokeWidth="1.3"/>
+        <text x="40" y="102" fontSize="11" fontWeight="600" fill="#374151">Device</text>
+        <text x="40" y="115" fontSize="9" fill="#9ca3af">Endpoint</text>
 
-        {/* ── Route Decision box ── */}
-        <g filter="url(#fd-shd)">
-          <rect x={rdX} y={rdY} width={rdW} height={rdH} rx="8" fill="white"
-            stroke={active ? branchColor(active) : "#e5e7eb"} strokeWidth={active ? 2 : 1.5}/>
+        {/* ── Node: ZCC ── */}
+        <g filter="url(#sfd-shadow)">
+          <rect x="186" y="76" width="150" height="64" rx="8" fill="white" stroke="#93c5fd" strokeWidth="1.5"/>
         </g>
-        <text x={rdX+8} y={rdY+13} fontSize="7.5" fontWeight="700" fill="#374151">ZCC Policy</text>
-        <line x1={rdX+6} y1={rdY+18} x2={rdX+rdW-6} y2={rdY+18} stroke="#f3f4f6" strokeWidth="1"/>
+        <path d="M197 105 L197 92 L207 89 L217 92 L217 105 C217 111 207 114 207 114 C207 114 197 111 197 105Z"
+          fill="none" stroke="#3b82f6" strokeWidth="1.4"/>
+        <text x="224" y="96" fontSize="11" fontWeight="600" fill="#1d4ed8">ZCC</text>
+        <circle cx="326" cy="84" r="5" fill={!result ? "#d1d5db" : zccOn ? "#22c55e" : "#d1d5db"}/>
+        <text x="224" y="110" fontSize="8" fill="#9ca3af">{profileName || "All profiles"}</text>
 
-        {/* Network context buttons */}
-        {([
-          { id:"on",  label:"On Trusted Network",  color:"#7c3aed", bg:"#faf5ff" },
-          { id:"vpn", label:"VPN Trusted Network", color:"#4f46e5", bg:"#eef2ff" },
-          { id:"off", label:"Off Trusted Network", color:"#0d9488", bg:"#f0fdfa" },
-        ] as const).map((nc, i) => {
-          const ny = rdY + 22 + i * 28;
-          const isSelected = networkCtx === nc.id;
-          return (
-            <g key={nc.id} className="cursor-pointer" onClick={() => setNetworkCtx(nc.id)}>
-              <rect x={rdX+6} y={ny} width={rdW-12} height={22} rx="4"
-                fill={isSelected ? nc.bg : "white"}
-                stroke={isSelected ? nc.color : "#e5e7eb"}
-                strokeWidth={isSelected ? 1.5 : 1}/>
-              <circle cx={rdX+14} cy={ny+11} r="3.5" fill={isSelected ? nc.color : "#d1d5db"}/>
-              <text x={rdX+21} y={ny+15} fontSize="6.5" fontWeight={isSelected?"700":"400"}
-                fill={isSelected ? nc.color : "#9ca3af"} className="pointer-events-none">{nc.label}</text>
-            </g>
-          );
-        })}
-
-        <line x1={rdX+6} y1={rdY+112} x2={rdX+rdW-6} y2={rdY+112} stroke="#f3f4f6" strokeWidth="1"/>
-
-        {/* criteria rows */}
-        {([
-          { dot:"#f97316", label:"Bypass rule?", dest:"→ Bypass" },
-          { dot:"#6366f1", label:"App segment?", dest:"→ ZPA"    },
-          { dot:"#6b7280", label:"Default",      dest:"→ ZIA"    },
-        ]).map((row, i) => {
-          const remaining = rdH - 118;
-          const ry = rdY + 118 + i * remaining / 3;
-          const isActive = active === (["bypass","zpa","zia"][i]);
-          return (
-            <g key={i}>
-              <circle cx={rdX+10} cy={ry+5} r="4" fill={isActive ? row.dot : "#e5e7eb"}/>
-              <text x={rdX+18} y={ry+9} fontSize="6.5" fill={isActive?"#374151":"#9ca3af"}>{row.label}</text>
-              <text x={rdX+18} y={ry+19} fontSize="6" fontWeight="600" fill={isActive?row.dot:"#d1d5db"}>{row.dest}</text>
-            </g>
-          );
-        })}
-        {/* Arrow: Route Decision → trunk */}
-        <line x1={rdX+rdW} y1={rdCY} x2={trunkX} y2={rdCY}
-          stroke={active ? branchColor(active) : "#6b7280"} strokeWidth={active ? 2 : 1.5}/>
-
-        {/* ── Vertical trunk ── */}
-        <line x1={trunkX} y1={bCYs[0]} x2={trunkX} y2={bCYs[2]} stroke="#e5e7eb" strokeWidth="2"/>
-        {active && (() => {
-          const idx = ["bypass","zpa","zia"].indexOf(active);
-          const c = branchColor(active);
-          return <line x1={trunkX} y1={rdCY} x2={trunkX} y2={bCYs[idx]} stroke={c} strokeWidth="2"/>;
-        })()}
-        <circle cx={trunkX} cy={rdCY} r="3.5" fill="white"
-          stroke={active ? branchColor(active) : "#9ca3af"} strokeWidth="1.5"/>
-
-        {/* ── Branch boxes ── */}
-        {([
-          { id:"bypass", label:"ZCC Bypass", sub:"Tunnel exclusion", ab:"ZCC", color:"#f97316", fill:"#fff7ed", txt:"#9a3412" },
-          { id:"zpa",    label:"ZPA",        sub:"App segments",     ab:"ZPA", color:"#6366f1", fill:"#eef2ff", txt:"#3730a3" },
-          { id:"zia",    label:"ZIA",        sub:"Internet gateway", ab:"ZIA", color:"#374151", fill:"#f9fafb", txt:"#111827" },
-        ] as const).map((b, i) => {
-          const by=bYs[i], cy=bCYs[i], on=active===b.id;
-          const lc=on?branchColor(b.id):"#d1d5db";
-          const mk=on?(b.id==="bypass"?"url(#fd-ora)":b.id==="zpa"?"url(#fd-ind)":"url(#fd-dk)"):"url(#fd-gry)";
-          return (
-            <g key={b.id}>
-              <line x1={trunkX} y1={cy} x2={bX} y2={cy} stroke={lc} strokeWidth={on?2:1.5} markerEnd={mk}/>
-              <g filter="url(#fd-shd)">
-                <rect x={bX} y={by} width={bW} height={bH} rx="7"
-                  fill={on?b.fill:"white"} stroke={on?b.color:"#e5e7eb"} strokeWidth={on?2:1}/>
+        {/* ── 3 Network Context Nodes (translate +80) ── */}
+        <g transform="translate(80, 0)">
+          {ctxNodes.map(nc => {
+            const sel = networkCtx === nc.id;
+            const sv = results ? shortVerdict(results[nc.id]?.verdict) : { txt: "", color: "#9ca3af" };
+            return (
+              <g key={nc.id}>
+                <g filter="url(#sfd-shadow)" className="cursor-pointer" onClick={() => setNetworkCtx(nc.id)}>
+                  <rect x="314" y={nc.y} width="172" height="46" rx="7"
+                    fill={sel ? nc.fill : "white"} stroke={sel ? nc.stroke : "#e5e7eb"} strokeWidth={sel ? 2 : 1.5}/>
+                </g>
+                <text x="330" y={nc.cy - 4} fontSize="10" fontWeight="600"
+                  fill={sel ? nc.stroke : "#374151"} className="pointer-events-none">{nc.title}</text>
+                <text x="330" y={nc.cy + 10} fontSize="8"
+                  fill={sel ? sv.color : "#9ca3af"} className="pointer-events-none">{sv.txt || "Not evaluated"}</text>
               </g>
-              {on && <rect x={bX} y={by} width="4" height={bH} rx="2" fill={b.color}/>}
-              <circle cx={bX+18} cy={cy} r="11" fill={on?b.color:"#f3f4f6"}/>
-              <text x={bX+18} y={cy+4} fontSize="6" fontWeight="800" fill={on?"white":"#9ca3af"} textAnchor="middle">{b.ab}</text>
-              <text x={bX+35} y={by+15} fontSize="8.5" fontWeight="600" fill={on?b.txt:"#374151"}>{b.label}</text>
-              <text x={bX+35} y={by+27} fontSize="7" fill={on?b.txt:"#9ca3af"}>{b.sub}</text>
-            </g>
-          );
-        })}
+            );
+          })}
+        </g>
 
-        {/* ── Detail: ZCC Bypass → bypass rule ── */}
-        {(() => {
-          const by=bYs[0], cy=bCYs[0], on=active==="bypass";
-          const color="#f97316", fill=on?"#fff7ed":"white", stroke=on?color:"#e5e7eb";
-          return (
-            <g>
-              <line x1={bX+bW} y1={cy} x2={detX} y2={cy} stroke={on?color:"#d1d5db"} strokeWidth={on?2:1.5} markerEnd={on?"url(#fd-ora)":"url(#fd-gry)"}/>
-              <g filter="url(#fd-shd)">
-                <rect x={detX} y={by} width={detW} height={detSmH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
-              </g>
-              {on && <rect x={detX} y={by} width="4" height={detSmH} rx="2" fill={color}/>}
-              <text x={detX+10} y={by+14} fontSize="8" fontWeight="700" fill={on?"#9a3412":"#6b7280"}>
-                {zccInactive ? "ZCC Inactive" : "Direct"}
-              </text>
-              <text x={detX+10} y={by+27} fontSize="7" fill={on?"#c2410c":"#9ca3af"} clipPath="url(#fd-det-clip)">
-                {on ? (zccInactive ? "ZCC disabled on this network — traffic goes direct" : bypassRule || "No bypass rule matched") : "No bypass rule matched"}
-              </text>
-            </g>
-          );
-        })()}
+        {/* ── Destination nodes (translate +126) ── */}
+        <g transform="translate(126, 0)">
+          {/* ZIA Cloud */}
+          <g filter="url(#sfd-shadow)">
+            <rect x="524" y="26" width="240" height="48" rx="8"
+              fill={ziaActive ? (ziaBlocked ? "#fef2f2" : "#f0fdf4") : "white"}
+              stroke={ziaActive ? (ziaBlocked ? "#ef4444" : "#22c55e") : "#e5e7eb"}
+              strokeWidth={ziaActive ? 2 : 1.5}/>
+          </g>
+          <path d="M533 56 C530 56 529 53 531 50 C529 48 530 45 534 44 C534 40 539 37 544 39 C545 36 551 35 554 38 C559 36 564 40 562 45 C565 45 567 48 565 51 C566 54 564 57 561 57Z"
+            fill="none" stroke={ziaActive ? (ziaBlocked ? "#ef4444" : "#22c55e") : "#9ca3af"} strokeWidth="1.2" className="pointer-events-none"/>
+          <text x="571" y="42" fontSize="10" fontWeight="600" fill={ziaActive ? (ziaBlocked ? "#991b1b" : "#15803d") : "#6b7280"} className="pointer-events-none">ZIA Cloud</text>
+          <text x="571" y="57" fontSize="8.5" fill={ziaActive ? (ziaBlocked ? "#b91c1c" : "#166534") : "#9ca3af"} className="pointer-events-none">{ziaSub}</text>
+          {ziaActive && (
+            <>
+              <rect x="716" y="28" width="44" height="16" rx="4"
+                fill={ziaBlocked ? "#fee2e2" : "#dcfce7"} stroke={ziaBlocked ? "#ef4444" : "#22c55e"} strokeWidth="0.8"/>
+              <text x="738" y="39" fontSize="8" fontWeight="700" textAnchor="middle"
+                fill={ziaBlocked ? "#991b1b" : "#15803d"} className="pointer-events-none">{ziaBlocked ? "BLOCK" : "ALLOW"}</text>
+            </>
+          )}
 
-        {/* ── Detail: ZPA → app segment ── */}
-        {(() => {
-          const by=bYs[1], cy=bCYs[1], on=active==="zpa";
-          const color="#6366f1", fill=on?"#eef2ff":"white", stroke=on?color:"#e5e7eb";
-          return (
-            <g>
-              <line x1={bX+bW} y1={cy} x2={detX} y2={cy} stroke={on?color:"#d1d5db"} strokeWidth={on?2:1.5} markerEnd={on?"url(#fd-ind)":"url(#fd-gry)"}/>
-              <g filter="url(#fd-shd)">
-                <rect x={detX} y={by} width={detW} height={detSmH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
-              </g>
-              {on && <rect x={detX} y={by} width="4" height={detSmH} rx="2" fill={color}/>}
-              <text x={detX+10} y={by+14} fontSize="8" fontWeight="700" fill={on?"#3730a3":"#6b7280"}>App Segment</text>
-              <text x={detX+10} y={by+27} fontSize="7" fill={on?"#4338ca":"#9ca3af"} clipPath="url(#fd-det-clip)">
-                {on && zpaSegment ? zpaSegment : "No segment matched"}
-              </text>
-            </g>
-          );
-        })()}
+          {/* ZPA Private Apps */}
+          <g filter="url(#sfd-shadow)">
+            <rect x="524" y="84" width="240" height="48" rx="8"
+              fill={zpaActive ? "#eef2ff" : "white"}
+              stroke={zpaActive ? "#4f46e5" : "#e5e7eb"} strokeWidth={zpaActive ? 2 : 1.5}/>
+          </g>
+          <rect x="533" y="100" width="14" height="11" rx="2" fill="none" stroke={zpaActive ? "#4f46e5" : "#9ca3af"} strokeWidth="1.3"/>
+          <path d="M536 100 A4 4 0 0 1 544 100" fill="none" stroke={zpaActive ? "#4f46e5" : "#9ca3af"} strokeWidth="1.3"/>
+          <circle cx="540" cy="106" r="1.5" fill={zpaActive ? "#4f46e5" : "#9ca3af"}/>
+          <text x="554" y="102" fontSize="10" fontWeight="600" fill={zpaActive ? "#3730a3" : "#6b7280"} className="pointer-events-none">ZPA Private Apps</text>
+          <text x="554" y="117" fontSize="8.5" fill={zpaActive ? "#4338ca" : "#9ca3af"} className="pointer-events-none">{zpaSub}</text>
+          <rect x="726" y="86" width="34" height="15" rx="4" fill={zpaActive ? "#eef2ff" : "#f9fafb"} stroke={zpaActive ? "#a5b4fc" : "#e5e7eb"} strokeWidth="0.8"/>
+          <text x="743" y="96" fontSize="7.5" textAnchor="middle" fill={zpaActive ? "#4f46e5" : "#d1d5db"} className="pointer-events-none">{zpaActive ? "active" : "off"}</text>
 
-        {/* ── Detail: ZIA → engine dots ── */}
-        {(() => {
-          const cy=bCYs[2], on=active==="zia";
-          const color=ziaBlocked?"#ef4444":"#22c55e";
-          const fill=on?(ziaBlocked?"#fef2f2":"#f0fdf4"):"white";
-          const stroke=on?color:"#e5e7eb";
-          const mk=on?(ziaBlocked?"url(#fd-red)":"url(#fd-grn)"):"url(#fd-gry)";
-          return (
-            <g>
-              <line x1={bX+bW} y1={cy} x2={detX} y2={cy} stroke={on?color:"#d1d5db"} strokeWidth={on?2:1.5} markerEnd={mk}/>
-              <g filter="url(#fd-shd)">
-                <rect x={detX} y={ziaDetY} width={detW} height={ziaDetH} rx="7" fill={fill} stroke={stroke} strokeWidth={on?2:1}/>
-              </g>
-              {on && <rect x={detX} y={ziaDetY} width="4" height={ziaDetH} rx="2" fill={color}/>}
-              <text x={detX+10} y={ziaDetY+12} fontSize="8" fontWeight="700" fill={on?(ziaBlocked?"#991b1b":"#166534"):"#6b7280"}>
-                {on ? (ziaBlocked ? "Blocked" : "ZIA Allow") : "ZIA Policy"}
-              </text>
-              {ziaEngines.map((e, ei) => {
-                const ey = ziaDetY + 22 + ei * 20;
-                const dc = engineDotColor(e.key);
-                const matched = result ? !!(result as unknown as Record<string,PolicyCheck>)[e.key]?.matched : false;
-                return (
-                  <g key={e.key}>
-                    <circle cx={detX+14} cy={ey+4} r="4" fill={dc}/>
-                    <text x={detX+22} y={ey+8} fontSize="7.5" fill={matched?(on?color:"#374151"):"#9ca3af"}>{e.label}</text>
-                  </g>
-                );
-              })}
-            </g>
-          );
-        })()}
+          {/* Local / Direct */}
+          <g filter="url(#sfd-shadow)">
+            <rect x="524" y="142" width="240" height="48" rx="8"
+              fill={localActive ? "#fff7ed" : "white"}
+              stroke={localActive ? "#f97316" : "#e5e7eb"} strokeWidth={localActive ? 2 : 1.5}/>
+          </g>
+          <circle cx="538" cy="166" r="9" fill="none" stroke={localActive ? "#f97316" : "#9ca3af"} strokeWidth="1.3" className="pointer-events-none"/>
+          <ellipse cx="538" cy="166" rx="4.5" ry="9" fill="none" stroke={localActive ? "#f97316" : "#9ca3af"} strokeWidth="1" className="pointer-events-none"/>
+          <line x1="529" y1="166" x2="547" y2="166" stroke={localActive ? "#f97316" : "#9ca3af"} strokeWidth="1" className="pointer-events-none"/>
+          <text x="555" y="161" fontSize="10" fontWeight="600" fill={localActive ? "#c2410c" : "#6b7280"} className="pointer-events-none">Local / Direct</text>
+          <text x="555" y="175" fontSize="8" fill={localActive ? "#c2410c" : "#9ca3af"} className="pointer-events-none">{localSub}</text>
+          {localActive && pacBypass && (
+            <>
+              <rect x="730" y="144" width="30" height="16" rx="4" fill="#fef3c7" stroke="#fbbf24" strokeWidth="1"/>
+              <text x="745" y="155" fontSize="8" fontWeight="600" fill="#92400e" textAnchor="middle" className="pointer-events-none">PAC</text>
+            </>
+          )}
+        </g>
+
+        {/* ── Legend ── */}
+        <circle cx="10" cy="217" r="4" fill={zccOn ? "#22c55e" : "#d1d5db"}/>
+        <text x="18" y="221" fontSize="8.5" fill="#9ca3af">{zccInactive ? "ZCC inactive" : "Active"}</text>
+        <line x1="80" y1="217" x2="94" y2="217" stroke="#22c55e" strokeWidth="2"/>
+        <text x="98" y="221" fontSize="8.5" fill="#9ca3af">ZIA tunnel</text>
+        <line x1="164" y1="217" x2="178" y2="217" stroke="#f97316" strokeWidth="2"/>
+        <text x="182" y="221" fontSize="8.5" fill="#9ca3af">PAC DIRECT</text>
+        <line x1="250" y1="217" x2="264" y2="217" stroke="#4f46e5" strokeWidth="2"/>
+        <text x="268" y="221" fontSize="8.5" fill="#9ca3af">ZPA</text>
       </svg>
     </div>
   );
@@ -6910,7 +6862,7 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
 
       {/* ── Right: diagram ── */}
       <div className="space-y-3" style={{ width: "65%" }}>
-        <SimulatorFlowDiagram result={result} networkCtx={networkCtx} setNetworkCtx={setNetworkCtx} />
+        <SimulatorFlowDiagram result={result} results={results} networkCtx={networkCtx} setNetworkCtx={setNetworkCtx} profileName={zccProfile || null} />
         {result && <SimulatorFlowDetail result={result} />}
       </div>
       </div>
