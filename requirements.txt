@@ -2,7 +2,7 @@
 requests>=2.33.0
 
 # Zscaler SDK
-zscaler-sdk-python>=1.9.20
+zscaler-sdk-python>=1.9.39
 
 # Rich TUI (CLI)
 rich>=13.7.0
@@ -19,3 +19,6 @@ cryptography>=46.0.6
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.0.0
+
+# SAML 2.0 service provider (SSO). Requires libxmlsec1 system libraries.
+python3-saml>=1.16.0

@@ -7,16 +7,19 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.3.3
+## What's New — v3.4.1
 
-> **v3.3.3 is the current release.** See the [changelog](CHANGELOG.md) for full details.
+> **v3.4.1 is the current release** — a maintenance release. See the [changelog](CHANGELOG.md) for full details.
 
-- **Scheduled import tasks** — new Import task type runs ZIA/ZPA/ZCC imports on a cron schedule without any diff or push. Keeps the local DB cache current with no mutation risk.
-- **One-to-many sync fan-out** — sync tasks now support a list of target tenants. Each runs the full import→diff→push pipeline independently with its own run history row.
-- **Scheduled tasks web UI** — full v2 support in the browser: task-type toggle (Sync / Import), fan-out multi-tenant picker, import product checkboxes, and expandable per-target run history in the Monitoring tab.
-- **LP traffic split in the ZCC traffic profile visualizer** — Listening Proxy forwarding profiles now render a split-path diagram (web traffic → LP → ZIA; non-web → Local/Direct).
-- **PAC bypass parsing** — the traffic profile visualizer fetches and parses the active PAC file, surfacing `DIRECT` rules categorized as RFC 1918 ranges, domains, or other in the Local/Direct detail panel.
-- **Traffic simulator** — destination + port input evaluates the active forwarding and bypass rules and returns an outcome with a per-rule explanation list, updating live as network context changes.
+- **ZIA snapshot restore in the web UI** — previously TUI-only, and with the TUI deprecating in v4.0.0 it needed a home. Preview what a restore would change, then run it with streaming progress: push creates and updates, delete resources absent from the snapshot, activate, and verify.
+- **SCIM group handling completed** — v3.4.0 provisioned groups from your IdP without giving you anywhere to manage them. Groups now have their own admin page for membership, role mapping, and tenant grants, and you can create one locally alongside the ones SCIM owns.
+- **Group role mappings no longer overwrite an account's own role** — a locally created admin who joined a user-mapped group was silently demoted. A mapped role now adds to the roles an account may assume; only one is live at a time, and accounts holding more than one get a picker in the sidebar.
+- **Fixes** — the last-admin guard now counts admins who hold the role through a group, scheduled import tasks create correctly on pre-3.3.3 databases, and secret-looking values are redacted from push error text.
+
+Internal plumbing: the ZPA write engine moved out of the restore handler into a service, staged resource rows are implemented behind the existing `source` and `candidate_status` columns, and the extension points gained a declarative contract.
+
+> [!NOTE]
+> **Heads-up:** the TUI will be formally deprecated in **v4.0.0**. It keeps working throughout 3.x, but new features are web-only from here — see [TUI Features](#tui-features).
 
 ---
 
@@ -83,13 +86,29 @@ You will be prompted to set a permanent password on first login.
 
 ### HTTPS / SSL (optional)
 
-SSL can be configured two ways:
+SSL can be configured three ways:
 
 **At deploy time** — `deploy.sh` prompts for a cert and key file path, copies them into `./certs/`, and writes `ZS_SSL_DOMAIN` to `.env`. The container starts directly in HTTPS mode on port 8443; HTTP on port 8000 redirects automatically. To rotate a cert, replace the files in `./certs/` and restart the container.
 
-**Via the web UI** — go to Admin → Settings → SSL Certificate after first login. Upload a PEM or PFX bundle; the container restarts automatically.
+**Upload via the web UI** — go to Admin → Settings → SSL Certificate after first login. Upload a PEM or PFX bundle; the container restarts automatically.
+
+**Let's Encrypt via the web UI** — choose the Let's Encrypt source in the same section to issue a publicly trusted certificate. Only the **dns-01** challenge is supported, since http-01 and tls-alpn-01 require Let's Encrypt to reach the instance inbound; an internal deployment cannot satisfy them. **Cloudflare** is the DNS provider — supply an API token scoped to edit DNS for the zone, and it is stored encrypted and never logged or returned. Issue against the staging directory first to check the setup without spending production rate limit. Renewal is checked daily and runs inside 30 days of expiry; a renewal keeps the same origin, so it does not invalidate registered passkeys.
 
 For server deployments (non-localhost), set `BIND_ADDR=0.0.0.0` in `.env` so port 8443 is reachable from outside the host. `deploy.sh` prompts for this automatically.
+
+### Behind a reverse proxy or ZPA Browser Access
+
+The app can be published on 443 through a reverse proxy or ZPA Browser Access. Forward `X-Forwarded-Proto` so HSTS is emitted correctly, and set `ZS_PUBLIC_ORIGIN` in `.env` to the origin users actually type:
+
+```
+ZS_PUBLIC_ORIGIN=https://zs-config.example.com
+```
+
+That origin drives the HTTP→HTTPS redirect target and the WebAuthn origin. Without it the redirect follows the port the request arrived on, but the WebAuthn origin falls back to `https://<domain>:8443` — which will not match a browser that reached you on 443, so passkey registration and sign-in fail origin validation. Set it before enrolling security keys: the origin is re-read at every container start, and changing it invalidates existing passkey registrations.
+
+The hostname in the redirect is always the certificate-validated domain from the database, never the `Host` header, so a proxy cannot turn it into an open redirect.
+
+If a WAF sits in front of the proxy, allow `PUT`, `PATCH`, and `DELETE` (used by token revocation, group mapping, and SCIM updates) and the `application/scim+json` media type that RFC 7644 mandates. A blocked request never reaches the app, so it surfaces as a button that does nothing with no trace in the application log.
 
 ### Upgrade from v1.x TUI
 
@@ -108,7 +127,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save/restore), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save, restore with preview, delete), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals
@@ -123,7 +142,7 @@ All Devices (list/search/OTP), Trusted Networks, Forwarding Profiles, App Profil
 Users, Groups (with members), API Clients (details and secrets)
 
 **Admin (admin-only)**
-User Management, Tenant Entitlements, System Settings (session timeout, idle timeout, login attempts, audit retention, IdP, SSL mode), Clear Data, Import Database
+User Management, Groups (local or SCIM-provisioned; membership, role mapping, tenant grants), Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database
 
 ---
 
@@ -133,10 +152,16 @@ User Management, Tenant Entitlements, System Settings (session timeout, idle tim
 - All tokens invalidated immediately on container restart
 - Idle timeout: configurable inactivity threshold (default 15 min) triggers a 2-minute warning, then automatic logout
 - Hardware security key support (WebAuthn/passkey) — register a YubiKey or platform authenticator from your profile page
+- Roles are effective, not fixed — an account may hold several (its own plus any its groups map), but only one is live at a time. Sessions start at least privilege and switch explicitly, and a role revoked mid-session is not honoured from a stale token
+- Single sign-on via SAML 2.0 or OIDC — the JWT is handed off through a one-time code, so it never appears in the URL bar, browser history, or `Referer` headers
+- IdP secrets (OIDC client secret, SAML SP private key, Cloudflare API token, SCIM bearer tokens) are write-only: encrypted at rest and never returned by the API. SCIM tokens are stored sha256-hashed and compared in constant time; the plaintext is shown once at creation
 
 ---
 
 ## TUI Features
+
+> [!IMPORTANT]
+> **The TUI will be formally deprecated in v4.0.0.** New functionality is being built for the web interface only, and the TUI is no longer kept at feature parity — SSO, SCIM provisioning, Let's Encrypt issuance, SSL configuration, and scheduled tasks are web-only. Nothing is removed in the 3.x line and the TUI keeps working; both interfaces call the same service layer, so no backend capability is exclusive to the terminal. If a TUI-only workflow matters to you, please open an issue.
 
 - **ZPA** — App Connectors & Groups (full CRUD), Application Segments (list/search/enable-disable/bulk-create from CSV), Segment Groups, Access Policy (export/import-sync from CSV with dry-run and bulk reorder), PRA Portals & Consoles, Service Edges, Certificate Management, Identity & Directory (SAML, SCIM), reference exports
 - **ZIA** — URL Filtering, URL Categories, Security Policy (allowlist/denylist), URL Lookup, Firewall Policy (L4/DNS/IPS — list/search/enable-disable/CSV export/sync), SSL Inspection, Traffic Forwarding, Locations, Users, DLP Engines/Dictionaries/Web Rules, Cloud App Control (full CRUD), Config Snapshots, Apply Snapshot from Another Tenant, IP Group Management (full CRUD + CSV), Activation
@@ -166,9 +191,9 @@ zs-config/
 | Layer | Key files |
 |---|---|
 | API clients | `lib/zpa_client.py`, `zia_client.py`, `zcc_client.py`, `zdx_client.py`, `zidentity_client.py` |
-| DB models | `db/models.py` — TenantConfig, ZPA/ZIA/ZCCResource, RestorePoint, AuditLog, SyncLog, WebUser, Setting |
-| Services | `services/zia_push_service.py`, `zpa_policy_service.py`, `zia_import_service.py`, etc. |
-| API routers | `api/routers/` — tenants, zia, zpa, zcc, zdx, zid, auth, admin, system |
+| DB models | `db/models.py` — TenantConfig, ZPA/ZIA/ZCCResource, RestorePoint, AuditLog, SyncLog, WebUser, UserGroup, Setting, ScimToken |
+| Services | `services/zia_push_service.py`, `zpa_policy_service.py`, `zia_import_service.py`, `sso_service.py`, `ssl_service.py`, `acme_service.py`, etc. |
+| API routers | `api/routers/` — tenants, zia, zpa, zcc, zdx, zid, auth, sso, scim, ssl, admin, system |
 | Frontend | `web/src/pages/` — TenantWorkspacePage, AdminSettingsPage, ScheduledTasksPage, AuditPage |
 
 ---
@@ -221,6 +246,7 @@ zs-config
 | `ZSCALER_DB_URL` | `~/.local/share/zs-config/zscaler.db` | SQLAlchemy DB URL |
 | `ZSCALER_DB_PATH` | — | Path to the SQLite `.db` file; key file stored in the same directory |
 | `ZS_TUI_ONLY` | `0` | Set to `1` to launch the TUI directly instead of the web server |
+| `ZS_PUBLIC_ORIGIN` | `https://<ssl-domain>:8443` | External origin (`https://host[:port]`) when published through a reverse proxy or ZPA Browser Access. Overrides the WebAuthn origin and the HTTPS redirect target, which otherwise assume direct access on 8443 |
 | `REQUESTS_CA_BUNDLE` | system trust store | PEM CA bundle for outbound HTTPS |
 
 **SSL inspection:** zs-config uses the OS native trust store via `truststore` (macOS Keychain, Windows Certificate Store), so corporate inspection certs are trusted without any configuration. Alternatively, drop a PEM file at `~/.config/zs-config/ca-bundle.pem`.
@@ -238,6 +264,16 @@ zs-config
 **Workaround:** Enable Smart Browser Isolation manually in the ZIA admin console after pushing a baseline. All other `browser_control_settings` fields push correctly.
 
 **Rule ordering:** When the source tenant has Smart Isolation enabled (rule at order 1) but the target does not, the push renumbers remaining SSL Inspection rules to fill the gap.
+
+---
+
+### ZCC — not available on GovCloud
+
+**Symptom:** ZCC does not appear for a GovCloud tenant in the web UI or the TUI, and scheduled import tasks reject ZCC for a GovCloud source.
+
+**Cause:** The FedRAMP OneAPI gateways (`api.zscalergov.us` / `.net`) authenticate a token but have no upstream for the `/zcc` service. Every path under `/zcc` answers HTTP 500 with a zero-length body, valid path or not, while `/zia` and `/zpa` behave normally.
+
+**Workaround:** None — ZCC is deliberately hidden rather than offered as operations that can only fail. ZIA and ZPA are unaffected on GovCloud.
 
 ---
 

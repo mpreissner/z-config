@@ -159,6 +159,12 @@ function EditModal({ user, onClose }: { user: AdminUser; onClose: () => void }) 
   return (
     <Modal title={`Edit: ${user.username}`} onClose={onClose}>
       <form onSubmit={handleSubmit} className="space-y-3">
+        {user.scim_managed && (
+          <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+            This account is provisioned by your identity provider. Changes made here are
+            overwritten on the next SCIM sync — edit the user in the IdP instead.
+          </div>
+        )}
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">Email (optional)</label>
           <input
@@ -379,6 +385,14 @@ export default function AdminUsersPage() {
                     {u.id === currentUser?.sub && (
                       <span className="ml-2 text-xs text-gray-400">(you)</span>
                     )}
+                    {u.scim_managed && (
+                      <span
+                        title="Provisioned by your identity provider"
+                        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700"
+                      >
+                        SCIM
+                      </span>
+                    )}
                   </td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm text-gray-500">{u.email ?? "-"}</td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm">
@@ -389,6 +403,18 @@ export default function AdminUsersPage() {
                     }`}>
                       {u.role}
                     </span>
+                    {/* A group can offer a role this account does not hold in
+                        its own right. It is not live until the user assumes
+                        it, so it reads as "+ admin", not as a second badge. */}
+                    {(u.available_roles ?? []).filter((r) => r !== u.role).map((r) => (
+                      <span
+                        key={r}
+                        title="Available through a group — the user must assume it"
+                        className="ml-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-white text-gray-500 border border-dashed border-gray-300"
+                      >
+                        + {r}
+                      </span>
+                    ))}
                   </td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm">
                     {u.is_active ? (

@@ -1,5 +1,11 @@
 import { apiFetch, getAuthHeaders } from "./client";
 
+/** FedRAMP tier, named as zscaler-sdk-python names it in its `cloud` config key.
+ *  "gov" is FedRAMP High (.net domains), "govus" is FedRAMP Moderate (.us). */
+export type GovCloudTier = "gov" | "govus";
+
+export const DEFAULT_GOV_TIER: GovCloudTier = "govus";
+
 export interface Tenant {
   id: number;
   name: string;
@@ -9,6 +15,8 @@ export interface Tenant {
   client_id: string;
   has_credentials: boolean;
   govcloud: boolean;
+  /** FedRAMP tier for GovCloud tenants; null for commercial. */
+  gov_cloud_tier: GovCloudTier | null;
   zpa_customer_id: string | null;
   zia_tenant_id: string | null;
   zia_cloud: string | null;
@@ -24,7 +32,7 @@ export interface TenantCreate {
   client_id: string;
   client_secret: string;
   govcloud?: boolean;
-  govcloud_oneapi_url?: string;
+  gov_cloud_tier?: GovCloudTier;
   zpa_customer_id?: string;
   notes?: string;
 }
@@ -34,7 +42,7 @@ export interface TenantUpdate {
   client_id?: string;
   client_secret?: string;
   govcloud?: boolean;
-  govcloud_oneapi_url?: string;
+  gov_cloud_tier?: GovCloudTier;
   zpa_customer_id?: string;
   notes?: string;
 }
@@ -48,6 +56,9 @@ export interface ImportResult {
 
 export interface JobRef {
   job_id: string;
+  /** True when an import for this tenant/product was already running and the
+   *  existing job was returned instead of starting a second one. */
+  already_running?: boolean;
 }
 
 export const fetchTenants = (): Promise<Tenant[]> =>

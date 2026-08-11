@@ -104,23 +104,16 @@ def has_repo_access(token: str) -> tuple[bool, str]:
 # Device Flow authentication
 # ---------------------------------------------------------------------------
 
-def authenticate(
-    progress_callback: Optional[Callable[[str], None]] = None,
-) -> tuple[bool, str]:
-    """Run GitHub Device Flow OAuth.
+def start_device_flow() -> tuple[Optional[dict], Optional[str]]:
+    """Request device + user codes from GitHub.
 
-    Opens the browser, displays the user code, and polls until the user
-    completes authentication (including MFA) in the browser.
+    Returns ({device_code, user_code, verification_uri, expires_in, interval}, None)
+    on success or (None, error_message) on failure.
 
-    Args:
-        progress_callback: called with status strings during the polling loop.
-
-    Returns:
-        (True, "Authenticated as <username>") on success.
-        (False, error_message) on failure.
+    Split from authenticate() so a caller with no browser of its own — the web
+    API, which has to hand the user code to a remote browser and poll from a
+    background thread — can drive the same flow.
     """
-
-    # ── Step 1: request device + user codes ─────────────────────────────
     try:
         resp = requests.post(
             _DEVICE_URL,
@@ -131,31 +124,37 @@ def authenticate(
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        return False, f"Failed to reach GitHub: {exc}"
+        return None, f"Failed to reach GitHub: {exc}"
 
     device_code = data.get("device_code")
     user_code   = data.get("user_code")
-    verify_url  = data.get("verification_uri", "https://github.com/login/device")
-    expires_in  = int(data.get("expires_in", 900))
-    interval    = int(data.get("interval", 5))
 
     if not device_code or not user_code:
-        return False, f"Unexpected response from GitHub: {data}"
+        return None, f"Unexpected response from GitHub: {data}"
 
-    if progress_callback:
-        progress_callback(
-            f"Opening browser...\n"
-            f"  URL  : {verify_url}\n"
-            f"  Code : {user_code}\n"
-            f"  (enter the code in the browser if it doesn't auto-fill)"
-        )
+    return {
+        "device_code":      device_code,
+        "user_code":        user_code,
+        "verification_uri": data.get("verification_uri", "https://github.com/login/device"),
+        "expires_in":       int(data.get("expires_in", 900)),
+        "interval":         int(data.get("interval", 5)),
+    }, None
 
-    try:
-        webbrowser.open(verify_url)
-    except Exception:
-        pass  # not fatal — user can navigate manually
 
-    # ── Step 2: poll until authorised or expired ─────────────────────────
+def poll_device_flow(
+    device_code: str,
+    expires_in: int = 900,
+    interval: int = 5,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> tuple[bool, str]:
+    """Poll GitHub until the user authorises the device code, then store the token.
+
+    Blocks for up to expires_in seconds — callers that cannot block belong on a
+    background thread.  The token is saved here only after the repo access check
+    passes, so a successful login always means the plugin repo is reachable.
+
+    Returns (True, "Authenticated as <username>") or (False, error_message).
+    """
     deadline = time.monotonic() + expires_in
     while time.monotonic() < deadline:
         time.sleep(interval)
@@ -210,3 +209,43 @@ def authenticate(
             return False, f"GitHub error: {error}"
 
     return False, "Authorization timed out."
+
+
+def authenticate(
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> tuple[bool, str]:
+    """Run GitHub Device Flow OAuth against a browser on this machine.
+
+    Opens the browser, displays the user code, and polls until the user
+    completes authentication (including MFA) in the browser.
+
+    Args:
+        progress_callback: called with status strings during the polling loop.
+
+    Returns:
+        (True, "Authenticated as <username>") on success.
+        (False, error_message) on failure.
+    """
+    flow, error = start_device_flow()
+    if error:
+        return False, error
+
+    if progress_callback:
+        progress_callback(
+            f"Opening browser...\n"
+            f"  URL  : {flow['verification_uri']}\n"
+            f"  Code : {flow['user_code']}\n"
+            f"  (enter the code in the browser if it doesn't auto-fill)"
+        )
+
+    try:
+        webbrowser.open(flow["verification_uri"])
+    except Exception:
+        pass  # not fatal — user can navigate manually
+
+    return poll_device_flow(
+        flow["device_code"],
+        expires_in=flow["expires_in"],
+        interval=flow["interval"],
+        progress_callback=progress_callback,
+    )

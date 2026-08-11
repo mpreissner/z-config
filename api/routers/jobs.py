@@ -1,13 +1,33 @@
 import asyncio
 import json
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from api.jobs import store
-from api.dependencies import require_auth_sse, require_auth
+from api.jobs import store, import_job_key
+from api.dependencies import AuthUser, require_auth_sse, require_auth, check_tenant_access
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["Jobs"])
+
+
+@router.get("/active/import")
+def active_import_job(
+    tenant_id: int = Query(...),
+    product: Literal["ZIA", "ZPA", "ZCC"] = Query(...),
+    user: AuthUser = Depends(require_auth),
+):
+    """Return the in-flight import job for a tenant/product, if one is running.
+
+    Lets a client that closed the import modal reattach to the job it started
+    (or one started in another tab) instead of kicking off a duplicate import.
+    """
+    if user.role != "admin":
+        check_tenant_access(tenant_id, user)
+    job_id = store.find_active(import_job_key(tenant_id, product))
+    if not job_id:
+        return {"job_id": None}
+    return store.describe(job_id) or {"job_id": None}
 
 
 @router.get("/{job_id}/events")

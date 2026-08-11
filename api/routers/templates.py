@@ -108,13 +108,14 @@ def _get_import_client(tenant_id: int):
         client_id = tenant.client_id
         client_secret = decrypt_secret(tenant.client_secret_enc) if tenant.client_secret_enc else None
         govcloud = tenant.govcloud
+        gov_tier = tenant.gov_cloud_tier
         oneapi_base_url = tenant.oneapi_base_url
         zidentity_base_url = tenant.zidentity_base_url
 
     if not client_secret:
         raise HTTPException(status_code=503, detail="Tenant credentials not configured")
 
-    auth = ZscalerAuth(zidentity_base_url, client_id, client_secret, govcloud=govcloud)
+    auth = ZscalerAuth(zidentity_base_url, client_id, client_secret, govcloud=govcloud, gov_tier=gov_tier)
     client = ZIAClient(auth, oneapi_base_url)
     return client, tenant_name
 

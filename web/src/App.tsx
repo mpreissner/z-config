@@ -1,3 +1,4 @@
+import { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import Layout from "./components/Layout";
@@ -9,13 +10,25 @@ import ScheduledTasksPage from "./pages/ScheduledTasksPage";
 import TemplatesPage from "./pages/TemplatesPage";
 import LoginPage from "./pages/LoginPage";
 import ChangePasswordPage from "./pages/ChangePasswordPage";
+import SsoCompletePage from "./pages/SsoCompletePage";
 import MfaEnrollModal from "./components/MfaEnrollModal";
 import AdminUsersPage from "./pages/AdminUsersPage";
+import AdminGroupsPage from "./pages/AdminGroupsPage";
 import AdminEntitlementsPage from "./pages/AdminEntitlementsPage";
 import AdminSettingsPage from "./pages/AdminSettingsPage";
 import ProfilePage from "./pages/ProfilePage";
+import LoadingSpinner from "./components/LoadingSpinner";
 import { useAuth } from "./context/AuthContext";
+import { usePluginManagerProbe } from "./hooks/usePluginManager";
 import { fetchTenants } from "./api/tenants";
+
+// Split out so the manager's code lands in its own chunk instead of the bundle
+// every deployment serves.
+const AdminPluginsPage = lazy(() => import("./pages/AdminPluginsPage"));
+
+// Likewise for the page entitled users see. A deployment with no plugins never
+// fetches either chunk.
+const PluginPage = lazy(() => import("./pages/PluginPage"));
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const { isAdmin } = useAuth();
@@ -32,6 +45,23 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <Navigate to="/tenants" replace />;
 }
 
+/** Anyone but an admin: running a plugin is the user role's job, and the API
+ *  answers an admin session 404 here. Sent to the dashboard rather than shown
+ *  that 404 — an admin who lands here wanted the role switcher. */
+function PluginUserRoute({ children }: { children: React.ReactNode }) {
+  const { isAdmin } = useAuth();
+  if (isAdmin) return <Navigate to="/tenants" replace />;
+  return <>{children}</>;
+}
+
+/** Admin, and only on a deployment that registered the plugin API. */
+function PluginRoute({ children }: { children: React.ReactNode }) {
+  const { available, resolved } = usePluginManagerProbe();
+  if (!resolved) return <LoadingSpinner />;
+  if (!available) return <Navigate to="/tenants" replace />;
+  return <>{children}</>;
+}
+
 function RootRedirect() {
   return <Navigate to="/tenants" replace />;
 }
@@ -45,6 +75,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/change-password" element={<ChangePasswordPage />} />
+        <Route path="/sso/complete" element={<SsoCompletePage />} />
         <Route
           path="/*"
           element={
@@ -75,12 +106,39 @@ export default function App() {
                     element={<AdminRoute><AdminUsersPage /></AdminRoute>}
                   />
                   <Route
+                    path="/admin/groups"
+                    element={<AdminRoute><AdminGroupsPage /></AdminRoute>}
+                  />
+                  <Route
                     path="/admin/entitlements"
                     element={<AdminRoute><AdminEntitlementsPage /></AdminRoute>}
                   />
                   <Route
                     path="/admin/settings"
                     element={<AdminRoute><AdminSettingsPage /></AdminRoute>}
+                  />
+                  {/* One route for every plugin. Entitlement is enforced by
+                      the API — a package the account was not granted answers
+                      404 exactly as an uninstalled one does. */}
+                  <Route
+                    path="/plugins/:pkg"
+                    element={
+                      <PluginUserRoute>
+                        <Suspense fallback={<LoadingSpinner />}>
+                          <PluginPage />
+                        </Suspense>
+                      </PluginUserRoute>
+                    }
+                  />
+                  <Route
+                    path="/admin/plugins"
+                    element={
+                      <PluginRoute>
+                        <Suspense fallback={<LoadingSpinner />}>
+                          <AdminPluginsPage />
+                        </Suspense>
+                      </PluginRoute>
+                    }
                   />
                 </Routes>
               </Layout>

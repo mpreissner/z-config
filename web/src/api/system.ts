@@ -6,7 +6,6 @@ export interface SystemInfo {
   db_path: string;
   plugin_dir: string | null;
   idle_timeout_minutes: number;
-  govcloud_enabled: boolean;
 }
 
 export interface HealthStatus {
@@ -22,8 +21,27 @@ export interface SystemSettings {
   audit_log_retention_days: number;
   idp_enabled: boolean;
   idp_provider: string;
+  idp_auto_provision: boolean;
+  idp_default_role: string;
+  idp_group_claim: string;
   idp_issuer_url: string;
   idp_client_id: string;
+  /** Read-only marker — the secret itself is never returned. */
+  idp_client_secret_set: boolean;
+  idp_scopes: string;
+  saml_idp_metadata_xml: string;
+  saml_idp_metadata_url: string;
+  saml_sp_entity_id: string;
+  saml_sp_cert: string;
+  /** Read-only marker — the key itself is never returned. */
+  saml_sp_key_set: boolean;
+  sso_base_url: string;
+  /**
+   * Write-only. Absent from GET responses; send "" to leave the stored value
+   * alone or "__CLEAR__" to wipe it.
+   */
+  idp_client_secret?: string;
+  saml_sp_key?: string;
   ssl_mode: string;
   ssl_domain: string;
   encryption_algorithm: string;

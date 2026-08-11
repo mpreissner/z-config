@@ -61,7 +61,6 @@ class ZPAClient:
         auth: ZscalerAuth,
         customer_id: str,
         oneapi_base_url: str = "https://api.zsapi.net",
-        govcloud_cloud: Optional[str] = None,
     ):
         self.auth = auth
         self.customer_id = customer_id
@@ -71,8 +70,10 @@ class ZPAClient:
             "vanityDomain": auth.vanity_domain,
             "customerId": customer_id,
         }
-        if govcloud_cloud:
-            sdk_config["cloud"] = govcloud_cloud
+        # GovCloud: the SDK resolves the ZIdentity token host, the OneAPI
+        # gateway and the ZPA config host from this single key.
+        if auth.sdk_cloud:
+            sdk_config["cloud"] = auth.sdk_cloud
         self._sdk = ZscalerClient(sdk_config)
 
     # ------------------------------------------------------------------

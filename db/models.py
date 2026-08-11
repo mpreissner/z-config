@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text,
+    UniqueConstraint, text,
+)
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -33,6 +36,7 @@ class TenantConfig(Base):
     last_validation_error = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     govcloud = Column(Boolean, default=False, nullable=False)
+    gov_cloud_tier = Column(String(16), nullable=True)      # 'gov' (FedRAMP High) | 'govus' (FedRAMP Moderate)
     zpa_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     zia_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
     zcc_disabled_resources = Column(JSON, nullable=True)   # resource types auto-disabled after 401
@@ -386,6 +390,12 @@ class User(Base):
     force_password_change = Column(Boolean, nullable=False, default=False)
     sso_provider          = Column(String(64), nullable=True)
     sso_subject           = Column(String(512), nullable=True)
+    # SCIM-provisioned accounts. scim_managed marks the IdP as the source of
+    # truth, which the admin UI honours by disabling local username/role edits.
+    scim_external_id      = Column(String(512), nullable=True)
+    scim_managed          = Column(Boolean, nullable=False, default=False)
+    given_name            = Column(String(255), nullable=True)
+    family_name           = Column(String(255), nullable=True)
     is_active             = Column(Boolean, nullable=False, default=True)
     mfa_required          = Column(Boolean, nullable=False, default=False)
     created_at            = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -444,6 +454,158 @@ class UserTenantEntitlement(Base):
 
     def __repr__(self) -> str:
         return f"<UserTenantEntitlement user_id={self.user_id} tenant_id={self.tenant_id}>"
+
+
+class ScimToken(Base):
+    """Bearer credential an IdP presents to the inbound SCIM 2.0 server.
+
+    Only the sha256 hash is stored; the plaintext is shown once at generation
+    and is unrecoverable afterwards. token_prefix exists purely so the admin UI
+    can tell two tokens apart in a list.
+    """
+
+    __tablename__ = "scim_tokens"
+
+    id           = Column(Integer, primary_key=True)
+    label        = Column(String(255), nullable=True)
+    token_hash   = Column(String(64), nullable=False, unique=True)
+    token_prefix = Column(String(16), nullable=False)
+    created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by   = Column(String(255), nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    is_active    = Column(Boolean, nullable=False, default=True)
+
+    def __repr__(self) -> str:
+        return f"<ScimToken label={self.label!r} prefix={self.token_prefix!r}>"
+
+
+class UserGroup(Base):
+    """A group of users, whether the IdP pushed it or an admin created it here.
+
+    Both kinds live in one table because everything downstream — role mapping,
+    tenant entitlements, plugin grants — cares only that a set of users can be
+    named, not where the name came from. `source` records the origin so the
+    SCIM server can replace what it owns without disturbing groups it never
+    created, and so the UI can refuse to rename a group the IdP will rename back.
+
+    mapped_role offers a zs-config role to everyone in the group. It is never
+    written into User.role — it adds to what a member may assume, alongside the
+    role the account holds in its own right, and only one of them is active in
+    any given session (see services/role_service.py). Null means the group
+    offers no role at all.
+    """
+
+    __tablename__ = "user_groups"
+
+    id           = Column(Integer, primary_key=True)
+    external_id  = Column(String(512), nullable=True)   # the IdP's id; null for local groups
+    display_name = Column(String(255), nullable=False, unique=True)
+    description  = Column(Text, nullable=True)
+    mapped_role  = Column(String(32), nullable=True)    # 'admin' | 'user' | None
+    source       = Column(String(16), nullable=False, default="local")   # 'scim' | 'local'
+    created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<UserGroup display_name={self.display_name!r} source={self.source!r}>"
+
+
+class UserGroupMember(Base):
+    """Join between a group and a user.
+
+    `source` is per membership, not per group: an IdP push replaces only the
+    rows it owns, so a member an admin added by hand to a SCIM group survives
+    the next sync instead of disappearing without anyone having removed them.
+    """
+
+    __tablename__ = "user_group_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_user_group_member"),
+    )
+
+    id       = Column(Integer, primary_key=True)
+    group_id = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=False)
+    user_id  = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    source   = Column(String(16), nullable=False, default="local")   # 'scim' | 'local'
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    added_by = Column(String(255), nullable=True)
+
+    group = relationship("UserGroup", backref="members")
+    user  = relationship("User", backref="group_memberships")
+
+    def __repr__(self) -> str:
+        return f"<UserGroupMember group_id={self.group_id} user_id={self.user_id}>"
+
+
+class GroupTenantEntitlement(Base):
+    """Maps a group to the tenants its members may access.
+
+    The counterpart to UserTenantEntitlement, and the reason groups exist at
+    all: entitling a group once beats entitling every member and then
+    remembering to entitle the next joiner. A user sees the union of their own
+    grants and those of every group they belong to; admins bypass both tables.
+    """
+
+    __tablename__ = "group_tenant_entitlements"
+    __table_args__ = (
+        UniqueConstraint("group_id", "tenant_id", name="uq_group_tenant"),
+    )
+
+    id         = Column(Integer, primary_key=True)
+    group_id   = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=False)
+    tenant_id  = Column(Integer, ForeignKey("tenant_configs.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    granted_by = Column(String(255), nullable=True)
+
+    group  = relationship("UserGroup", backref="tenant_entitlements")
+    tenant = relationship("TenantConfig", backref="group_entitlements")
+
+    def __repr__(self) -> str:
+        return f"<GroupTenantEntitlement group_id={self.group_id} tenant_id={self.tenant_id}>"
+
+
+class PluginEntitlement(Base):
+    """Grants one user, or one group's members, the use of an installed plugin.
+
+    Installing a plugin does not expose it: on a shared deployment the admin
+    who installed it still has to name who may use it. A row here is that
+    grant. Exactly one of user_id / group_id is set — a user grant names an
+    account directly, a group grant follows group membership, so an account
+    that leaves the group loses the plugin without anyone editing this table.
+
+    package is the distribution name rather than a foreign key, because
+    plugins live in site-packages and have no row of their own. Grants
+    therefore survive a reinstall or version switch; only a purging
+    uninstall clears them.
+
+    Admins bypass this table, exactly as they bypass UserTenantEntitlement.
+    """
+
+    __tablename__ = "plugin_entitlements"
+    __table_args__ = (
+        # SQLite treats NULLs as distinct in a UNIQUE constraint, so a plain
+        # UniqueConstraint("package", "user_id", "group_id") would let the same
+        # user grant be inserted twice. Two partial indexes constrain the half
+        # of each row that is actually populated.
+        Index("uq_plugin_ent_user", "package", "user_id",
+              unique=True, sqlite_where=text("user_id IS NOT NULL")),
+        Index("uq_plugin_ent_group", "package", "group_id",
+              unique=True, sqlite_where=text("group_id IS NOT NULL")),
+    )
+
+    id         = Column(Integer, primary_key=True)
+    package    = Column(String(255), nullable=False)
+    user_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    group_id   = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"), nullable=True)
+    granted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    granted_by = Column(String(255), nullable=True)
+
+    user  = relationship("User", backref="plugin_entitlements")
+    group = relationship("UserGroup", backref="plugin_entitlements")
+
+    def __repr__(self) -> str:
+        subject = f"user_id={self.user_id}" if self.user_id else f"group_id={self.group_id}"
+        return f"<PluginEntitlement package={self.package!r} {subject}>"
 
 
 class ScheduledTask(Base):
@@ -511,9 +673,14 @@ class TaskRunHistory(Base):
     target_tenant_id = Column(Integer, nullable=True)
 
     task     = relationship("ScheduledTask", back_populates="runs")
+    # Two sides of one self-referential FK. Without back_populates SQLAlchemy
+    # treats them as independent relationships that both write parent_run_id,
+    # so a change through one side is not reflected in the other until expiry.
     parent   = relationship("TaskRunHistory", remote_side=[id],
-                            foreign_keys=[parent_run_id])
-    children = relationship("TaskRunHistory", foreign_keys=[parent_run_id])
+                            foreign_keys=[parent_run_id],
+                            back_populates="children")
+    children = relationship("TaskRunHistory", foreign_keys=[parent_run_id],
+                            back_populates="parent")
 
     def __repr__(self) -> str:
         return f"<TaskRunHistory task_id={self.task_id} status={self.status!r}>"

@@ -1,12 +1,18 @@
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch, setTokenGetter, setOnUnauthorized } from "../api/client";
+import { assumeRole as assumeRoleApi } from "../api/auth";
 import { fetchSystemInfo } from "../api/system";
 import { useIdleLogout } from "../hooks/useIdleLogout";
 
 interface TokenPayload {
   sub: number;
   username: string;
+  /** The role this session is holding. Only one is ever live. */
   role: string;
+  /** Everything the account may assume — its own role plus any its groups
+   *  offer. There is no /auth/me, so this rides in the JWT itself. */
+  roles?: string[];
   fpc: boolean;
   mfa_enroll?: boolean;
   exp: number;
@@ -24,6 +30,11 @@ interface AuthContextValue extends AuthState {
   isAdmin: boolean;
   mfaEnrollRequired: boolean;
   logoutReason: string | null;
+  /** The role in force right now. */
+  activeRole: string | null;
+  /** Every role the account may switch to, least privileged first. */
+  availableRoles: string[];
+  assumeRole: (role: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -82,18 +93,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [idleMinutes, setIdleMinutes] = useState(15);
   const [logoutReason, setLogoutReason] = useState<string | null>(null);
 
+  // An expired token 401s every in-flight query at once and each one calls
+  // back here. Without this latch that becomes one logout POST per query —
+  // six round trips on the dashboard, which is slow enough to notice over a
+  // proxied WAN path. Cleared on the next successful login.
+  const loggingOut = useRef(false);
+
   const login = useCallback((token: string) => {
     const user = parseToken(token);
+    loggingOut.current = false;
     setTokenGetter(() => token);
     setAuth({ token, user });
     setLogoutReason(null);
   }, []);
 
   const logout = useCallback(async () => {
+    if (loggingOut.current) return;
+    loggingOut.current = true;
     setTokenGetter(() => null);
     try { await apiFetch("/api/v1/auth/logout", { method: "POST" }); } catch { /* ignore */ }
     setAuth({ token: null, user: null });
   }, []);
+
+  // Switching role changes what the account is allowed to see, so everything
+  // already fetched under the old one is suspect — clear rather than refetch,
+  // so nothing an admin loaded can flash on screen while holding `user`.
+  const queryClient = useQueryClient();
+  const assumeRole = useCallback(async (role: string) => {
+    const r = await assumeRoleApi(role);
+    login(r.access_token);
+    queryClient.clear();
+  }, [login, queryClient]);
 
   const logoutWithReason = useCallback(async (reason: string) => {
     setLogoutReason(reason);
@@ -145,6 +175,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAdmin: auth.user?.role === "admin",
       mfaEnrollRequired: !!auth.user?.mfa_enroll,
       logoutReason,
+      activeRole: auth.user?.role ?? null,
+      // Tokens minted before roles existed carry only the active one.
+      availableRoles: auth.user?.roles ?? (auth.user ? [auth.user.role] : []),
+      assumeRole,
     }}>
       {children}
       {showWarning && (

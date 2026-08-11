@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -45,6 +46,10 @@ from api.routers import templates as templates_router
 from api.routers import ssl as ssl_router
 from api.routers import terraform as terraform_router
 from api.routers import simulator as simulator_router
+from api.routers import sso as sso_router
+from api.routers import scim as scim_router
+from api.routers import groups as groups_router
+from api.routers import plugins as plugins_router
 from api.auth_utils import decode_token
 from api.dependencies import require_auth, AuthUser
 from cli.banner import VERSION
@@ -105,6 +110,33 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         next_run_time=datetime.now() + timedelta(hours=24),
     )
+
+    def _renew_certificate() -> None:
+        """Daily Let's Encrypt renewal check.
+
+        Restarts the process on success because uvicorn reads the certificate
+        once at startup; the container's restart policy brings it straight back.
+        """
+        import os
+        import signal
+        from services.acme_service import renew_if_due
+
+        try:
+            renewed = renew_if_due()
+        except Exception as exc:
+            print(f"[zs-config] Certificate renewal check failed: {exc}", flush=True)
+            return
+        if renewed:
+            print("[zs-config] Certificate renewed — restarting to load it.", flush=True)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    _update_scheduler.add_job(
+        _renew_certificate,
+        IntervalTrigger(hours=24),
+        id="letsencrypt_renew_daily",
+        replace_existing=True,
+        next_run_time=datetime.now() + timedelta(minutes=10),
+    )
     _update_scheduler.start()
 
     yield
@@ -114,13 +146,18 @@ async def lifespan(app: FastAPI):
 
 
 class HSTSMiddleware(BaseHTTPMiddleware):
-    """Add Strict-Transport-Security on HTTPS responses (port 8443 only).
+    """Add Strict-Transport-Security on HTTPS responses.
+
     Tells browsers to go directly to HTTPS on future visits, skipping the
-    HTTP→HTTPS redirect on port 8000 entirely."""
+    HTTP→HTTPS redirect on port 8000 entirely. Keyed off the scheme rather
+    than the port: behind a reverse proxy or ZPA Browser Access the browser
+    reaches us on 443, so a port==8443 test would never fire for exactly the
+    users who most need the header."""
 
     async def dispatch(self, request, call_next):
         response = await call_next(request)
-        if request.url.port == 8443:
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+        if (forwarded or request.url.scheme) == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
@@ -185,6 +222,11 @@ app.add_middleware(HSTSMiddleware)
 app.add_middleware(MfaEnrollMiddleware)
 app.add_middleware(ForcePasswordChangeMiddleware)
 
+# Compress responses. On a LAN this is invisible, but the JS bundle is ~650 KB
+# and users reaching the app through ZPA Browser Access pay for every byte over
+# a proxied WAN path — gzip cuts the cold-load payload by roughly 70%.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # Allow the future GUI (any origin in dev, lock down in production)
 app.add_middleware(
     CORSMiddleware,
@@ -204,11 +246,28 @@ app.include_router(ssl_router.router)
 app.include_router(auth_router.router)
 app.include_router(tenants_router.router)
 app.include_router(admin_router.router)
+app.include_router(groups_router.router)
 app.include_router(jobs_router.router)
 app.include_router(scheduled_tasks_router.router)
 app.include_router(templates_router.router)
 app.include_router(terraform_router.router)
 app.include_router(simulator_router.router)
+app.include_router(sso_router.router)
+# Registered only where the deployment asks for it (plugins_router.MANAGER_ENV).
+# Left out, /api/v1/plugins/* is not a route at all: it falls through to the SPA
+# catch-all like any unknown address, so the manager leaves no trace in the API
+# or in /docs for a deployment that does not run plugins.
+if plugins_router.manager_enabled():
+    app.include_router(plugins_router.router)
+# Mounted at its own /scim/v2 root — provisioning clients expect that path and
+# authenticate with an opaque bearer token rather than a session JWT.
+app.include_router(scim_router.router)
+
+
+@app.exception_handler(scim_router.ScimError)
+async def _scim_error_handler(request, exc: scim_router.ScimError):
+    """SCIM clients parse the SCIM error envelope, not FastAPI's {"detail": …}."""
+    return exc.response()
 
 
 @app.get("/health", tags=["System"])
