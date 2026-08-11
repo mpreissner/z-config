@@ -11,11 +11,15 @@ Limitations (inherent to offline evaluation):
     evaluated as if the scope constraint is met (worst-case / most-permissive
     read).  Pass user context in the future to be more precise.
   - Rule order is respected; the first matching ENABLED rule wins.
+  - ZCC PAC DIRECT rules are evaluated against the PAC script captured at import
+    time (pac_file.pacContent). If the content isn't cached, we fall back to a
+    live fetch of the PAC URL (treated as trusted, like the ZIA url_lookup below).
 """
 
 import fnmatch
 import ipaddress
 import re
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -787,7 +791,14 @@ def _url_in_category(hostname: str, cat_cfg: Dict) -> bool:
     return False
 
 
-def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> PolicyCheck:
+def _eval_zia_url(
+    tenant_id: int, dest: str, port: int, protocol: str,
+    user_name: Optional[str] = None,
+    dept_name: Optional[str] = None,
+    group_name: Optional[str] = None,
+    location_name: Optional[str] = None,
+    live_cats: Optional[List[str]] = None,
+) -> PolicyCheck:
     check = PolicyCheck(engine="ZIA URL Filter")
 
     if _is_ip(dest):
@@ -809,7 +820,12 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
     enabled = [r for r in rules if (r.raw_config or {}).get("state") == "ENABLED"]
     enabled.sort(key=lambda r: (r.raw_config or {}).get("order", 9999))
 
-    predefined_rules: List[str] = []
+    predefined_rules: List[str] = []   # rules skipped because they use predefined categories (no live lookup)
+    scoped_rules: List[str] = []       # rules carrying user/dept/group/location scope
+    has_identity = any([user_name, dept_name, group_name, location_name])
+    # Live-resolved URL classifications (from ZIA url_lookup) let us match predefined
+    # categories offline-plus-one-call, just like the DNS engine.
+    live_set = {c.upper() for c in (live_cats or [])}
 
     for rule in enabled:
         cfg = rule.raw_config or {}
@@ -821,6 +837,22 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
                 if not any(p.startswith(proto_upper) for p in rule_protos):
                     continue
 
+        # Identity / location scope — permissive when no input, precise when provided.
+        r_users: List[Dict] = cfg.get("users", [])
+        r_depts: List[Dict] = cfg.get("departments", [])
+        r_groups: List[Dict] = cfg.get("groups", [])
+        r_locs: List[Dict] = cfg.get("locations", [])
+        if r_users or r_depts or r_groups or r_locs:
+            scoped_rules.append(cfg.get("name", "Unknown Rule"))
+        if r_users and user_name and not _name_in_list(user_name, r_users):
+            continue
+        if r_depts and dept_name and not _name_in_list(dept_name, r_depts):
+            continue
+        if r_groups and group_name and not _name_in_list(group_name, r_groups):
+            continue
+        if r_locs and location_name and not _name_in_list(location_name, r_locs):
+            continue
+
         rule_cats = cfg.get("url_categories", [])
         if not rule_cats:
             # No category constraint — wildcard rule
@@ -831,17 +863,25 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
             break
 
         matched_cat = None
+        matched_via_live = False
         has_predefined = False
         for cat_id in rule_cats:
-            cat_cfg = categories.get(str(cat_id))
-            if cat_cfg is None:
-                continue
-            if cat_cfg.get("custom_category"):
+            cid = str(cat_id)
+            cat_cfg = categories.get(cid)
+            if cat_cfg and cat_cfg.get("custom_category"):
+                # Custom category — resolve against its stored URL list offline.
                 if _url_in_category(hostname, cat_cfg):
-                    matched_cat = cat_cfg.get("configured_name") or cat_id
+                    matched_cat = cat_cfg.get("configured_name") or cid
+                    break
+                continue
+            # Predefined category (resolved as non-custom, or a bare predefined name).
+            if live_cats is not None:
+                if cid.upper() in live_set:
+                    matched_cat = cid
+                    matched_via_live = True
                     break
             else:
-                # Predefined category — can't evaluate offline
+                # No live lookup available — can't evaluate this predefined category.
                 has_predefined = True
 
         if matched_cat:
@@ -849,22 +889,42 @@ def _eval_zia_url(tenant_id: int, dest: str, port: int, protocol: str) -> Policy
             check.rule_name = cfg.get("name", "Unknown Rule")
             check.action = cfg.get("action", "ALLOW")
             check.category = matched_cat
-            check.reason = f'Matched URL filter rule "{check.rule_name}" via category "{matched_cat}"'
+            via = "live category" if matched_via_live else "category"
+            check.reason = f'Matched URL filter rule "{check.rule_name}" via {via} "{matched_cat}"'
             break
 
         if has_predefined:
             predefined_rules.append(cfg.get("name", "Unknown Rule"))
 
-    if not check.matched:
-        if predefined_rules:
-            check.reason = "No custom URL category matched this hostname"
+    def _fmt(names: List[str]) -> str:
+        return ", ".join(f'"{n}"' for n in names[:5]) + (f" +{len(names)-5} more" if len(names) > 5 else "")
+
+    # Predefined-category rules that couldn't be resolved offline — surface even on a match,
+    # since one of them could be the real winner ahead of the matched rule.
+    if predefined_rules:
+        if check.matched:
             check.caveats.append(
-                f"Rules with predefined categories cannot be evaluated offline: "
-                + ", ".join(f'"{r}"' for r in predefined_rules[:5])
-                + (f" +{len(predefined_rules)-5} more" if len(predefined_rules) > 5 else "")
+                "Higher-priority rules using predefined URL categories were skipped offline "
+                "(a live category lookup may change this result): " + _fmt(predefined_rules)
             )
         else:
-            check.reason = "No URL filter rule matched this hostname"
+            check.caveats.append(
+                "Rules using predefined URL categories cannot be evaluated offline: " + _fmt(predefined_rules)
+            )
+
+    # Scoped rules evaluated permissively because no identity context was supplied.
+    if scoped_rules and not has_identity:
+        check.caveats.append(
+            "URL rules scoped to users/departments/groups/locations were evaluated permissively — "
+            "provide identity context (user/department/group/location) for a precise result: "
+            + _fmt(scoped_rules)
+        )
+
+    if not check.matched:
+        check.reason = (
+            "No custom URL category matched this hostname" if predefined_rules
+            else "No URL filter rule matched this hostname"
+        )
 
     return check
 
@@ -1071,6 +1131,267 @@ def _eval_security_exceptions(tenant_id: int, dest: str) -> PolicyCheck:
 
 
 # ---------------------------------------------------------------------------
+# ZCC PAC DIRECT-rule evaluation
+# ---------------------------------------------------------------------------
+#
+# These mirror the regex heuristics in api/routers/zcc.py._fetch_pac_bypasses
+# (which enumerates a PAC file's DIRECT rules for the traffic-profile
+# visualizer) but instead evaluate a concrete destination against them.
+
+_PAC_RFC1918_MAP = {
+    "10": "10.0.0.0/8",
+    "127": "127.0.0.0/8",
+    r"192\.168": "192.168.0.0/16",
+    r"172\.1[6789]": "172.16.0.0/12",
+    r"172\.2[0-9]": "172.16.0.0/12",
+    r"172\.3[01]": "172.16.0.0/12",
+    r"169\.254": "169.254.0.0/16",
+    r"192\.88\.99": "192.88.99.0/24",
+}
+
+
+def _mask_to_prefix(mask: str) -> int:
+    try:
+        return sum(bin(int(p)).count("1") for p in mask.split("."))
+    except Exception:
+        return 0
+
+
+def _fetch_pac_content(pac_url: Optional[str], timeout: int = 4) -> Optional[str]:
+    """Fetch a PAC file's contents. Returns None on any failure.
+
+    PAC URLs originate from Zscaler cloud configuration and are treated as
+    trusted, mirroring api/routers/zcc.py._fetch_pac_bypasses.
+    """
+    if not pac_url or not pac_url.startswith("http"):
+        return None
+    try:
+        req = urllib.request.Request(pac_url, headers={"User-Agent": "zs-config/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _collect_pac_arrays(content_nc: str) -> tuple:
+    """Parse JS host-pattern arrays from PAC source.
+
+    Handles the common real-world pattern where bypass hosts are declared in
+    arrays and combined with [].concat(...):
+        var bypassX = ["a.com", "*.b.com"];
+        var bypassAll = [].concat(bypassX, bypassY);
+
+    Returns (literal_arrays, resolved_arrays) where literal_arrays maps each
+    directly-declared array name to its string patterns, and resolved_arrays
+    additionally maps every [].concat(...) name to the union of its members.
+    """
+    literal: Dict[str, List[str]] = {}
+    # var NAME = [ ...quoted strings... ];  (body has no ']'; spans newlines)
+    decl_re = re.compile(r"var\s+(\w+)\s*=\s*\[([^\]]*)\]\s*;")
+    for m in decl_re.finditer(content_nc):
+        name, body = m.group(1), m.group(2)
+        literal[name] = [s for s in re.findall(r'"([^"]*)"', body) if s]
+
+    resolved: Dict[str, List[str]] = dict(literal)
+    # var NAME = [].concat( a, b, c );  (args are bare identifiers)
+    concat_re = re.compile(r"var\s+(\w+)\s*=\s*\[\]\s*\.concat\s*\(([^)]*)\)")
+    for m in concat_re.finditer(content_nc):
+        name, args = m.group(1), m.group(2)
+        combined: List[str] = []
+        for ref in re.findall(r"[A-Za-z_]\w*", args):
+            combined.extend(literal.get(ref, []))
+        resolved[name] = combined
+    return literal, resolved
+
+
+def _pac_direct_match(
+    content: str, dest: str, port: int, protocol: str
+) -> Optional[Dict[str, str]]:
+    """Evaluate a destination against a PAC file's DIRECT (bypass) rules.
+
+    Returns {"rule": ..., "detail": ...} for the first DIRECT rule the
+    destination satisfies, or None. Only uncommented lines are considered.
+    """
+    if not content:
+        return None
+
+    content_nc = re.sub(r"//[^\n]*", "", content)
+    hostname = _strip_url(dest)
+    dest_is_ip = _is_ip(dest)
+
+    # ── 1. RFC1918 / private-IP regex variable → DIRECT ──────────────────────
+    if dest_is_ip:
+        var_regex_re = re.compile(r"var\s+(\w+)\s*=\s*/([^/\n]{10,})/[gimy]*\s*;")
+        for m in var_regex_re.finditer(content_nc):
+            varname, regex_body = m.group(1), m.group(2)
+            if not re.search(r"\b(192|172|10|127|169)\b", regex_body):
+                continue
+            test_re = re.compile(rf"\b{re.escape(varname)}\.test\s*\(")
+            near_direct = any(
+                "DIRECT" in content_nc[tm.start(): min(len(content_nc), tm.end() + 400)]
+                for tm in test_re.finditer(content_nc)
+            )
+            if not near_direct:
+                continue
+            for pat, cidr in _PAC_RFC1918_MAP.items():
+                if pat in regex_body and _ip_in_cidr(dest, cidr):
+                    return {"rule": f"RFC1918 private IP ({cidr})",
+                            "detail": "PAC private-IP regex → DIRECT"}
+
+    # ── 2. isInNet(x, "ip", "mask") → DIRECT ─────────────────────────────────
+    if dest_is_ip:
+        innet_re = re.compile(r'isInNet\s*\([^,)]+,\s*"([0-9.]+)"\s*,\s*"([0-9.]+)"\s*\)')
+        for m in innet_re.finditer(content_nc):
+            ip, mask = m.group(1), m.group(2)
+            ctx = content_nc[m.start(): min(len(content_nc), m.end() + 300)]
+            if "DIRECT" not in ctx:
+                continue
+            cidr = f"{ip}/{_mask_to_prefix(mask)}"
+            if _ip_in_cidr(dest, cidr):
+                return {"rule": f"isInNet {cidr}", "detail": "PAC isInNet → DIRECT"}
+
+    # ── 3. Explicit host == "..." → DIRECT ───────────────────────────────────
+    host_eq_re = re.compile(r'host\s*==\s*"([^"]+)"')
+    for m in host_eq_re.finditer(content_nc):
+        h = _strip_url(m.group(1))
+        ctx = content_nc[m.start(): min(len(content_nc), m.end() + 200)]
+        if "DIRECT" in ctx and hostname == h:
+            return {"rule": f'host == "{m.group(1)}"', "detail": "PAC host match → DIRECT"}
+
+    # ── 4. shExpMatch(host, "pattern") → DIRECT ──────────────────────────────
+    shexp_re = re.compile(r'shExpMatch\s*\(\s*host\s*,\s*"([^"]+)"\s*\)')
+    for m in shexp_re.finditer(content_nc):
+        pattern = m.group(1)
+        if "example" in pattern.lower():
+            continue
+        ctx = content_nc[m.start(): min(len(content_nc), m.end() + 200)]
+        if "DIRECT" in ctx and _hostname_matches(hostname, pattern):
+            return {"rule": f'shExpMatch "{pattern}"', "detail": "PAC shExpMatch → DIRECT"}
+
+    # ── 4b. Array-based shExpMatch host lists → DIRECT ────────────────────────
+    # PACs commonly loop a bypass array against the host, e.g.:
+    #   for (i...) if (shExpMatch(h, bypassAllHosts[i])) return "DIRECT";
+    # Resolve the looped array (through [].concat) to its patterns and test each.
+    literal_arrays, resolved_arrays = _collect_pac_arrays(content_nc)
+    loop_re = re.compile(r'shExpMatch\s*\([^,]+,\s*(\w+)\s*\[')
+    for m in loop_re.finditer(content_nc):
+        arrvar = m.group(1)
+        ctx = content_nc[m.start(): min(len(content_nc), m.end() + 300)]
+        if "DIRECT" not in ctx:
+            continue
+        for pat in resolved_arrays.get(arrvar, []):
+            if _hostname_matches(hostname, pat):
+                src = next((n for n, pats in literal_arrays.items() if pat in pats), arrvar)
+                return {"rule": f'shExpMatch list "{pat}" ({src})',
+                        "detail": "PAC array bypass → DIRECT"}
+
+    # ── 5. isPlainHostName → DIRECT ──────────────────────────────────────────
+    if not dest_is_ip and "." not in hostname:
+        for m in re.finditer(r"isPlainHostName\s*\(", content_nc):
+            ctx = content_nc[m.start(): min(len(content_nc), m.end() + 300)]
+            if "DIRECT" in ctx:
+                return {"rule": "Plain hostname (unqualified)",
+                        "detail": "PAC isPlainHostName → DIRECT"}
+
+    # ── 6. Non-HTTP/S protocols → DIRECT ──────────────────────────────────────
+    if protocol.upper() not in ("HTTP", "HTTPS", "SSL", "TLS"):
+        if re.search(r"url\.substring.*!=.*https?.*DIRECT", content_nc, re.DOTALL):
+            return {"rule": f"Non-HTTP/S protocol ({protocol})",
+                    "detail": "PAC protocol check → DIRECT"}
+
+    return None
+
+
+def _cached_pac_content(tenant_id: int, pac_url: str, session) -> Optional[str]:
+    """Return the imported pac_content for a PAC URL, or None if not cached.
+
+    Joins on the ZIA pac_file resource whose pacUrl matches the ZCC profile's
+    PAC URL. Requires a prior ZIA import with content capture (see
+    zia_client.list_pac_files_with_content).
+    """
+    if not pac_url:
+        return None
+    rows = session.query(ZIAResource).filter_by(
+        tenant_id=tenant_id, resource_type="pac_file", is_deleted=False
+    ).all()
+    for r in rows:
+        cfg = r.raw_config or {}
+        if cfg.get("pacUrl") == pac_url and cfg.get("pacContent"):
+            return cfg.get("pacContent")
+    return None
+
+
+def _eval_pac_bypass(
+    tenant_id: int, dest: str, port: int, protocol: str, zcc_profile: Optional[str]
+) -> Optional[PolicyCheck]:
+    """Check whether the destination is sent DIRECT by the active ZCC PAC file.
+
+    Resolves both the forwarding-profile PAC URL and the app-profile PAC URL
+    (mirroring api/routers/zcc.py get_traffic_profile). Prefers PAC content
+    captured in the local cache (imported pac_file resources) and falls back to a
+    live fetch only when the content isn't cached. Returns a BYPASS PolicyCheck on
+    the first DIRECT match, or None when no profile is selected, no PAC applies,
+    or nothing matches.
+    """
+    if not zcc_profile:
+        return None
+
+    with get_session() as s:
+        policies = s.query(ZCCResource).filter_by(
+            tenant_id=tenant_id, resource_type="web_policy", is_deleted=False
+        ).all()
+        raw_policy = None
+        for p in policies:
+            if (p.raw_config or {}).get("name") == zcc_profile:
+                raw_policy = p.raw_config or {}
+                break
+        if raw_policy is None:
+            return None
+        raw_fp = _resolve_forwarding_profile(tenant_id, zcc_profile, s)
+
+        app_pac_url = raw_policy.get("pac_url") or raw_policy.get("pacUrl") or None
+        fp_pac_url = None
+        if raw_fp:
+            actions = (raw_fp.get("forwardingProfileActions")
+                       or raw_fp.get("forwarding_profile_actions") or [])
+            if actions and isinstance(actions[0], dict):
+                spd = (actions[0].get("systemProxyData")
+                       or actions[0].get("system_proxy_data") or {})
+                fp_pac_url = (spd.get("pacURL") or spd.get("pac_u_r_l")
+                              or spd.get("pac_url") or None)
+
+        # (pac_url, label, cached_content) — resolve cache inside the session.
+        sources = [
+            (url, label, _cached_pac_content(tenant_id, url, s))
+            for url, label in ((fp_pac_url, "forwarding profile"), (app_pac_url, "app profile"))
+            if url
+        ]
+
+    for pac_url, label, cached in sources:
+        content = cached or _fetch_pac_content(pac_url)
+        if not content:
+            continue
+        match = _pac_direct_match(content, dest, port, protocol)
+        if match:
+            check = PolicyCheck(engine="ZCC Bypass")
+            check.matched = True
+            check.action = "BYPASS"
+            check.rule_name = match["rule"]
+            check.reason = (
+                f'Destination matches PAC DIRECT rule ({match["rule"]}) in the '
+                f'{label} PAC file — bypasses ZCC tunnel, goes direct to internet'
+            )
+            if not cached:
+                check.caveats.append(
+                    "PAC content was fetched live (not in local cache) — re-import "
+                    "ZIA for this tenant to cache it for offline evaluation"
+                )
+            return check
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # ZCC Bypass evaluation
 # ---------------------------------------------------------------------------
 
@@ -1161,6 +1482,12 @@ def _eval_zcc_bypass(
                         return check
                 except Exception:
                     pass
+
+    # No explicit exclusion / port / app-service bypass matched — fall back to
+    # the active PAC file's DIRECT rules (requires a live PAC fetch).
+    pac_check = _eval_pac_bypass(tenant_id, dest, port, protocol, zcc_profile)
+    if pac_check is not None:
+        return pac_check
 
     check.reason = "No ZCC bypass criteria matched — traffic will be tunneled through ZCC"
     return check
@@ -1299,7 +1626,11 @@ def simulate(
         src_ip, user_name, dept_name, group_name, location_name,
     )
     zia_dns = _eval_zia_dns(tenant_id, dest, port, protocol, live_cats)
-    zia_url = _eval_zia_url(tenant_id, dest, port, protocol)
+    zia_url = _eval_zia_url(
+        tenant_id, dest, port, protocol,
+        user_name, dept_name, group_name, location_name,
+        live_cats=live_cats,
+    )
     zia_ssl = _eval_ssl_inspection(
         tenant_id, dest, protocol,
         cloud_app, user_name, dept_name, group_name, location_name,
