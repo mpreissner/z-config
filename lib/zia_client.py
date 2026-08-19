@@ -1203,6 +1203,18 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.proxies.list_proxies()
         return _to_dicts(_unwrap(result, resp, err))
 
+    def create_proxy(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.proxies.add_proxy(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_proxy(self, proxy_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.proxies.update_proxy(proxy_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_proxy(self, proxy_id: str) -> None:
+        result, resp, err = self._sdk.zia.proxies.delete_proxy(proxy_id)
+        _unwrap(result, resp, err)
+
     def list_proxy_gateways(self) -> List[Dict]:
         result, resp, err = self._sdk.zia.proxies.list_proxy_gateways()
         return _to_dicts(_unwrap(result, resp, err))
@@ -1261,31 +1273,27 @@ class ZIAClient:
         text = resp.text or ""
         return text if "-----BEGIN CERTIFICATE-----" in text else None
 
-    def create_root_certificate(
-        self,
-        pem: str,
-        display_name: str,
-        file_name: str,
-        cert_types: Optional[List[str]] = None,
-    ) -> Dict:
+    def create_root_certificate(self, config: Dict) -> Dict:
         """Upload a root certificate.  Returns the created record.
 
-        `pem` is the certificate text exactly as it sits in the .pem file,
-        BEGIN/END armor included -- the API parses the PEM envelope itself and
-        rejects a base64-wrapped copy of it with a misleading "Empty input".
-        `display_name` is the operator-facing label and the value the rest of
-        the proxy chain matches on; `file_name` is cosmetic, the name of the
-        file the admin UI would have uploaded.  `cert_types` is enum-checked
-        before the certificate parses, so a bad value fails fast.
+        `config` is the request body, camelCase as the endpoint wants it:
+
+            cert         the certificate text exactly as it sits in the .pem
+                         file, BEGIN/END armor included -- the API parses the
+                         PEM envelope itself and rejects a base64-wrapped copy
+                         of it with a misleading "Empty input"
+            displayName  the operator-facing label, and the value the rest of
+                         the proxy chain matches on
+            name         cosmetic: the name of the file the admin UI would
+                         have uploaded
+            certTypes    ["PROXY_CHAINING"] etc.  Enum-checked before the
+                         certificate parses, so a bad value fails fast
+
+        Takes a dict rather than named arguments so the push service can call
+        it the same way it calls every other create_*.
 
         The endpoint rate-limits at one request per second.
         """
-        config = {
-            "cert": pem,
-            "displayName": display_name,
-            "name": file_name,
-            "certTypes": list(cert_types or ["PROXY_CHAINING"]),
-        }
         return self.zia_post(self._ROOT_CERT_PATH, config)
 
     def delete_root_certificate(
