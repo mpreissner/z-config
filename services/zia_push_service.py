@@ -151,6 +151,13 @@ SKIP_TYPES: set = {
     "location",             # tenant-specific; Full Clone only
     "location_lite",        # predefined/system locations (Road Warrior etc.) — imported for ID remapping only
     "device_group",         # predefined OS/platform groups (Windows, iOS, etc.) — imported for ID remapping only
+    # Third-party proxy chaining.  Imported so a PROXYCHAIN forwarding rule can
+    # resolve its gateway by name in the target; not pushed.  proxy_gateway has
+    # no write endpoint at all (the SDK exposes list only, and the item path
+    # 404s), so the chain cannot be created cross-tenant — see _norm_forwarding_rule.
+    "proxy",
+    "proxy_gateway",
+    "root_certificate",
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
@@ -620,20 +627,14 @@ class ZIAPushService:
         # are fully accepted by the API in user-created rule payloads.
         self._usable_dlp_engine_ids = set((existing.get("dlp_engine") or {}).keys())
 
-        # Device group name → target ID map.
-        # Device group IDs differ across tenants; remap by name so rules scoped to
-        # predefined OS groups (Windows, iOS, etc.) carry over on push.
-        # Source device_group entries come from the baseline; target from the DB.
-        target_dg_name_map = {
-            entry["name"].lower(): entry["id"]
-            for entry in (existing.get("device_group") or {}).values()
-            if entry.get("name")
-        }
-        for src_entry in (baseline.get("resources", {}).get("device_group") or []):
-            src_id = str(src_entry.get("id", ""))
-            src_name = (src_entry.get("name") or "").lower()
-            if src_id and src_name and src_name in target_dg_name_map:
-                self._register_remap(src_id, target_dg_name_map[src_name])
+        # Types that are never pushed but are still referenced by rules: match
+        # them by name so the reference lands on the target's own copy.
+        #   device_group    — predefined OS/platform groups (Windows, iOS, …)
+        #   proxy_gateway   — third-party proxy chaining; no write endpoint
+        #   proxy, root_certificate — the links below the gateway, matched for
+        #                     the same reason and so previews can report them
+        for rtype in ("device_group", "proxy_gateway", "proxy", "root_certificate"):
+            self._register_name_remaps(rtype, baseline, existing)
 
         # CBI profile map: profile name (lowercase) → profile dict.
         # Used to remap cbi_profile UUIDs on ISOLATE url_filtering_rules across tenants.
@@ -788,6 +789,25 @@ class ZIAPushService:
                     )
                     skipped.append(rec)
                     continue
+
+                # PROXYCHAIN forwarding rules point at a third-party proxy gateway.
+                # Gateways have no write endpoint, so the target must already have
+                # one by the same name — _register_name_remaps records the match.
+                # Without it the rule would push a source ID that means something
+                # else, or nothing, in the target.
+                if rtype == "forwarding_rule":
+                    pgw = raw_config.get("proxy_gateway") or {}
+                    pgw_id = str(pgw.get("id") or "")
+                    if pgw_id and pgw_id not in self._id_remap and \
+                            pgw_id not in self._target_known_ids.get("proxy_gateway", set()):
+                        rec = PushRecord(rtype, display_name, "skipped:missing-proxy-gateway")
+                        rec.warnings.append(
+                            f"Proxy-chaining forwarding rule skipped — no proxy gateway named "
+                            f"'{pgw.get('name') or pgw_id}' in target tenant; create the gateway "
+                            f"(and its proxy and root certificate) in the ZIA admin UI, then push again"
+                        )
+                        skipped.append(rec)
+                        continue
 
                 # User-created resources: match by name only (no ID fallback).
                 # IDs are tenant-specific and can collide with system resource IDs
@@ -2331,6 +2351,15 @@ class ZIAPushService:
                 cfg["zpa_gateway"] = {"id": gw_id}
             else:
                 cfg.pop("zpa_gateway", None)
+        # Same treatment for the third-party proxy gateway on PROXYCHAIN rules.
+        # Reducing it to {id} lets _apply_id_remap swap in the target's gateway;
+        # rules whose gateway has no match in the target were skipped earlier.
+        if cfg.get("proxy_gateway") and isinstance(cfg["proxy_gateway"], dict):
+            pgw_id = cfg["proxy_gateway"].get("id")
+            if pgw_id:
+                cfg["proxy_gateway"] = {"id": pgw_id}
+            else:
+                cfg.pop("proxy_gateway", None)
         self._norm_ref_fields(cfg,
             ref_fields=("src_ip_groups", "src_ipv6_groups", "dest_ip_groups", "dest_ipv6_groups",
                         "nw_services", "nw_service_groups", "nw_applications",
@@ -2656,6 +2685,27 @@ class ZIAPushService:
     def _register_remap(self, source_id, target_id) -> None:
         """Store source→target ID mapping (both coerced to str)."""
         self._id_remap[str(source_id)] = str(target_id)
+
+    def _register_name_remaps(self, resource_type: str, baseline: dict, existing: dict) -> None:
+        """Remap a resource type by name rather than by pushing it.
+
+        For types that exist in both tenants but are never created by a push,
+        the source ID means nothing in the target.  Matching on name lets a
+        rule that references one keep pointing at the target's own copy.
+        Source entries come from the baseline, target entries from the DB.
+        A source entry with no name match is left unmapped on purpose — the
+        caller decides whether that is fatal for the referring rule.
+        """
+        target_by_name = {
+            entry["name"].lower(): entry["id"]
+            for entry in (existing.get(resource_type) or {}).values()
+            if entry.get("name")
+        }
+        for src_entry in (baseline.get("resources", {}).get(resource_type) or []):
+            src_id = str(src_entry.get("id", ""))
+            src_name = (src_entry.get("name") or "").lower()
+            if src_id and src_name and src_name in target_by_name:
+                self._register_remap(src_id, target_by_name[src_name])
 
     # ------------------------------------------------------------------
     # Shared utilities
