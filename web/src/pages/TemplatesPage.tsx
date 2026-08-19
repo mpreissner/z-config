@@ -12,7 +12,7 @@ import {
 } from "../api/templates";
 import { fetchTenants } from "../api/tenants";
 import { fetchSnapshots } from "../api/zia";
-import { useJobStream } from "../hooks/useJobStream";
+import { useJobStream, describeProgress } from "../hooks/useJobStream";
 import { cancelJob } from "../api/jobs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
@@ -487,7 +487,7 @@ function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onC
   });
 
   const {
-    latestByPhase: applyProgress,
+    latestEvent: applyLatest,
     jobStatus: applyJobStatus,
     result: applyResult,
     streamError: applyStreamError,
@@ -503,17 +503,7 @@ function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onC
 
   const err = mutErr ?? applyStreamError ?? null;
 
-  function applyPhaseLabel() {
-    const rollbackEv = applyProgress["rollback"];
-    const pushEv = applyProgress["push"];
-    const wipeEv = applyProgress["wipe"];
-    const importEv = applyProgress["import"];
-    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
-    if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
-    if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
-    if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
-    return "Applying template…";
-  }
+  const applyPhaseLabel = () => describeProgress(applyLatest, "Applying template…");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
