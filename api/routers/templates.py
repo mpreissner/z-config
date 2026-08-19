@@ -801,7 +801,14 @@ def apply_template_to_tenant(
                     dry_run = service.classify_baseline(
                         baseline, import_progress_callback=on_import_progress
                     )
-                    push_records = service.push_classified(
+                    # dry_run.skipped carries the manual-step reports for entries
+                    # the API refuses to create — the proxy gateway and the
+                    # PROXYCHAIN forwarding rule above it, a SIPA/ZPA forwarding
+                    # rule, a certificate with no PEM.  apply_baseline merges them
+                    # for the wipe path; without this the delta path dropped them
+                    # and the operator was told nothing about the half of the
+                    # chain still to build by hand.
+                    push_records = dry_run.skipped + service.push_classified(
                         dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                     )
 
