@@ -15,6 +15,7 @@ template with that ID exists and tell them its neighbours' IDs.
 Registered in api/main.py with prefix /api/v1/templates.
 """
 
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -22,6 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.dependencies import require_auth, check_tenant_access, AuthUser
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/templates", tags=["Templates"])
 
@@ -920,6 +923,9 @@ def apply_template_to_tenant(
                 "warnings": warnings,
             })
         except Exception as exc:
+            # The job only ever surfaces str(exc); without this the container log
+            # has nothing to work back from.
+            log.exception("Template apply failed for tenant %s", tenant_id)
             store.fail(job_id, str(exc))
             audit_service.log(
                 product="ZIA",
