@@ -7,10 +7,11 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.5.0
+## What's New — v3.5.1
 
-> **v3.5.0 is the current release.** See the [changelog](CHANGELOG.md) for full details.
+> **v3.5.1 is the current release.** See the [changelog](CHANGELOG.md) for full details.
 
+- **Pick individual settings toggles** — ZIA keeps advanced settings, URL & cloud app settings, and browser control settings as one object each, holding dozens of unrelated toggles. A scoped template can now name the keys it wants rather than carrying the whole object, and applying it merges those keys over the target's live settings and leaves the rest alone.
 - **Templates have owners and can be shared** — a template belongs to the account that created it and is visible only to that account until it is shared, per template, to users or groups.
 - **Scoped resource selection** — a template no longer has to carry a whole snapshot. Pick the resources you want out of one and the template stores only those. Wipe mode is refused for a scoped template: it deletes everything the baseline does not name, which would empty the tenant.
 - **Proxy chaining** — proxies, proxy gateways, and root certificates are imported, the certificates with their PEM. Certificates and proxies push; the gateway has no write endpoint, so it and the PROXYCHAIN forwarding rule above it are reported as manual build steps rather than dropped without a word.
@@ -126,7 +127,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Proxies/Proxy Gateways/Root Certificates, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save, restore with preview, delete), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; select a scoped subset of resources or take the whole snapshot; preview included/stripped resources; per-template sharing to users or groups; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Proxies/Proxy Gateways/Root Certificates, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save, restore with preview, delete), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; select a scoped subset of resources — down to individual settings keys — or take the whole snapshot; preview included/stripped resources; per-template sharing to users or groups; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals
