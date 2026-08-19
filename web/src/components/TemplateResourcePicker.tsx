@@ -21,6 +21,12 @@
  *   matched rather than created on push, so including one is almost never what
  *   someone means — but occasionally it is, hence a disclosure and not an
  *   omission.
+ *
+ * Settings singletons are the one type where the entry is not the unit anyone
+ * picks. ZIA keeps advanced settings, URL/cloud-app settings and browser
+ * control settings as one object each, holding dozens of unrelated toggles, so
+ * an entry there opens into its own key list. Ticking keys ticks the entry;
+ * ticking the entry alone carries every key.
  */
 
 import { useMemo, useState } from "react";
@@ -30,6 +36,9 @@ interface Props {
   entries: Record<string, TemplateEntry[]>;
   selection: Record<string, string[]>;
   onChange: (next: Record<string, string[]>) => void;
+  /** {settings_type: [key, …]} — empty or absent means every key of that type. */
+  fieldSelection: Record<string, string[]>;
+  onFieldChange: (next: Record<string, string[]>) => void;
   disabled?: boolean;
 }
 
@@ -41,7 +50,14 @@ function humanize(t: string): string {
     .join(" ");
 }
 
-export default function TemplateResourcePicker({ entries, selection, onChange, disabled }: Props) {
+export default function TemplateResourcePicker({
+  entries,
+  selection,
+  onChange,
+  fieldSelection,
+  onFieldChange,
+  disabled,
+}: Props) {
   const types = useMemo(() => Object.keys(entries).sort(), [entries]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
@@ -54,6 +70,20 @@ export default function TemplateResourcePicker({ entries, selection, onChange, d
     if (ids.length === 0) delete next[type];
     else next[type] = ids;
     onChange(next);
+    // Dropping a settings type drops the keys chosen inside it: leaving them
+    // behind would silently re-narrow the type if it were ticked again later.
+    if (ids.length === 0 && fieldSelection[type]) {
+      const nextFields = { ...fieldSelection };
+      delete nextFields[type];
+      onFieldChange(nextFields);
+    }
+  }
+
+  function setFields(type: string, keys: string[]) {
+    const next = { ...fieldSelection };
+    if (keys.length === 0) delete next[type];
+    else next[type] = keys;
+    onFieldChange(next);
   }
 
   function toggleEntry(type: string, id: string) {
@@ -98,7 +128,7 @@ export default function TemplateResourcePicker({ entries, selection, onChange, d
           {totalSelected} selected
         </span>
         {totalSelected > 0 && (
-          <button onClick={() => onChange({})} className="text-xs text-gray-500 hover:text-gray-700 underline whitespace-nowrap">
+          <button onClick={() => { onChange({}); onFieldChange({}); }} className="text-xs text-gray-500 hover:text-gray-700 underline whitespace-nowrap">
             Clear all
           </button>
         )}
@@ -119,6 +149,8 @@ export default function TemplateResourcePicker({ entries, selection, onChange, d
             onToggleOpen={() => toggleExpanded(type)}
             onToggleEntry={(id) => toggleEntry(type, id)}
             onSetIds={(ids) => setIds(type, ids)}
+            pickedFields={fieldSelection[type] ?? []}
+            onSetFields={(keys) => setFields(type, keys)}
           />
         ))}
       </div>
@@ -126,7 +158,10 @@ export default function TemplateResourcePicker({ entries, selection, onChange, d
   );
 }
 
-function TypeSection({ type, rows, picked, needle, open, onToggleOpen, onToggleEntry, onSetIds }: {
+function TypeSection({
+  type, rows, picked, needle, open, onToggleOpen, onToggleEntry, onSetIds,
+  pickedFields, onSetFields,
+}: {
   type: string;
   rows: TemplateEntry[];
   picked: string[];
@@ -135,6 +170,8 @@ function TypeSection({ type, rows, picked, needle, open, onToggleOpen, onToggleE
   onToggleOpen: () => void;
   onToggleEntry: (id: string) => void;
   onSetIds: (ids: string[]) => void;
+  pickedFields: string[];
+  onSetFields: (keys: string[]) => void;
 }) {
   const [showPredefined, setShowPredefined] = useState(false);
 
@@ -146,6 +183,9 @@ function TypeSection({ type, rows, picked, needle, open, onToggleOpen, onToggleE
 
   const pickedSet = new Set(picked);
   const selectable = custom.map((e) => e.id);
+  // A settings singleton is always one entry; its key count is what the header
+  // should count, since the keys are what someone is choosing between.
+  const settingsCount = rows.length === 1 && rows[0].fields ? rows[0].fields.length : null;
   const allSelected = selectable.length > 0 && selectable.every((id) => pickedSet.has(id));
   const someSelected = picked.length > 0 && !allSelected;
 
@@ -177,9 +217,15 @@ function TypeSection({ type, rows, picked, needle, open, onToggleOpen, onToggleE
               <span className="ml-2 text-xs font-normal font-mono text-gray-400">{type}</span>
             </span>
             <span className="block text-xs text-gray-500">
-              {picked.length > 0
-                ? `${picked.length} of ${rows.length} selected`
-                : `${rows.length} resource${rows.length !== 1 ? "s" : ""}`}
+              {settingsCount !== null
+                ? picked.length === 0
+                  ? `${settingsCount} setting${settingsCount !== 1 ? "s" : ""}`
+                  : pickedFields.length > 0
+                    ? `${pickedFields.length} of ${settingsCount} settings selected`
+                    : `all ${settingsCount} settings selected`
+                : picked.length > 0
+                  ? `${picked.length} of ${rows.length} selected`
+                  : `${rows.length} resource${rows.length !== 1 ? "s" : ""}`}
               {needle && matches.length !== rows.length && ` · ${matches.length} match the filter`}
             </span>
           </span>
@@ -191,9 +237,20 @@ function TypeSection({ type, rows, picked, needle, open, onToggleOpen, onToggleE
           {custom.length === 0 && predefined.length === 0 && (
             <p className="px-9 py-2 text-xs text-gray-400 italic">No entries match that filter.</p>
           )}
-          {custom.map((e) => (
-            <EntryRow key={e.id} entry={e} checked={pickedSet.has(e.id)} onToggle={() => onToggleEntry(e.id)} />
-          ))}
+          {custom.map((e) =>
+            e.fields ? (
+              <SettingsEntryRow
+                key={e.id}
+                entry={e}
+                checked={pickedSet.has(e.id)}
+                onToggle={() => onToggleEntry(e.id)}
+                pickedFields={pickedFields}
+                onSetFields={onSetFields}
+              />
+            ) : (
+              <EntryRow key={e.id} entry={e} checked={pickedSet.has(e.id)} onToggle={() => onToggleEntry(e.id)} />
+            ),
+          )}
           {predefined.length > 0 && (
             <div>
               <button
@@ -209,6 +266,112 @@ function TypeSection({ type, rows, picked, needle, open, onToggleOpen, onToggleE
                 ))}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A settings singleton: the object checkbox plus its key list.
+ *
+ * The keys are the point, so they are shown expanded by default once the object
+ * is ticked. No keys ticked means the whole object travels — which is what the
+ * object checkbox on its own has always meant, and stays the way to say "take
+ * the source tenant's settings wholesale".
+ */
+function SettingsEntryRow({ entry, checked, onToggle, pickedFields, onSetFields }: {
+  entry: TemplateEntry;
+  checked: boolean;
+  onToggle: () => void;
+  pickedFields: string[];
+  onSetFields: (keys: string[]) => void;
+}) {
+  const fields = entry.fields ?? [];
+  const [open, setOpen] = useState(false);
+  const [fieldFilter, setFieldFilter] = useState("");
+
+  const pickedFieldSet = new Set(pickedFields);
+  const needle = fieldFilter.trim().toLowerCase();
+  const visible = needle
+    ? fields.filter(
+        (f) => f.label.toLowerCase().includes(needle) || f.key.toLowerCase().includes(needle),
+      )
+    : fields;
+
+  function toggleField(key: string) {
+    const next = pickedFieldSet.has(key)
+      ? pickedFields.filter((k) => k !== key)
+      : [...pickedFields, key];
+    onSetFields(next);
+    // Picking a key implies picking the object it lives in — nobody ticks a
+    // toggle meaning "and leave the settings out".
+    if (next.length > 0 && !checked) onToggle();
+  }
+
+  return (
+    <div>
+      <div className="flex items-start gap-2 pl-9 pr-3 py-1.5 hover:bg-gray-100">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          className="mt-0.5 flex-shrink-0"
+        />
+        <button onClick={() => setOpen((v) => !v)} className="min-w-0 flex-1 text-left">
+          <span className="block text-xs font-medium text-gray-800 break-words">
+            <span className="text-gray-400 mr-1">{open ? "▾" : "▸"}</span>
+            {entry.name}
+          </span>
+          <span className="block text-[11px] text-gray-500">
+            {pickedFields.length > 0
+              ? `${pickedFields.length} of ${fields.length} settings`
+              : checked
+                ? `all ${fields.length} settings — open to pick individual ones`
+                : `${fields.length} settings`}
+          </span>
+        </button>
+      </div>
+
+      {open && (
+        <div className="bg-white border-t border-gray-100">
+          <div className="flex items-center gap-2 px-3 py-1.5 pl-12">
+            <input
+              type="text"
+              value={fieldFilter}
+              onChange={(e) => setFieldFilter(e.target.value)}
+              placeholder="Filter settings…"
+              className="flex-1 min-w-0 border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-zs-500"
+            />
+            {pickedFields.length > 0 && (
+              <button
+                onClick={() => onSetFields([])}
+                className="text-[11px] text-gray-500 hover:text-gray-700 underline whitespace-nowrap"
+              >
+                Take all
+              </button>
+            )}
+          </div>
+          {visible.length === 0 && (
+            <p className="px-12 py-2 text-[11px] text-gray-400 italic">Nothing matches that filter.</p>
+          )}
+          {visible.map((f) => (
+            <label
+              key={f.key}
+              className="flex items-start gap-2 pl-12 pr-3 py-1 cursor-pointer hover:bg-gray-50"
+            >
+              <input
+                type="checkbox"
+                checked={pickedFieldSet.has(f.key)}
+                onChange={() => toggleField(f.key)}
+                className="mt-0.5 flex-shrink-0"
+              />
+              <span className="min-w-0 flex-1 flex items-baseline justify-between gap-3">
+                <span className="text-[11px] text-gray-700 break-words">{f.label}</span>
+                <span className="text-[11px] font-mono text-gray-400 whitespace-nowrap">{f.value}</span>
+              </span>
+            </label>
+          ))}
         </div>
       )}
     </div>
