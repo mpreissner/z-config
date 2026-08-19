@@ -1185,3 +1185,37 @@ class ZIAClient:
     def delete_pac_file(self, pac_id: int) -> None:
         """Delete a PAC file and all its versions."""
         self.zia_delete(f"/zia/api/v1/pacFiles/{pac_id}")
+
+    # ------------------------------------------------------------------
+    # Proxies, Proxy Gateways, and Root Certificates
+    #
+    # These back the third-party proxy chaining path (a forwarding rule with
+    # forwardMethod=PROXYCHAIN points at a proxyGateway, which points at a
+    # proxy, which points at the root certificate the third party presents).
+    #
+    # rootCertificates is not in zscaler-sdk-python and is undocumented, but
+    # it is live on the OneAPI gateway, so it goes through direct HTTP.
+    # ------------------------------------------------------------------
+
+    _ROOT_CERT_PATH = "/zia/api/v1/rootCertificates"
+
+    def list_proxies(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.proxies.list_proxies()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def list_proxy_gateways(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.proxies.list_proxy_gateways()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def list_root_certificates(self) -> List[Dict]:
+        """List root certificates uploaded for proxy chaining and isolation.
+
+        Returns raw camelCase JSON.  Platform-supplied entries (the Zscaler
+        Browser Isolation certificate) carry no `id` and are skipped by the
+        importer, which leaves the uploaded PROXY_CHAINING certs.
+        """
+        data = self.zia_get(self._ROOT_CERT_PATH)
+        return data if isinstance(data, list) else []
+
+    def delete_root_certificate(self, cert_id: str) -> None:
+        self.zia_delete(f"{self._ROOT_CERT_PATH}/{cert_id}")
