@@ -335,6 +335,19 @@ _REF_FIELDS: Dict[str, str] = {
 _STR_ID_TYPES: frozenset = frozenset({"url_category"})
 
 
+def _resolves_without_travelling(ref_type: str, ref_id: str) -> bool:
+    """Whether a reference missing from the snapshot still lands in the target.
+
+    Only ZIA's internal super-categories qualify: `GLOBAL_INT_OFC_SSL_BYPASS`,
+    `OFFICE_365` and friends are referenced by the one-click rules but are not
+    returned by the category listing, so they can never be in a snapshot — and
+    they carry the same constant ID in every tenant, exactly like the
+    app_service_groups and nw_applications _REF_FIELDS leaves out.  A custom
+    category has to travel, so `CUSTOM_nn` is still a real warning.
+    """
+    return ref_type == "url_category" and not ref_id.startswith("CUSTOM_")
+
+
 def _iter_refs(raw_config: dict) -> Iterator[Tuple[str, str]]:
     """Yield (resource_type, referenced_id) for every reference in one entry.
 
@@ -354,7 +367,13 @@ def _iter_refs(raw_config: dict) -> Iterator[Tuple[str, str]]:
                         if isinstance(item, dict):
                             if item.get("id") is not None:
                                 ref_id = str(item["id"])
-                        elif isinstance(item, (str, int)) and item != "":
+                        elif rtype in _STR_ID_TYPES and isinstance(item, (str, int)) and item != "":
+                            # Only the string-keyed types name a target inline.
+                            # Everywhere else a reference is an {id, name} object,
+                            # and a bare scalar under the same key is payload, not
+                            # a pointer — a root certificate's own `cert` field
+                            # holds its PEM, which read as a reference produced a
+                            # warning quoting the entire certificate.
                             ref_id = str(item)
                         if ref_id is None:
                             continue
@@ -433,14 +452,17 @@ def resolve_dependencies(
                 continue
             target = index.get(ref_type, {}).get(ref_id)
             if target is None:
-                if key not in warned:
+                if key not in warned and not _resolves_without_travelling(ref_type, ref_id):
                     warned.add(key)
                     why = ("is not portable and was stripped from the template"
                            if ref_type in TEMPLATE_STRIP_TYPES
                            else "is not present in the snapshot")
+                    # Capped: an ID reaches the UI verbatim, and raw_config holds
+                    # values far longer than a name.
+                    shown = ref_id if len(ref_id) <= 60 else ref_id[:60] + "…"
                     warnings.append(
                         f'"{entry.get("name") or eid}" references {ref_type} '
-                        f"{ref_id}, which {why}. The reference will not resolve "
+                        f"{shown}, which {why}. The reference will not resolve "
                         f"in the target tenant."
                     )
                 continue
