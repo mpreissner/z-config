@@ -220,6 +220,18 @@ class ZIATemplate(Base):
 
     stripped_types records which resource types were present in the source
     snapshot but removed during template creation.
+
+    A template is owned by the user who created it and shared from there —
+    see visibility below and TemplateShare.  owner_user_id is nullable because
+    templates predate ownership: NULL marks a legacy row, which is org-visible
+    and deletable only by an admin (handing one to a guessed owner would give
+    that account unilateral delete rights over a shared object).
+
+    scope records whether the template holds everything portable in the source
+    snapshot or only the entries its author picked; selection_meta records what
+    they picked, what the reference closure pulled in behind it, and which
+    references could not be resolved.  A scoped template must never be applied
+    with wipe_mode — see the guard in the apply endpoint.
     """
 
     __tablename__ = "zia_templates"
@@ -238,11 +250,66 @@ class ZIATemplate(Base):
     stripped_types     = Column(JSON, nullable=False)   # list of resource_type strings
     snapshot           = Column(JSON, nullable=False)   # {"resource_type": [{...}, ...]}
 
+    owner_user_id      = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                nullable=True)
+    # Denormalized so the list renders "created by mpreissner" without a join,
+    # and so attribution survives the owning account being deleted.
+    owner_username     = Column(String(255), nullable=True)
+    # 'private' (owner + admins) | 'shared' (plus everyone in template_shares)
+    # | 'org' (every authenticated user).  Set explicitly rather than inferred
+    # from the presence of share rows, so removing the last share does not
+    # silently make a template private.
+    visibility         = Column(String(16), nullable=False, default="private")
+    scope              = Column(String(16), nullable=False, default="full")   # 'full' | 'scoped'
+    selection_meta     = Column(JSON, nullable=True)    # {selected, auto_included, warnings}
+
     source_tenant   = relationship("TenantConfig", foreign_keys=[source_tenant_id])
     source_snapshot = relationship("RestorePoint",  foreign_keys=[source_snapshot_id])
+    owner           = relationship("User", foreign_keys=[owner_user_id])
 
     def __repr__(self) -> str:
         return f"<ZIATemplate name={self.name!r} resources={self.resource_count}>"
+
+
+class TemplateShare(Base):
+    """One grant of a template to a user or a group.
+
+    Exactly one of user_id / group_id is set.  A user sees a shared template if
+    they are named directly or belong to a named group — the same union rule
+    UserTenantEntitlement and GroupTenantEntitlement already use for tenants,
+    and the same partial-index trick PluginEntitlement uses to make it stick.
+
+    Rows survive a switch to visibility='private': an owner hiding a
+    work-in-progress should get their share list back when they unhide it,
+    not have to rebuild it.
+    """
+
+    __tablename__ = "template_shares"
+    __table_args__ = (
+        # SQLite counts NULLs as distinct in a plain UNIQUE, so each half of
+        # the row gets its own partial index.
+        Index("uq_template_share_user", "template_id", "user_id",
+              unique=True, sqlite_where=text("user_id IS NOT NULL")),
+        Index("uq_template_share_group", "template_id", "group_id",
+              unique=True, sqlite_where=text("group_id IS NOT NULL")),
+    )
+
+    id          = Column(Integer, primary_key=True)
+    template_id = Column(Integer, ForeignKey("zia_templates.id", ondelete="CASCADE"),
+                         nullable=False)
+    user_id     = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    group_id    = Column(Integer, ForeignKey("user_groups.id", ondelete="CASCADE"),
+                         nullable=True)
+    shared_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+    shared_by   = Column(String(255), nullable=True)
+
+    template = relationship("ZIATemplate", backref="shares")
+    user     = relationship("User")
+    group    = relationship("UserGroup")
+
+    def __repr__(self) -> str:
+        subject = f"user_id={self.user_id}" if self.user_id else f"group_id={self.group_id}"
+        return f"<TemplateShare template_id={self.template_id} {subject}>"
 
 
 class ZIAResource(Base):

@@ -353,6 +353,30 @@ def _migrate(engine) -> None:
             granted_by VARCHAR(255),
             UNIQUE (group_id, tenant_id)
         )""",
+        # Templates gained an owner, a visibility, and — for scoped templates —
+        # a record of what their author picked.
+        "ALTER TABLE zia_templates ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+        "ALTER TABLE zia_templates ADD COLUMN owner_username VARCHAR(255)",
+        "ALTER TABLE zia_templates ADD COLUMN visibility VARCHAR(16) NOT NULL DEFAULT 'private'",
+        "ALTER TABLE zia_templates ADD COLUMN scope VARCHAR(16) NOT NULL DEFAULT 'full'",
+        "ALTER TABLE zia_templates ADD COLUMN selection_meta JSON",
+        """CREATE TABLE IF NOT EXISTS template_shares (
+            id INTEGER PRIMARY KEY,
+            template_id INTEGER NOT NULL REFERENCES zia_templates(id) ON DELETE CASCADE,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            group_id INTEGER REFERENCES user_groups(id) ON DELETE CASCADE,
+            shared_at DATETIME NOT NULL,
+            shared_by VARCHAR(255)
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_template_share_user
+           ON template_shares (template_id, user_id) WHERE user_id IS NOT NULL""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_template_share_group
+           ON template_shares (template_id, group_id) WHERE group_id IS NOT NULL""",
+        # Templates that predate ownership were visible to every authenticated
+        # user, so they stay that way rather than vanishing from everyone's list
+        # on upgrade. Safe to re-run: after the first pass every legacy row is
+        # already 'org', and every row created since has a non-NULL owner.
+        "UPDATE zia_templates SET visibility = 'org' WHERE owner_user_id IS NULL",
     ]
     for stmt in migrations:
         with engine.connect() as conn:
