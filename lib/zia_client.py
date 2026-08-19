@@ -1,3 +1,4 @@
+import base64
 from typing import Dict, List, Optional
 
 from zscaler import ZscalerClient
@@ -1213,9 +1214,41 @@ class ZIAClient:
         Returns raw camelCase JSON.  Platform-supplied entries (the Zscaler
         Browser Isolation certificate) carry no `id` and are skipped by the
         importer, which leaves the uploaded PROXY_CHAINING certs.
+
+        The certificate material is write-only: neither this response nor any
+        item or download path returns `cert`.  An imported record can therefore
+        say that a certificate named X is required, but cannot reproduce it —
+        recreating one on another tenant needs the operator to supply the PEM.
         """
         data = self.zia_get(self._ROOT_CERT_PATH)
         return data if isinstance(data, list) else []
+
+    def create_root_certificate(
+        self,
+        pem: str,
+        display_name: str,
+        file_name: str,
+        cert_types: Optional[List[str]] = None,
+    ) -> Dict:
+        """Upload a root certificate.
+
+        `pem` is the certificate text; the API wants it base64-encoded, so the
+        encoding happens here — no caller ever holds the encoded form, because
+        the list endpoint does not return certificate material (see below).
+        `display_name` is the operator-facing label and the value the rest of
+        the chain matches on; `file_name` is cosmetic, the name of the .pem the
+        admin UI would have uploaded.  `cert_types` is validated against an
+        enum before the certificate is parsed, so a bad value fails fast.
+
+        Note the endpoint rate-limits at one request per second.
+        """
+        config = {
+            "cert": base64.b64encode(pem.encode()).decode(),
+            "displayName": display_name,
+            "name": file_name,
+            "certTypes": list(cert_types or ["PROXY_CHAINING"]),
+        }
+        return self.zia_post(self._ROOT_CERT_PATH, config)
 
     def delete_root_certificate(self, cert_id: str) -> None:
         self.zia_delete(f"{self._ROOT_CERT_PATH}/{cert_id}")
