@@ -56,7 +56,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [sourceTenantId, setSourceTenantId] = useState<number | "">("");
   const [snapshotId, setSnapshotId] = useState<number | "">("");
-  const [scopeMode, setScopeMode] = useState<"full" | "scoped">("full");
+  const [scopeMode, setScopeMode] = useState<"full" | "scoped">("scoped");
   const [selection, setSelection] = useState<Record<string, string[]>>({});
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -205,73 +205,32 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
           {/* Step 2 — scope */}
           {step === 2 && preview && (
             <div className="space-y-4">
-              <div className="space-y-1.5">
+              <div className="border border-gray-200 rounded-md px-3 py-2">
                 <label className="flex items-start gap-2 cursor-pointer">
                   <input
-                    type="radio"
-                    name="scope"
+                    type="checkbox"
                     checked={scopeMode === "full"}
-                    onChange={() => { setScopeMode("full"); setErr(null); }}
+                    onChange={(e) => { setScopeMode(e.target.checked ? "full" : "scoped"); setErr(null); }}
                     className="mt-0.5"
                   />
                   <div>
-                    <span className="text-sm font-medium text-gray-800">Everything portable in this snapshot</span>
+                    <span className="text-sm font-medium text-gray-800">Include everything portable in this snapshot</span>
                     <p className="text-xs text-gray-500">
                       A full template across all {preview.included.length} resource type
-                      {preview.included.length !== 1 ? "s" : ""} below. Can be applied in wipe mode.
-                    </p>
-                  </div>
-                </label>
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="scope"
-                    checked={scopeMode === "scoped"}
-                    onChange={() => { setScopeMode("scoped"); setErr(null); }}
-                    className="mt-0.5"
-                  />
-                  <div>
-                    <span className="text-sm font-medium text-gray-800">Select specific resources</span>
-                    <p className="text-xs text-gray-500">
-                      A scoped template for one purpose — an integration, a rule set. Merge-push only.
+                      {preview.included.length !== 1 ? "s" : ""} ({preview.included.reduce((n, r) => n + r.count, 0)} resources).
+                      Only a full template can be applied in wipe mode. Leave this unticked to pick
+                      individual resources below.
                     </p>
                   </div>
                 </label>
               </div>
 
-              {scopeMode === "scoped" ? (
-                <TemplateResourcePicker
-                  entries={preview.entries}
-                  selection={selection}
-                  onChange={(next) => { setSelection(next); setErr(null); }}
-                />
-              ) : (
-                <div>
-                  <p className="text-xs font-medium text-gray-700 mb-2">Included resource types ({preview.included.length}):</p>
-                  {preview.included.length > 0 ? (
-                    <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-md">
-                      <table className="min-w-full text-xs divide-y divide-gray-100">
-                        <thead className="bg-gray-50 sticky top-0">
-                          <tr>
-                            <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Resource Type</th>
-                            <th className="px-3 py-1.5 text-right font-medium text-gray-500 uppercase">Count</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100 bg-white">
-                          {preview.included.map((r) => (
-                            <tr key={r.resource_type}>
-                              <td className="px-3 py-1.5 font-mono text-gray-700">{r.resource_type}</td>
-                              <td className="px-3 py-1.5 text-right text-gray-700">{r.count}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-gray-500 italic">No portable resources found in this snapshot.</p>
-                  )}
-                </div>
-              )}
+              <TemplateResourcePicker
+                entries={preview.entries}
+                selection={selection}
+                onChange={(next) => { setSelection(next); setErr(null); }}
+                disabled={scopeMode === "full"}
+              />
 
               {preview.stripped.length > 0 && (
                 <div>
