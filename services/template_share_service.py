@@ -4,12 +4,23 @@ A template is owned by whoever created it.  From there it is private, shared
 with named users and groups, or published org-wide — `ZIATemplate.visibility`
 decides which, and this module is the only place that decision is read.
 
-Two grades of permission, not three.  `can_read` and `can_apply` are the same
-check: applying is already gated on `check_tenant_access`, so a read-only share
-would protect nothing — the holder can list the template's contents either way,
-and without tenant access they cannot push it anywhere.  `can_manage` (rename,
-re-share, delete) is the elevated grade, and it belongs to the owner and to
-admins.
+Two grades of permission, not three.  `can_read` and `can_apply` were once the
+same check: applying is already gated on `check_tenant_access`, so a read-only
+share would protect nothing — the holder can list the template's contents either
+way, and without tenant access they cannot push it anywhere.  They have since
+parted company over exactly one case, the admin (below).  `can_manage` (rename,
+re-share, delete) is the elevated grade, and it belongs to the owner.
+
+An admin session is not a superuser here.  It sees unowned templates and nothing
+else, so that the one job only an admin can do — finding a home for a template
+whose owner is gone, or deleting it — is possible without handing the admin role
+a view of every user's work.  An owned template is invisible to it, and applying
+one to a tenant is refused outright at every ownership state: pushing config is
+the user role's job, and an admin who wants to do it switches roles.
+
+A template becomes unowned when its owner's account is deleted or deactivated —
+see `disown_templates`, which every deprovisioning path calls.  `owner_username`
+survives that, so the admin picking up the pieces can still see whose it was.
 
 Group grants resolve through current membership at read time rather than being
 expanded into user rows, so an account that leaves a group loses the template on
@@ -38,13 +49,21 @@ def _group_ids_for(user_id: int, session: Session) -> List[int]:
     ]
 
 
-def visible_template_ids(user_id: int, role: str, session: Session) -> Optional[Set[int]]:
-    """Return the set of template IDs this account may see, or None for 'all'.
+def unowned_template_ids(session: Session) -> Set[int]:
+    """Templates with no owner — the admin's entire view, and its work queue."""
+    return {
+        t for (t,) in session.query(ZIATemplate.id).filter(
+            ZIATemplate.owner_user_id.is_(None)
+        )
+    }
 
-    None is the admin sentinel, and is deliberately distinct from an empty set:
-    it lets the caller drop the IN-clause entirely instead of building one over
-    every row in the table, and it cannot be mistaken for "an admin who has been
-    granted nothing".
+
+def visible_template_ids(user_id: int, role: str, session: Session) -> Set[int]:
+    """Return the set of template IDs this account may see.
+
+    Always a set, never None.  An admin used to get a None sentinel meaning
+    "every row, drop the IN-clause"; it now gets the unowned set like any other
+    filtered view, because an admin seeing every template was the bug.
 
     `role` is the role the session has *assumed*, not every role the account
     holds — an account that could be an admin but is sitting in `user` sees only
@@ -52,7 +71,7 @@ def visible_template_ids(user_id: int, role: str, session: Session) -> Optional[
     behaves.
     """
     if role == "admin":
-        return None
+        return unowned_template_ids(session)
 
     ids: Set[int] = {
         t for (t,) in session.query(ZIATemplate.id).filter(ZIATemplate.visibility == "org")
@@ -80,7 +99,7 @@ def visible_template_ids(user_id: int, role: str, session: Session) -> Optional[
 def can_read(template: ZIATemplate, user_id: int, role: str, session: Session) -> bool:
     """Whether this account may see the template at all."""
     if role == "admin":
-        return True
+        return template.owner_user_id is None
     if template.visibility == "org":
         return True
     if template.owner_user_id is not None and template.owner_user_id == user_id:
@@ -95,20 +114,31 @@ def can_read(template: ZIATemplate, user_id: int, role: str, session: Session) -
     return any(s.group_id in group_ids for s in shares if s.group_id is not None)
 
 
-#: Applying is the same permission as reading — see the module docstring.
-can_apply = can_read
+def can_apply(template: ZIATemplate, user_id: int, role: str, session: Session) -> bool:
+    """Whether this account may push the template at a tenant.
+
+    Reading and applying are otherwise the same permission, but an admin session
+    is refused here whatever the template's ownership — including the unowned
+    ones it can see.  Applying writes live tenant configuration, which is the
+    user role's work; an admin holding both roles switches to do it, and the
+    switch is audited.
+    """
+    if role == "admin":
+        return False
+    return can_read(template, user_id, role, session)
 
 
 def can_manage(template: ZIATemplate, user_id: int, role: str) -> bool:
-    """Whether this account may rename, re-share, or delete the template.
+    """Whether this account may rename, re-share, reassign, or delete it.
 
-    A legacy template (`owner_user_id IS NULL`) is admin-only: nobody can be
+    An unowned template (`owner_user_id IS NULL`) is admin-only: nobody can be
     handed ownership of one without guessing, and guessing wrong gives one user
-    unilateral delete rights over an object the whole org can see.  An admin can
-    adopt one explicitly through PATCH.
+    unilateral delete rights over an object the whole org can see.  The admin's
+    two moves are to name an owner through PATCH or to delete it — a template
+    left unowned is one nobody can apply, so the queue is meant to be emptied.
     """
     if role == "admin":
-        return True
+        return template.owner_user_id is None
     return template.owner_user_id is not None and template.owner_user_id == user_id
 
 
@@ -247,3 +277,51 @@ def remove_share(template_id: int, share_id: int, session: Session) -> Optional[
     out = _out(row, user_name, group_name)
     session.delete(row)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Deprovisioning
+# ---------------------------------------------------------------------------
+
+def disown_templates(user_id: int, session: Session) -> List[str]:
+    """Cut an account loose from the templates it owns.  Returns their names.
+
+    Called from every path that ends an account — the admin's hard delete, and
+    SCIM's DELETE, PUT and PATCH deactivations, which are soft and so never fire
+    the ON DELETE SET NULL the column carries.  Doing it here rather than
+    leaning on the FK also means the two kinds of deprovisioning leave the same
+    state behind, which is the point: a deactivated account's templates should
+    no more be applicable than a deleted one's.
+
+    `owner_username` is left alone.  It is denormalized attribution, not a
+    permission, and it is the only thing telling the admin whose template they
+    are now holding.  The name is returned so the caller can audit what moved.
+    """
+    rows = session.query(ZIATemplate).filter(
+        ZIATemplate.owner_user_id == user_id
+    ).all()
+    names = []
+    for tmpl in rows:
+        tmpl.owner_user_id = None
+        names.append(tmpl.name)
+    return names
+
+
+def assignable_owners(session: Session) -> List[dict]:
+    """Accounts an unowned template may be handed to, by name.
+
+    The user role is what makes an owner useful — an owner who cannot apply the
+    template cannot do anything with it — so this is every active account whose
+    effective roles include `user`, whether from its own row or from a group's
+    mapped_role.  An admin-only account is deliberately absent: handing it a
+    template would recreate the unowned state under a different name.
+    """
+    from services.role_service import roles_for_users
+
+    users = session.query(User).filter(User.is_active.is_(True)).order_by(User.username).all()
+    roles = roles_for_users(session, users)
+    return [
+        {"id": u.id, "username": u.username, "roles": roles.get(u.id, [])}
+        for u in users
+        if "user" in roles.get(u.id, [])
+    ]

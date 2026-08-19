@@ -7,6 +7,8 @@ import {
   createTemplate,
   deleteTemplate,
   applyTemplate,
+  updateTemplate,
+  fetchAssignableOwners,
   ZIATemplate,
   ZIATemplateDetail,
 } from "../api/templates";
@@ -19,6 +21,7 @@ import ErrorMessage from "../components/ErrorMessage";
 import TemplateResourcePicker from "../components/TemplateResourcePicker";
 import TemplateShareDialog from "../components/TemplateShareDialog";
 import { formatDateTime } from "../utils/time";
+import { useAuth } from "../context/AuthContext";
 
 // ---------------------------------------------------------------------------
 // Progress bar
@@ -770,12 +773,14 @@ function ScopeChip({ scope }: { scope: string }) {
 // Template detail panel
 // ---------------------------------------------------------------------------
 
-function TemplateDetail({ templateId, onApply, onDelete, onShare }: {
+function TemplateDetail({ templateId, onApply, onDelete, onShare, onAssign }: {
   templateId: number;
   onApply: (t: ZIATemplate) => void;
   onDelete: (t: ZIATemplate) => void;
   onShare: (t: ZIATemplate) => void;
+  onAssign: (t: ZIATemplate) => void;
 }) {
+  const { isAdmin } = useAuth();
   const { data: tmpl, isLoading, error } = useQuery<ZIATemplateDetail>({
     queryKey: ["template", templateId],
     queryFn: () => fetchTemplate(templateId),
@@ -794,26 +799,47 @@ function TemplateDetail({ templateId, onApply, onDelete, onShare }: {
             <VisibilityChip template={tmpl} />
             <ScopeChip scope={tmpl.scope} />
             <span className="text-xs text-gray-500">
-              {tmpl.owner_username
+              {tmpl.owner_user_id !== null
                 ? `Owned by ${tmpl.is_owner ? "you" : tmpl.owner_username}`
-                : "No owner — predates ownership"}
+                : tmpl.owner_username
+                  // owner_username outlives the account it names, so a
+                  // disowned template still says whose it was.
+                  ? `No owner — ${tmpl.owner_username}'s account was removed`
+                  : "No owner — predates ownership"}
             </span>
           </div>
         </div>
+        {/* Two sets of actions, never mixed. An admin is here to clear the
+            template off the unowned queue — assign it or bin it — and gets no
+            Apply and no Share, because pushing config and handing out access
+            are both the user role's. The API refuses those either way. */}
         <div className="flex gap-2 flex-shrink-0 ml-4">
-          <button
-            onClick={() => onApply(tmpl)}
-            className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
-          >
-            Apply to Tenant
-          </button>
-          {tmpl.can_manage && (
+          {isAdmin ? (
             <button
-              onClick={() => onShare(tmpl)}
-              className="px-3 py-1.5 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+              onClick={() => onAssign(tmpl)}
+              className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
             >
-              Share
+              Assign Owner
             </button>
+          ) : (
+            <>
+              {tmpl.can_apply && (
+                <button
+                  onClick={() => onApply(tmpl)}
+                  className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+                >
+                  Apply to Tenant
+                </button>
+              )}
+              {tmpl.can_manage && (
+                <button
+                  onClick={() => onShare(tmpl)}
+                  className="px-3 py-1.5 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+                >
+                  Share
+                </button>
+              )}
+            </>
           )}
           <button
             onClick={() => onDelete(tmpl)}
@@ -821,9 +847,7 @@ function TemplateDetail({ templateId, onApply, onDelete, onShare }: {
             title={
               tmpl.can_manage
                 ? undefined
-                : tmpl.owner_username
-                  ? `Only ${tmpl.owner_username} or an administrator can delete this template`
-                  : "This template predates ownership — only an administrator can delete it"
+                : `Only ${tmpl.owner_username ?? "the owner"} can delete this template`
             }
             className="px-3 py-1.5 text-sm rounded-md border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
           >
@@ -1001,16 +1025,117 @@ function DeleteConfirmDialog({ template, onClose, onDeleted }: {
 }
 
 // ---------------------------------------------------------------------------
+// Assign owner (admin)
+// ---------------------------------------------------------------------------
+
+/**
+ * The admin's one constructive move on an unowned template: find it a home.
+ *
+ * The candidate list is not every account — it is every account that holds the
+ * user role, because an owner who cannot apply the template cannot do anything
+ * with it. Handing one to an admin-only account would leave the template exactly
+ * as stranded as it is now, under a different name, so the API refuses it and
+ * this list never offers it.
+ */
+function AssignOwnerDialog({ template, onClose, onAssigned }: {
+  template: ZIATemplate;
+  onClose: () => void;
+  onAssigned: () => void;
+}) {
+  const [ownerId, setOwnerId] = useState<number | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["assignable-owners"],
+    queryFn: fetchAssignableOwners,
+  });
+  const owners = data?.users ?? [];
+
+  const assignMut = useMutation({
+    mutationFn: () => updateTemplate(template.id, { owner_user_id: ownerId! }),
+    onSuccess: () => { onAssigned(); onClose(); },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-gray-900">Assign Owner</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            <span className="font-medium">{template.name}</span> has no owner
+            {template.owner_username && <> — {template.owner_username}&rsquo;s account is gone</>}.
+            Its new owner can apply, share, and delete it.
+          </p>
+        </div>
+
+        {isLoading && <LoadingSpinner />}
+        {error && (
+          <ErrorMessage message={error instanceof Error ? error.message : "Failed to load accounts"} />
+        )}
+
+        {!isLoading && !error && owners.length === 0 && (
+          <p className="text-sm text-gray-500">
+            No active account holds the user role, so there is nobody who could use this
+            template. Grant someone the user role, or delete the template.
+          </p>
+        )}
+
+        {owners.length > 0 && (
+          <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-md divide-y divide-gray-100">
+            {owners.map((o) => (
+              <label
+                key={o.id}
+                className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-gray-50 ${
+                  ownerId === o.id ? "bg-zs-50" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="owner"
+                  checked={ownerId === o.id}
+                  onChange={() => setOwnerId(o.id)}
+                  className="text-zs-500 focus:ring-zs-500"
+                />
+                <span className="text-sm text-gray-800">{o.username}</span>
+                <span className="ml-auto text-xs text-gray-400">{o.roles.join(", ")}</span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        {assignMut.isError && (
+          <ErrorMessage message={assignMut.error instanceof Error ? assignMut.error.message : "Assign failed"} />
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button
+            onClick={() => assignMut.mutate()}
+            disabled={ownerId === null || assignMut.isPending}
+            className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50"
+          >
+            {assignMut.isPending ? "Assigning…" : "Assign"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
 export default function TemplatesPage() {
   const queryClient = useQueryClient();
+  const { isAdmin } = useAuth();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [applyTarget, setApplyTarget] = useState<ZIATemplate | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ZIATemplate | null>(null);
   const [shareTarget, setShareTarget] = useState<ZIATemplate | null>(null);
+  const [assignTarget, setAssignTarget] = useState<ZIATemplate | null>(null);
 
   const { data: templates, isLoading, error, refetch, isFetching } = useQuery<ZIATemplate[]>({
     queryKey: ["templates"],
@@ -1028,11 +1153,32 @@ export default function TemplatesPage() {
     }
   }
 
+  function handleAssigned() {
+    // An assigned template leaves the admin's list entirely — it is owned now,
+    // and this view only ever held the unowned ones. Clear the selection so the
+    // detail pane is not left querying a row it can no longer read.
+    queryClient.invalidateQueries({ queryKey: ["templates"] });
+    if (assignTarget && selectedId === assignTarget.id) {
+      setSelectedId(null);
+    }
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* Page header */}
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-semibold text-gray-900">ZIA Templates</h1>
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            {isAdmin ? "Unowned Templates" : "ZIA Templates"}
+          </h1>
+          {isAdmin && (
+            <p className="text-sm text-gray-500 mt-0.5">
+              Templates with no owner — their owner&rsquo;s account was removed, or they
+              predate ownership. Assign each one to an account that holds the user role,
+              or delete it. Nobody can apply a template while it sits here.
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => { refetch(); }}
@@ -1050,12 +1196,14 @@ export default function TemplatesPage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
-          >
-            Create Template from Snapshot
-          </button>
+          {!isAdmin && (
+            <button
+              onClick={() => setShowCreate(true)}
+              className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+            >
+              Create Template from Snapshot
+            </button>
+          )}
         </div>
       </div>
 
@@ -1068,13 +1216,15 @@ export default function TemplatesPage() {
           <div className="w-72 flex-shrink-0 flex flex-col border border-gray-200 rounded-lg overflow-hidden">
             <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-                Templates ({templates.length})
+                {isAdmin ? "Unowned" : "Templates"} ({templates.length})
               </p>
             </div>
             {templates.length === 0 ? (
               <div className="flex-1 flex items-center justify-center p-6">
                 <p className="text-sm text-gray-400 text-center">
-                  No templates yet. Save a snapshot from a ZIA tenant and create a template from it.
+                  {isAdmin
+                    ? "Nothing to sort out — every template has an owner."
+                    : "No templates yet. Save a snapshot from a ZIA tenant and create a template from it."}
                 </p>
               </div>
             ) : (
@@ -1118,12 +1268,15 @@ export default function TemplatesPage() {
                 onApply={(t) => setApplyTarget(t)}
                 onDelete={(t) => setDeleteTarget(t)}
                 onShare={(t) => setShareTarget(t)}
+                onAssign={(t) => setAssignTarget(t)}
               />
             ) : (
               <div className="h-full flex items-center justify-center">
                 <p className="text-sm text-gray-400">
                   {templates.length === 0
-                    ? "Create your first template using the button above."
+                    ? isAdmin
+                      ? "Nothing to sort out — every template has an owner."
+                      : "Create your first template using the button above."
                     : "Select a template from the list to view its details."}
                 </p>
               </div>
@@ -1133,7 +1286,7 @@ export default function TemplatesPage() {
       )}
 
       {/* Dialogs */}
-      {showCreate && (
+      {showCreate && !isAdmin && (
         <CreateTemplateDialog
           onClose={() => setShowCreate(false)}
           onCreated={handleCreated}
@@ -1160,6 +1313,13 @@ export default function TemplatesPage() {
           template={deleteTarget}
           onClose={() => setDeleteTarget(null)}
           onDeleted={handleDeleted}
+        />
+      )}
+      {assignTarget && (
+        <AssignOwnerDialog
+          template={assignTarget}
+          onClose={() => setAssignTarget(null)}
+          onAssigned={handleAssigned}
         />
       )}
     </div>

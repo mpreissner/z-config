@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import require_auth, require_admin, AuthUser
+from api.dependencies import require_auth, AuthUser
 
 router = APIRouter()
 
@@ -512,7 +512,7 @@ def list_devices(
 def remove_devices(
     tenant: str,
     body: DeviceRemoveRequest,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_auth),
 ):
     svc = _get_service(tenant, user)
     return svc.remove_device(udid_list=body.udids, os_type=body.os_type)
@@ -522,7 +522,7 @@ def remove_devices(
 def force_remove_devices(
     tenant: str,
     body: DeviceRemoveRequest,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_auth),
 ):
     svc = _get_service(tenant, user)
     return svc.force_remove_device(udid_list=body.udids, os_type=body.os_type)
@@ -532,7 +532,7 @@ def force_remove_devices(
 def get_device_otp(
     tenant: str,
     udid: str,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_auth),
 ):
     svc = _get_service(tenant, user)
     return svc.get_otp(udid=udid)
@@ -823,7 +823,7 @@ def list_snapshots(
 def delete_snapshot(
     tenant: str,
     snapshot_id: int,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_auth),
 ):
     svc = _get_snapshot_service(tenant, user)
     try:
@@ -851,7 +851,7 @@ def restore_snapshot(
     tenant: str,
     snapshot_id: int,
     body: SnapshotRestoreRequest,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_auth),
 ):
     from lib.auth import ZscalerAuth
     from lib.zcc_client import ZCCClient, ZCCUnavailableError

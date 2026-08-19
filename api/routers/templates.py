@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.dependencies import require_auth, check_tenant_access, AuthUser
+from api.dependencies import require_auth, require_user, check_tenant_access, AuthUser
 
 log = logging.getLogger(__name__)
 
@@ -91,9 +91,14 @@ def _serialize(
     """Serialize a ZIATemplate ORM row to a dict safe for API responses.
 
     `can_manage` is computed here rather than left to the client to infer from
-    owner_user_id, because the admin case and the legacy-template case both make
-    that inference wrong.
+    owner_user_id, because the admin case and the unowned-template case both make
+    that inference wrong.  It delegates to template_share_service so that this
+    and the endpoints enforcing it can never drift — the old inline
+    `role == "admin"` said yes on every template, which is how an admin got a
+    manage button on work it should not have been able to see.
     """
+    from services import template_share_service as shares
+
     is_owner = bool(
         user is not None
         and tmpl.owner_user_id is not None
@@ -115,7 +120,12 @@ def _serialize(
         "visibility": tmpl.visibility or "private",
         "scope": tmpl.scope or "full",
         "is_owner": is_owner,
-        "can_manage": is_owner or (user is not None and user.role == "admin"),
+        "can_manage": (
+            user is not None and shares.can_manage(tmpl, user.user_id, user.role)
+        ),
+        # The admin view is a work queue, not a library: it can hand the
+        # template over or bin it, and nothing else.
+        "can_apply": user is not None and user.role != "admin",
         "share_count": share_count,
     }
 
@@ -190,7 +200,11 @@ def _get_import_client(tenant_id: int):
 
 @router.get("")
 def list_templates(user: AuthUser = Depends(require_auth)):
-    """List the templates this account can see, newest first."""
+    """List the templates this account can see, newest first.
+
+    For an admin session that is the unowned ones and only those — the queue of
+    templates whose owner is gone, waiting to be reassigned or deleted.
+    """
     from db.database import get_session
     from services.template_service import list_templates as _list
     from services import template_share_service as shares
@@ -216,7 +230,7 @@ def list_templates(user: AuthUser = Depends(require_auth)):
 @router.post("/preview")
 def preview_template(
     req: TemplatePreviewRequest,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
     """Compute included/stripped resource breakdown for a snapshot without writing to DB."""
     check_tenant_access(req.source_tenant_id, user)
@@ -238,7 +252,7 @@ def preview_template(
 @router.post("/preview/detail")
 def preview_template_entries(
     req: TemplatePreviewRequest,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
     """Every selectable entry in a snapshot, for the resource picker.
 
@@ -267,7 +281,7 @@ def preview_template_entries(
 
 
 @router.get("/share-targets")
-def list_share_targets(user: AuthUser = Depends(require_auth)):
+def list_share_targets(user: AuthUser = Depends(require_user)):
     """The people and groups a template can be shared with.
 
     Any authenticated account may read this: sharing is not an admin action, and
@@ -296,10 +310,28 @@ def list_share_targets(user: AuthUser = Depends(require_auth)):
     return {"users": users, "groups": groups}
 
 
+@router.get("/assignable-owners")
+def list_assignable_owners(user: AuthUser = Depends(require_auth)):
+    """Accounts an unowned template can be handed to.
+
+    Admin-only, and narrower than /share-targets: only accounts that hold the
+    user role, because an owner who cannot apply the template is not an owner.
+    Declared ahead of /{template_id} so the literal path wins the match.
+    """
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    from db.database import get_session
+    from services import template_share_service as shares
+
+    with get_session() as session:
+        return {"users": shares.assignable_owners(session)}
+
+
 @router.post("", status_code=201)
 def create_template(
     req: TemplateCreateRequest,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
     """Create a ZIA template from a snapshot.
 
@@ -423,7 +455,12 @@ def update_template(
 ):
     """Rename a template, change its description, or change who can see it.
 
-    Owner or admin only.  Contents are immutable — see TemplateUpdateRequest.
+    Owner only, with one exception: an admin may set `owner_user_id` on an
+    unowned template and may change nothing else.  Renaming or re-publishing
+    someone's template is not part of finding it a home, and an admin arriving
+    at this endpoint has by definition no other business with the row.
+
+    Contents are immutable — see TemplateUpdateRequest.
 
     Dropping to visibility='private' leaves the share rows in place: an owner
     hiding a work-in-progress should get their share list back when they unhide
@@ -432,6 +469,7 @@ def update_template(
     from db.database import get_session
     from db.models import User, ZIATemplate
     from services.template_service import get_template as _get
+    from services import role_service
     from services import template_share_service as shares, audit_service
 
     if req.visibility is not None and req.visibility not in ("private", "shared", "org"):
@@ -440,6 +478,13 @@ def update_template(
         )
     if req.owner_user_id is not None and user.role != "admin":
         raise HTTPException(status_code=403, detail="Only an admin can reassign ownership")
+    if user.role == "admin" and any(
+        f is not None for f in (req.name, req.description, req.visibility)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="An admin may only assign an owner; switch roles to edit a template",
+        )
 
     changes = {}
     try:
@@ -478,7 +523,23 @@ def update_template(
                     raise HTTPException(
                         status_code=422, detail=f"Unknown or inactive user {req.owner_user_id}"
                     )
+                # The new owner has to be able to use what they are given, and
+                # an admin-only account cannot apply a template — handing it one
+                # would leave the row unowned in everything but the column.
+                # A group's mapped_role counts, the same as it does at login.
+                owner_roles = role_service.available_roles(
+                    new_owner.id, new_owner.role, session=session
+                )
+                if "user" not in owner_roles:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"{new_owner.username} does not hold the user role and "
+                            "could not apply this template"
+                        ),
+                    )
                 changes["owner_user_id"] = req.owner_user_id
+                changes["owner_username"] = new_owner.username
                 tmpl.owner_user_id = new_owner.id
                 tmpl.owner_username = new_owner.username
 
@@ -514,11 +575,12 @@ def delete_template(
     template_id: int,
     user: AuthUser = Depends(require_auth),
 ):
-    """Delete a template by ID.  Owner or admin only.
+    """Delete a template by ID.  Its owner, or an admin if it has none.
 
-    A legacy template (no owner) is admin-only: it is visible org-wide, and
-    handing delete rights to whoever happens to open it would let one account
-    remove something everyone else depends on.
+    An unowned template is admin-only: it is the one template an admin can see,
+    and deleting it is the other half of the job — handing delete rights to
+    whoever happens to open it would let one account remove something everyone
+    else depends on.
     """
     from db.database import get_session
     from services.template_service import delete_template as _delete, get_template as _get
@@ -534,7 +596,7 @@ def delete_template(
                 detail = (
                     "This template has no owner; only an admin can delete it"
                     if tmpl.owner_user_id is None
-                    else "Only the template's owner or an admin can delete it"
+                    else "Only the template's owner can delete it"
                 )
                 raise HTTPException(status_code=403, detail=detail)
             tmpl_name = tmpl.name
@@ -585,9 +647,9 @@ def _load_manageable(template_id: int, user: AuthUser, session):
 @router.get("/{template_id}/shares")
 def list_template_shares(
     template_id: int,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
-    """Who this template is shared with.  Owner or admin only."""
+    """Who this template is shared with.  Owner only."""
     from db.database import get_session
     from services import template_share_service as shares
 
@@ -603,7 +665,7 @@ def list_template_shares(
 def add_template_shares(
     template_id: int,
     req: TemplateShareRequest,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
     """Grant a template to users and/or groups.  Owner or admin only.
 
@@ -661,7 +723,7 @@ def add_template_shares(
 def remove_template_share(
     template_id: int,
     share_id: int,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
     """Revoke one grant.  Owner or admin only."""
     from db.database import get_session
@@ -705,7 +767,7 @@ def remove_template_share(
 def apply_template_to_tenant(
     tenant_id: int,
     req: TemplateApplyRequest,
-    user: AuthUser = Depends(require_auth),
+    user: AuthUser = Depends(require_user),
 ):
     """Apply a template to a target tenant.  Returns a job_id for SSE streaming.
 
