@@ -42,6 +42,11 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from services.zia_import_service import (
+    SETTINGS_METADATA_FIELDS,
+    SETTINGS_SINGLETONS,
+)
+
 # ---------------------------------------------------------------------------
 # Reference types — needed in the DB no matter what a baseline contains
 # ---------------------------------------------------------------------------
@@ -823,12 +828,7 @@ class ZIAPushService:
                     # Settings singletons always exist in every tenant — queue an
                     # update even when the DB has no entry (e.g. first push before
                     # import, or stale DB).  Use the hardcoded singleton ID "1".
-                    _SETTINGS_SINGLETONS = {
-                        "url_filter_cloud_app_settings",
-                        "advanced_settings",
-                        "browser_control_settings",
-                    }
-                    if rtype in _SETTINGS_SINGLETONS and _is_writable(raw_config):
+                    if rtype in SETTINGS_SINGLETONS and _is_writable(raw_config):
                         pending.setdefault(rtype, []).append(
                             dict(entry,
                                  __action="update",
@@ -1085,8 +1085,7 @@ class ZIAPushService:
         #                         after the settings push materialises them
         #   other_managed       — remaining managed resources (Pass 1b)
         #   user_pending        — user-defined resources (Pass 2+)
-        _ALL_SINGLETONS = {"url_filter_cloud_app_settings", "advanced_settings",
-                           "browser_control_settings"}
+        _ALL_SINGLETONS = SETTINGS_SINGLETONS
         settings_pending: Dict[str, List[dict]] = {}
         one_click_pending: Dict[str, List[dict]] = {}
         other_managed_pending: Dict[str, List[dict]] = {}
@@ -1814,6 +1813,13 @@ class ZIAPushService:
         except Exception:
             src = self._normalize(self._strip(baseline_config))
             tgt = self._normalize(self._strip(existing_config))
+        if resource_type in SETTINGS_SINGLETONS:
+            # A scoped template may carry only some of a singleton's keys, and
+            # the push merges those over the target rather than replacing it.
+            # Comparing whole objects would then report a difference the push
+            # never intends to close, so only the keys the baseline actually
+            # carries are compared — which is exactly the set the push writes.
+            tgt = {k: v for k, v in tgt.items() if k in src}
         return src == tgt
 
     def _normalize(self, value):
@@ -1893,18 +1899,25 @@ class ZIAPushService:
         if resource_type == "cloud_app_control_rule":
             return self._push_cloud_app_rule(name, source_id, raw_config, action, target_id)
 
-        # browser_control_settings: GET-then-merge to obtain the target's live
-        # smartIsolationProfileId and smartIsolationProfile (profileSeq is only
-        # available from this endpoint — /browserIsolation/profiles always returns 0).
-        if resource_type == "browser_control_settings" and action == "update":
+        # Settings singletons: GET-then-merge, always.
+        #
+        # The endpoints replace the whole object on PUT, so a payload carrying a
+        # subset of the keys would reset every key it omits to whatever the API
+        # defaults to.  A scoped template is allowed to carry a subset — the
+        # point of picking the AI prompt toggles is not to take the tenant's
+        # session timeouts with them — so the target's live settings are read
+        # first and the baseline keys are laid over them.  A full template
+        # carries every key, and merging one of those is the same PUT it always
+        # was.
+        if resource_type in SETTINGS_SINGLETONS and action == "update":
             try:
-                current = self._client.zia_get("/zia/api/v1/browserControlSettings")
+                current = getattr(self._client, f"list_{resource_type}")()[0]
                 payload = self._build_payload(resource_type, raw_config)
                 warnings: List[str] = []
                 norm_warning = payload.pop("__norm_warning", None)
                 if norm_warning:
                     warnings.append(norm_warning)
-                if payload.get("enableSmartBrowserIsolation"):
+                if resource_type == "browser_control_settings" and payload.get("enableSmartBrowserIsolation"):
                     target_seq = current.get("smartIsolationProfileId")
                     target_profile = current.get("smartIsolationProfile")
                     if target_seq and target_profile:
@@ -1922,7 +1935,12 @@ class ZIAPushService:
                             "has not been activated on this tenant; enable it once via "
                             "the web UI, then re-push to keep it in sync"
                         )
-                self._client.update_browser_control_settings(target_id, payload)
+                merged = {
+                    k: v for k, v in current.items()
+                    if k not in SETTINGS_METADATA_FIELDS
+                }
+                merged.update(payload)
+                getattr(self._client, _WRITE_METHODS[resource_type][1])(target_id, merged)
                 rec = PushRecord(resource_type=resource_type, name=name, status="updated")
                 rec.warnings.extend(warnings)
                 return rec

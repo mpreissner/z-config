@@ -33,12 +33,17 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
 from db.models import RestorePoint, ZIATemplate
+from services.zia_import_service import (
+    SETTINGS_METADATA_FIELDS,
+    SETTINGS_SINGLETONS,
+)
 
 
 # Resource types stripped entirely when creating a template.
@@ -565,6 +570,80 @@ def _summarize(rtype: str, rc: dict) -> str:
     return " · ".join(bits)
 
 
+# Words a naive camelCase split gets wrong.  Only the ones that actually occur in
+# the settings singletons — this is a readability pass on a picker label, not a
+# general-purpose humanizer.
+_LABEL_WORDS = {
+    "ai": "AI", "api": "API", "dlp": "DLP", "dns": "DNS", "ftp": "FTP",
+    "gpt": "GPT", "http": "HTTP", "https": "HTTPS", "id": "ID", "ip": "IP",
+    "ipv6": "IPv6", "ips": "IPS", "nss": "NSS", "ocr": "OCR", "pac": "PAC",
+    "poe": "POE", "saml": "SAML", "ssl": "SSL", "ui": "UI", "url": "URL",
+    "zia": "ZIA", "zpa": "ZPA",
+}
+
+# Product names the split breaks in two.
+_LABEL_PHRASES = {
+    "Chat GPT": "ChatGPT",
+    "Co Pilot": "Copilot",
+    "Per Plexity": "Perplexity",
+    "Deep Seek": "DeepSeek",
+    "Quillbot AI": "QuillBot",
+    "I Pv6": "IPv6",
+}
+
+
+def _field_label(key: str) -> str:
+    """"enableChatGptPrompt" → "Enable ChatGPT Prompt"."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", key.replace("_", " "))
+    # Second pass for runs of capitals: "SSLBypass" splits before the last one,
+    # which the lower→upper rule above cannot see.
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    label = " ".join(
+        _LABEL_WORDS.get(w.lower(), w[0].upper() + w[1:])
+        for w in spaced.split() if w
+    )
+    for wrong, right in _LABEL_PHRASES.items():
+        label = label.replace(wrong, right)
+    return label
+
+
+def _field_value(value) -> str:
+    """A short, safe rendering of one settings value for the picker.
+
+    Scalars are shown as-is because that is the whole point — someone picking
+    AI prompt toggles wants to see which are on.  Lists and objects are shown as
+    a count: they hold URLs, user references and exempted app names, and the
+    picker is visible to anyone who may create a template (see _summarize).
+    """
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if value is None:
+        return "unset"
+    if isinstance(value, (list, tuple, set)):
+        n = len(value)
+        return f"{n} item{'s' if n != 1 else ''}"
+    if isinstance(value, dict):
+        return f"{len(value)} field{'s' if len(value) != 1 else ''}"
+    text = str(value)
+    return text if len(text) <= 40 else text[:37] + "…"
+
+
+def _settings_fields(rc: dict) -> List[dict]:
+    """The individually selectable keys of a settings singleton, sorted by label.
+
+    The wrapper fields the client adds so a singleton stores like a resource are
+    not settings and are never offered.
+    """
+    return sorted(
+        (
+            {"key": k, "label": _field_label(k), "value": _field_value(v)}
+            for k, v in rc.items()
+            if k not in SETTINGS_METADATA_FIELDS
+        ),
+        key=lambda f: f["label"].lower(),
+    )
+
+
 def preview_template_detail(
     snapshot_id: int,
     source_tenant_id: int,
@@ -588,13 +667,20 @@ def preview_template_detail(
         rows = []
         for e in kept[rtype]:
             rc = e.get("raw_config") or {}
-            rows.append({
+            row = {
                 "id": str(e.get("id")),
                 "name": _entry_name(rtype, e),
                 "predefined": _is_predefined(rtype, rc),
                 "summary": _summarize(rtype, rc),
                 "order": rc.get("order"),
-            })
+            }
+            # A settings singleton is one object holding dozens of unrelated
+            # toggles, so the entry is not the unit anyone chooses — the key is.
+            # Its keys ride along on the row and the picker offers them
+            # individually; see field_selection in create_template_from_snapshot.
+            if rtype in SETTINGS_SINGLETONS:
+                row["fields"] = _settings_fields(rc)
+            rows.append(row)
         rows.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["name"].lower()))
         entries[rtype] = rows
 
@@ -605,6 +691,7 @@ def preview_template_detail(
 def _apply_selection(
     kept: Dict[str, List[dict]],
     selection: Dict[str, List[str]],
+    field_selection: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, List[dict]]:
     """Reduce the stripped snapshot to the closed selection, renumbering rules.
 
@@ -636,7 +723,64 @@ def _apply_selection(
             )
         group_field = "type" if rtype == "cloud_app_control_rule" else None
         result[rtype] = _renumber_orders(picked, group_field=group_field)
+    if field_selection:
+        _apply_field_selection(result, field_selection)
     return result
+
+
+def _apply_field_selection(
+    result: Dict[str, List[dict]],
+    field_selection: Dict[str, List[str]],
+) -> None:
+    """Reduce each selected settings singleton to the keys its author picked.
+
+    Entries are replaced with copies rather than edited: `kept` still points at
+    the loaded RestorePoint's own dicts, and a template must never write back
+    into the snapshot it was cut from.  The wrapper fields stay — they are what
+    makes the entry storable and what tells the push whether the object is
+    writable at all.
+
+    A type absent from field_selection, or present with no keys, keeps every key
+    — "include the whole object" stays expressible.
+
+    Raises ValueError if a type is not a settings singleton, was not selected, or
+    a named key is not in the snapshot; a picker built against a different
+    snapshot is better rejected than honored in part.
+    """
+    for rtype, keys in field_selection.items():
+        if not keys:
+            continue
+        if rtype not in SETTINGS_SINGLETONS:
+            raise ValueError(
+                f"invalid_selection:'{rtype}' has no individually selectable "
+                f"settings — pick the whole resource instead"
+            )
+        picked = result.get(rtype)
+        if not picked:
+            raise ValueError(
+                f"invalid_selection:Settings were chosen for '{rtype}' but the "
+                f"resource itself was not selected"
+            )
+        wanted = set(keys)
+        narrowed = []
+        for entry in picked:
+            rc = entry.get("raw_config") or {}
+            missing = wanted - set(rc)
+            if missing:
+                raise ValueError(
+                    f"invalid_selection:{rtype} setting"
+                    f"{'s' if len(missing) != 1 else ''} "
+                    f"{', '.join(sorted(missing))} "
+                    f"{'are' if len(missing) != 1 else 'is'} no longer in the snapshot"
+                )
+            narrowed.append({
+                **entry,
+                "raw_config": {
+                    k: v for k, v in rc.items()
+                    if k in wanted or k in SETTINGS_METADATA_FIELDS
+                },
+            })
+        result[rtype] = narrowed
 
 
 def _load_snapshot(
@@ -698,6 +842,7 @@ def create_template_from_snapshot(
     description: Optional[str],
     session: Session,
     selection: Optional[Dict[str, List[str]]] = None,
+    field_selection: Optional[Dict[str, List[str]]] = None,
     owner_user_id: Optional[int] = None,
     owner_username: Optional[str] = None,
     visibility: str = "private",
@@ -712,6 +857,14 @@ def create_template_from_snapshot(
 
     selection=None keeps the historical behavior byte for byte: a full template
     over everything portable in the snapshot.
+
+    `field_selection` narrows the settings singletons further, to the individual
+    keys named per type.  ZIA stores each of these as one object holding dozens
+    of unrelated toggles, so carrying the whole object means carrying the source
+    tenant's session timeouts along with its AI prompt controls; naming keys
+    keeps a template to the setting it is actually about.  The push merges the
+    named keys over the target's live settings, leaving the rest alone.  It is
+    only meaningful alongside a selection, and only for the singleton types.
 
     Raises:
         LookupError: Snapshot not found or not a ZIA snapshot for that tenant.
@@ -738,13 +891,22 @@ def create_template_from_snapshot(
     selection_meta: Optional[Dict] = None
     if selection:
         closed, additions, warnings = resolve_dependencies(selection, kept)
-        kept = _apply_selection(kept, closed)
+        kept = _apply_selection(kept, closed, field_selection)
         scope = "scoped"
         selection_meta = {
             "selected": {k: sorted(str(i) for i in v) for k, v in selection.items() if v},
             "auto_included": additions,
             "warnings": warnings,
         }
+        if field_selection:
+            selection_meta["fields"] = {
+                k: sorted(v) for k, v in field_selection.items() if v
+            }
+    elif field_selection:
+        raise ValueError(
+            "invalid_selection:Individual settings can only be chosen for a "
+            "scoped template"
+        )
 
     resource_count = sum(len(v) for v in kept.values())
     if resource_count == 0:

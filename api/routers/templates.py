@@ -46,6 +46,10 @@ class TemplateCreateRequest(BaseModel):
     #: {resource_type: [entry_id, …]}.  Omitted or empty means a full template
     #: over everything portable in the snapshot — the historical behaviour.
     selection: Optional[Dict[str, List[str]]] = None
+    #: {settings_type: [key, …]}.  Narrows a settings singleton to the individual
+    #: toggles chosen, instead of carrying the whole object.  Scoped templates
+    #: only; omitted or empty means every key of whatever was selected.
+    field_selection: Optional[Dict[str, List[str]]] = None
     visibility: str = "private"
 
 
@@ -242,6 +246,9 @@ def preview_template_entries(
     {resource_type: [{id, name, predefined, summary, order}]}.  Deliberately no
     raw_config: a rule's full configuration can name internal hosts, and the
     picker only needs enough to tell two rules apart.
+
+    Settings singletons carry one extra key, `fields`, listing their individually
+    selectable toggles — see field_selection on the create request.
     """
     check_tenant_access(req.source_tenant_id, user)
 
@@ -325,6 +332,7 @@ def create_template(
                 description=req.description,
                 session=session,
                 selection=req.selection or None,
+                field_selection=req.field_selection or None,
                 owner_user_id=user.user_id,
                 owner_username=user.username,
                 visibility=req.visibility,

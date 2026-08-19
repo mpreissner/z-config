@@ -105,6 +105,27 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
 ]
 
 
+# Tenant-wide settings that ZIA exposes as one object at a fixed endpoint.  They
+# are wrapped in a one-element list at import so they store like any other
+# resource, always under id 1.
+#
+# They differ from every other type in one way that matters downstream: the unit
+# a person cares about is a single key, not the object.  Turning on the Claude
+# prompt toggle and taking the tenant's session timeouts with it is not a choice
+# anyone means to make.  A template can therefore carry a subset of the keys,
+# and ZIAPushService merges that subset over the target's live settings instead
+# of PUTting it whole.
+SETTINGS_SINGLETONS: frozenset = frozenset({
+    "url_filter_cloud_app_settings",
+    "advanced_settings",
+    "browser_control_settings",
+})
+
+# Wrapper fields added by the client so a singleton stores like a resource.  They
+# are not settings, and are never offered for selection or diffed as one.
+SETTINGS_METADATA_FIELDS: frozenset = frozenset({"id", "name", "access_control"})
+
+
 _META_KEYS = frozenset({"creation_time", "modified_time", "modified_by"})
 
 
