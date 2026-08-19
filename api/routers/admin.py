@@ -158,7 +158,15 @@ def update_user(user_id: int, body: UserUpdate, current: AuthUser = Depends(requ
             user.role = body.role
         if body.email is not None:
             user.email = body.email
+        disowned: List[str] = []
         if body.is_active is not None:
+            # Deactivating is a deprovision, not a pause: the account can no
+            # longer log in, so anything it owns is stranded until an admin
+            # rehomes it. Reactivating does not give the templates back — the
+            # admin has had the chance to reassign them by then.
+            if user.is_active and not body.is_active:
+                from services import template_share_service as _shares
+                disowned = _shares.disown_templates(user.id, session)
             user.is_active = body.is_active
         if body.force_password_change is not None:
             user.force_password_change = body.force_password_change
@@ -170,7 +178,21 @@ def update_user(user_id: int, body: UserUpdate, current: AuthUser = Depends(requ
         session.flush()
         _assert_admin_remains(session)
         session.refresh(user)
-        return _user_out(user)
+        out = _user_out(user)
+        username = user.username
+
+    if disowned:
+        from services import audit_service
+        audit_service.log(
+            product="SYSTEM",
+            operation="disown_templates",
+            action="UPDATE",
+            status="SUCCESS",
+            resource_type="zia_template",
+            resource_name=username,
+            details={"templates": disowned, "reason": "owner deactivated"},
+        )
+    return out
 
 
 @router.delete("/users/{user_id}", status_code=204)
@@ -181,9 +203,27 @@ def delete_user(user_id: int, current: AuthUser = Depends(require_admin)):
             raise HTTPException(status_code=404, detail="User not found")
         if user.id == current.user_id:
             raise HTTPException(status_code=400, detail="Cannot delete your own account")
+        # Explicit rather than leaning on the column's ON DELETE SET NULL: the
+        # SCIM side deactivates instead of deleting, and both paths have to
+        # leave the same state behind.
+        from services import template_share_service as _shares
+        username = user.username
+        disowned = _shares.disown_templates(user.id, session)
         session.delete(user)
         session.flush()
         _assert_admin_remains(session)
+
+    if disowned:
+        from services import audit_service
+        audit_service.log(
+            product="SYSTEM",
+            operation="disown_templates",
+            action="UPDATE",
+            status="SUCCESS",
+            resource_type="zia_template",
+            resource_name=username,
+            details={"templates": disowned, "reason": "owner deleted"},
+        )
 
 
 # ── Entitlements ──────────────────────────────────────────────────────────────

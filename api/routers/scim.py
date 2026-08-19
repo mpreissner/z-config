@@ -364,6 +364,7 @@ async def replace_user(user_id: int, request: Request, _: int = Depends(require_
             raise ScimError(404, f"User {user_id} not found")
 
         active = _truthy(payload.get("active"), u.is_active)
+        was_active = u.is_active
 
         name = payload.get("name") or {}
         if payload.get("userName"):
@@ -374,6 +375,7 @@ async def replace_user(user_id: int, request: Request, _: int = Depends(require_
         if "externalId" in payload:
             u.scim_external_id = payload["externalId"]
         u.is_active = active
+        _disown_if_deprovisioned(u, was_active, session, audit)
         session.flush()
         _assert_admin_remains(session)
         session.refresh(u)
@@ -397,6 +399,8 @@ async def patch_user(user_id: int, request: Request, _: int = Depends(require_sc
         if not u:
             raise ScimError(404, f"User {user_id} not found")
 
+        was_active = u.is_active
+
         for op in ops:
             if not isinstance(op, dict):
                 continue
@@ -413,6 +417,7 @@ async def patch_user(user_id: int, request: Request, _: int = Depends(require_sc
                 continue
             _apply_user_field(u, path, value, action)
 
+        _disown_if_deprovisioned(u, was_active, session, audit)
         session.flush()
         # After the whole batch: a PATCH that deactivates and reactivates in one
         # body has no net effect, and checking per-operation would refuse it.
@@ -457,6 +462,30 @@ def _apply_user_field(u: User, path: str, value: Any, action: str) -> None:
         u.family_name = value.get("familyName", u.family_name)
 
 
+def _disown_if_deprovisioned(u: User, was_active: bool, session, audit: List[Dict[str, Any]]) -> None:
+    """Cut a just-deactivated account loose from the templates it owns.
+
+    Called on the net result of a request rather than per field, because a PATCH
+    body that deactivates and reactivates in one go has no net effect — the same
+    reason _assert_admin_remains runs after the whole batch.
+
+    SCIM never hard-deletes, so the column's ON DELETE SET NULL never fires here
+    and this is the only thing standing between a deprovisioned account and a
+    template nobody can reach.
+    """
+    if not (was_active and not u.is_active):
+        return
+    from services import template_share_service as shares
+
+    names = shares.disown_templates(u.id, session)
+    if names:
+        audit.append({
+            "operation": "disown_templates", "action": "UPDATE", "name": u.username,
+            "resource_type": "zia_template",
+            "details": {"templates": names, "reason": "owner deprovisioned via SCIM"},
+        })
+
+
 @router.delete("/Users/{user_id}", status_code=204)
 def delete_user(user_id: int, _: int = Depends(require_scim_token)):
     """Soft delete. Rows stay so audit references and entitlements survive."""
@@ -465,7 +494,9 @@ def delete_user(user_id: int, _: int = Depends(require_scim_token)):
         u = session.query(User).filter_by(id=user_id).first()
         if not u:
             raise ScimError(404, f"User {user_id} not found")
+        was_active = u.is_active
         u.is_active = False
+        _disown_if_deprovisioned(u, was_active, session, audit)
         session.flush()
         _assert_admin_remains(session)
         audit.append({"operation": "scim_delete_user", "action": "DELETE", "name": u.username})
@@ -720,6 +751,12 @@ def _audit(entries: List[Dict[str, Any]]) -> None:
             action=e["action"],
             status="SUCCESS",
             tenant_id=None,
-            resource_type="user" if "user" in e["operation"] else "scim_group",
+            # The name-sniffing default covers the user and group operations
+            # this router has always written; anything else says so outright.
+            resource_type=e.get(
+                "resource_type",
+                "user" if "user" in e["operation"] else "scim_group",
+            ),
             resource_name=e.get("name"),
+            details=e.get("details"),
         )
