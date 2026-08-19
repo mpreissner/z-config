@@ -735,6 +735,7 @@ def apply_template_to_tenant(
                 ),
             )
         tmpl_name = tmpl.name
+        tmpl_scope = tmpl.scope or "full"
         # Template snapshot is stored as the resources dict directly
         snap_resources = tmpl.snapshot or {}
 
@@ -812,10 +813,25 @@ def apply_template_to_tenant(
                         dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                     )
 
-                # Re-import target tenant so DB reflects pushed state
+                # Re-import the target so the DB reflects what was pushed.
+                #
+                # A scoped template names a handful of resources, and
+                # classify_baseline already imported the whole tenant a moment
+                # ago — so re-reading all 50-odd types costs minutes to pick up
+                # changes in four.  Narrow it to the types the template carries:
+                # nothing else could have been written, and _mark_deleted takes
+                # the same list, so untouched types are not flagged stale.
+                #
+                # A full template keeps the full re-import: it spans nearly every
+                # type regardless, and a wipe (full templates only) deletes
+                # across types its snapshot never named.
                 from services.zia_import_service import ZIAImportService
+                reimport_types = (
+                    sorted(snap_resources.keys()) if tmpl_scope == "scoped" else None
+                )
                 ZIAImportService(client, tenant_id=tenant_id).run(
-                    progress_callback=on_import_progress
+                    progress_callback=on_import_progress,
+                    resource_types=reimport_types,
                 )
 
             except _PushCancelled as exc:
