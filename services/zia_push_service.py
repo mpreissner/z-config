@@ -43,6 +43,36 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
+# Reference types — needed in the DB no matter what a baseline contains
+# ---------------------------------------------------------------------------
+
+# _ref_resolved() strips any reference ID it cannot find in the target, so a
+# rule that points at a location, group or department the DB has not seen is
+# pushed with that scoping silently removed.  _usable_dlp_engine_ids and the
+# device_group / proxy_gateway name remaps read the DB the same way.
+#
+# These types therefore have to be freshly imported whenever a classify run
+# narrows its import — a scoped template names the resources it carries, not
+# the environment-specific things they point at.
+#
+# Not listed, because ZIA never imports them: zpa_app_segment (and the
+# tenancy_restriction_profile / devices refs).  Their IDs are stripped either
+# way, narrowed import or not.
+REFERENCE_TYPES: Set[str] = {
+    "location",
+    "location_lite",   # predefined locations — _ref_resolved unions these in
+    "location_group",
+    "department",
+    "group",
+    "user",
+    "device_group",
+    "url_category",
+    "dlp_engine",      # _usable_dlp_engine_ids
+    "proxy_gateway",   # matched by name so a report can name the target's own
+}
+
+
+# ---------------------------------------------------------------------------
 # Push order — resources are attempted tier by tier within each pass
 # ---------------------------------------------------------------------------
 
@@ -606,6 +636,7 @@ class ZIAPushService:
         baseline: dict,
         import_progress_callback: Optional[Callable] = None,
         skip_import: bool = False,
+        import_resource_types: Optional[List[str]] = None,
     ) -> DryRunResult:
         """Import target state, load DB, classify each baseline entry.
 
@@ -623,11 +654,23 @@ class ZIAPushService:
                 the current DB state as-is.  Pass True only when the caller knows
                 a fresh import was already performed (e.g. during preview) and no
                 wipe has occurred since then.
+            import_resource_types: Narrow the fresh import to these types.
+                REFERENCE_TYPES is unioned in — classification reads those out of
+                the DB to resolve rule scoping, so they have to be current even
+                when the baseline never mentions them.  None imports everything.
         """
         if not skip_import:
             from services.zia_import_service import ZIAImportService
             import_svc = ZIAImportService(self._client, self._tenant_id)
-            import_svc.run(progress_callback=import_progress_callback)
+            narrowed = (
+                sorted(set(import_resource_types) | REFERENCE_TYPES)
+                if import_resource_types is not None
+                else None
+            )
+            import_svc.run(
+                progress_callback=import_progress_callback,
+                resource_types=narrowed,
+            )
 
         existing = self._load_existing_from_db()
         # Build a lookup of all IDs currently in the target so cross-tenant ref

@@ -745,6 +745,12 @@ def apply_template_to_tenant(
     def run():
         service = ZIAPushService(client, tenant_id=tenant_id, full_clone=False)
         baseline = {"product": "ZIA", "resources": snap_resources}
+        # None for a full template: it spans nearly every type anyway, and a wipe
+        # — which only full templates can request — deletes across types its
+        # snapshot never named.
+        scoped_types = (
+            sorted(snap_resources.keys()) if tmpl_scope == "scoped" else None
+        )
 
         wipe_done = [0]
 
@@ -799,8 +805,16 @@ def apply_template_to_tenant(
                     wipe_records = []
                     wipe_failed_items = []
                     wiped = 0
+                    # A scoped template touches a handful of types, so the
+                    # pre-push import does not need to re-read all 53 — only the
+                    # types the template carries, plus the reference types
+                    # classify_baseline unions in to resolve rule scoping.
+                    # Everything else in the DB is left as the last import
+                    # recorded it, which is all classification asks of it.
                     dry_run = service.classify_baseline(
-                        baseline, import_progress_callback=on_import_progress
+                        baseline,
+                        import_progress_callback=on_import_progress,
+                        import_resource_types=scoped_types,
                     )
                     # dry_run.skipped carries the manual-step reports for entries
                     # the API refuses to create — the proxy gateway and the
@@ -814,24 +828,14 @@ def apply_template_to_tenant(
                     )
 
                 # Re-import the target so the DB reflects what was pushed.
-                #
-                # A scoped template names a handful of resources, and
-                # classify_baseline already imported the whole tenant a moment
-                # ago — so re-reading all 50-odd types costs minutes to pick up
-                # changes in four.  Narrow it to the types the template carries:
-                # nothing else could have been written, and _mark_deleted takes
-                # the same list, so untouched types are not flagged stale.
-                #
-                # A full template keeps the full re-import: it spans nearly every
-                # type regardless, and a wipe (full templates only) deletes
-                # across types its snapshot never named.
+                # Narrowed the same way as the pre-push import: nothing outside
+                # the template's own types could have been written, and
+                # _mark_deleted takes the same list, so types that were not
+                # re-read are not swept as stale.
                 from services.zia_import_service import ZIAImportService
-                reimport_types = (
-                    sorted(snap_resources.keys()) if tmpl_scope == "scoped" else None
-                )
                 ZIAImportService(client, tenant_id=tenant_id).run(
                     progress_callback=on_import_progress,
-                    resource_types=reimport_types,
+                    resource_types=scoped_types,
                 )
 
             except _PushCancelled as exc:
