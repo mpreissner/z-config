@@ -89,6 +89,13 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("vpn_credential", "list_vpn_credentials", id_field="id"),
     ResourceDef("gre_tunnel",     "list_gre_tunnels",     id_field="id"),
     ResourceDef("sublocation",    "list_sublocations",    id_field="id"),
+    # Third-party proxy chaining — the forwarding-rule -> proxyGateway ->
+    # proxy -> cert chain.  root_certificate is undocumented and has no SDK
+    # method; ZIAClient reaches it over direct HTTP, so it stores camelCase.
+    ResourceDef("proxy",            "list_proxies",           id_field="id", name_field="name"),
+    ResourceDef("proxy_gateway",    "list_proxy_gateways",    id_field="id", name_field="name"),
+    ResourceDef("root_certificate", "list_root_certificates", id_field="id", name_field="displayName",
+                list_args={"include_cert": True}),
     # Traffic Forwarding — subclouds imported for PAC file generator.
     ResourceDef("sub_cloud", "list_sub_clouds", id_field="id", name_field="name"),
     # PAC Files — metadata only (pac_content excluded via filter=pac_content in list_pac_files).

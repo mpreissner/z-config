@@ -43,6 +43,36 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
+# Reference types — needed in the DB no matter what a baseline contains
+# ---------------------------------------------------------------------------
+
+# _ref_resolved() strips any reference ID it cannot find in the target, so a
+# rule that points at a location, group or department the DB has not seen is
+# pushed with that scoping silently removed.  _usable_dlp_engine_ids and the
+# device_group / proxy_gateway name remaps read the DB the same way.
+#
+# These types therefore have to be freshly imported whenever a classify run
+# narrows its import — a scoped template names the resources it carries, not
+# the environment-specific things they point at.
+#
+# Not listed, because ZIA never imports them: zpa_app_segment (and the
+# tenancy_restriction_profile / devices refs).  Their IDs are stripped either
+# way, narrowed import or not.
+REFERENCE_TYPES: Set[str] = {
+    "location",
+    "location_lite",   # predefined locations — _ref_resolved unions these in
+    "location_group",
+    "department",
+    "group",
+    "user",
+    "device_group",
+    "url_category",
+    "dlp_engine",      # _usable_dlp_engine_ids
+    "proxy_gateway",   # matched by name so a report can name the target's own
+}
+
+
+# ---------------------------------------------------------------------------
 # Push order — resources are attempted tier by tier within each pass
 # ---------------------------------------------------------------------------
 
@@ -50,6 +80,7 @@ PUSH_ORDER: List[str] = [
     # Tier 0 — no deps
     "rule_label",
     "time_interval",
+    "root_certificate",
     "workload_group",
     "dlp_engine",
     "dlp_dictionary",
@@ -63,6 +94,7 @@ PUSH_ORDER: List[str] = [
     # Tier 2 — aggregate objects
     "network_svc_group",
     "network_app_group",
+    "proxy",                # references root_certificate above
     # Tier 2.5 — tenant-wide settings (before rules: provisions One-Click rules,
     # enables admin rank, and sets other policy toggles)
     "url_filter_cloud_app_settings",
@@ -151,6 +183,12 @@ SKIP_TYPES: set = {
     "location",             # tenant-specific; Full Clone only
     "location_lite",        # predefined/system locations (Road Warrior etc.) — imported for ID remapping only
     "device_group",         # predefined OS/platform groups (Windows, iOS, etc.) — imported for ID remapping only
+    # Third-party proxy chaining: the certificate and the proxy below it are
+    # pushed (see PUSH_ORDER); the gateway that joins them is not.  It has no
+    # write endpoint on the OneAPI gateway — POST answers 405 Allow: GET,OPTIONS
+    # — so it and the forwarding rule that points at it stay manual.  Both are
+    # reported rather than dropped: see _proxychain_manual_steps.
+    "proxy_gateway",
     "network_app",          # system-defined, read-only
     "cloud_app_policy",     # reference data, not policy
     "cloud_app_ssl_policy",
@@ -286,6 +324,12 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
     "tenancy_restriction_profile":   ("create_tenancy_restriction_profile",
                                       "update_tenancy_restriction_profile"),
     "sandbox_rule":                  ("create_sandbox_rule",   "update_sandbox_rule"),
+    "proxy":                         ("create_proxy",         "update_proxy"),
+    # Certificate material is create-only — see _CREATE_ONLY_TYPES.  The update
+    # slot is never reached; it repeats the create name rather than lying about
+    # an update endpoint the push cannot address.
+    "root_certificate":              ("create_root_certificate",
+                                      "create_root_certificate"),
     # Singletons — no create path; use update method for both entries
     "url_filter_cloud_app_settings": ("update_url_filter_cloud_app_settings",
                                       "update_url_filter_cloud_app_settings"),
@@ -299,6 +343,15 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
     "gre_tunnel":     ("create_gre_tunnel",       "update_gre_tunnel"),
     "sublocation":    ("create_sublocation",      "update_sublocation"),
 }
+
+# Types that are created when absent and left alone when present.
+#
+# A root certificate is the PEM itself; there is no meaningful "update" to
+# push.  The item path does allow PUT, but like DELETE it needs a certTypes
+# query string the generic update path has no way to supply, and overwriting a
+# certificate the target already trusts is not something a template should do
+# silently.  Matching on displayName and remapping is the whole job.
+_CREATE_ONLY_TYPES: Set[str] = {"root_certificate"}
 
 # GET methods for live configVersion fetch before UPDATE.
 # Only types with single-record GET endpoints are listed.
@@ -583,6 +636,7 @@ class ZIAPushService:
         baseline: dict,
         import_progress_callback: Optional[Callable] = None,
         skip_import: bool = False,
+        import_resource_types: Optional[List[str]] = None,
     ) -> DryRunResult:
         """Import target state, load DB, classify each baseline entry.
 
@@ -600,11 +654,23 @@ class ZIAPushService:
                 the current DB state as-is.  Pass True only when the caller knows
                 a fresh import was already performed (e.g. during preview) and no
                 wipe has occurred since then.
+            import_resource_types: Narrow the fresh import to these types.
+                REFERENCE_TYPES is unioned in — classification reads those out of
+                the DB to resolve rule scoping, so they have to be current even
+                when the baseline never mentions them.  None imports everything.
         """
         if not skip_import:
             from services.zia_import_service import ZIAImportService
             import_svc = ZIAImportService(self._client, self._tenant_id)
-            import_svc.run(progress_callback=import_progress_callback)
+            narrowed = (
+                sorted(set(import_resource_types) | REFERENCE_TYPES)
+                if import_resource_types is not None
+                else None
+            )
+            import_svc.run(
+                progress_callback=import_progress_callback,
+                resource_types=narrowed,
+            )
 
         existing = self._load_existing_from_db()
         # Build a lookup of all IDs currently in the target so cross-tenant ref
@@ -620,20 +686,16 @@ class ZIAPushService:
         # are fully accepted by the API in user-created rule payloads.
         self._usable_dlp_engine_ids = set((existing.get("dlp_engine") or {}).keys())
 
-        # Device group name → target ID map.
-        # Device group IDs differ across tenants; remap by name so rules scoped to
-        # predefined OS groups (Windows, iOS, etc.) carry over on push.
-        # Source device_group entries come from the baseline; target from the DB.
-        target_dg_name_map = {
-            entry["name"].lower(): entry["id"]
-            for entry in (existing.get("device_group") or {}).values()
-            if entry.get("name")
-        }
-        for src_entry in (baseline.get("resources", {}).get("device_group") or []):
-            src_id = str(src_entry.get("id", ""))
-            src_name = (src_entry.get("name") or "").lower()
-            if src_id and src_name and src_name in target_dg_name_map:
-                self._register_remap(src_id, target_dg_name_map[src_name])
+        # Types that are never pushed but whose IDs still need to mean something
+        # in the target: match them by name so a reference lands on the target's
+        # own copy.
+        #   device_group  — predefined OS/platform groups (Windows, iOS, …)
+        #   proxy_gateway — third-party proxy chaining; no write endpoint, so
+        #                   the match is what lets a report name the target's
+        #                   own gateway.  The certificate and proxy below it are
+        #                   pushed normally and remap through that path.
+        for rtype in ("device_group", "proxy_gateway"):
+            self._register_name_remaps(rtype, baseline, existing)
 
         # CBI profile map: profile name (lowercase) → profile dict.
         # Used to remap cbi_profile UUIDs on ISOLATE url_filtering_rules across tenants.
@@ -789,6 +851,42 @@ class ZIAPushService:
                     skipped.append(rec)
                     continue
 
+                # A root certificate is the PEM.  Templates built before the
+                # importer carried certificate material, or from a tenant whose
+                # certificate would not download, have the record without it —
+                # there is nothing to upload, so say so rather than 400.
+                if rtype == "root_certificate" and not raw_config.get("cert"):
+                    rec = PushRecord(rtype, display_name, "skipped:no-pem")
+                    rec.warnings.append(
+                        f"Root certificate '{display_name}' carries no certificate "
+                        f"material, so it cannot be uploaded. Install the PEM by hand "
+                        f"(Administration > Root Certificates), then re-push to pick "
+                        f"it up by name."
+                    )
+                    skipped.append(rec)
+                    continue
+
+                # Proxy-chaining forwarding rules are never pushed.  The chain
+                # below them (root certificate → proxy → proxy gateway) cannot be
+                # created through the OneAPI gateway: proxyGateways answers a POST
+                # with 405 Allow: GET,OPTIONS.  The rule cannot be pushed without
+                # one either — the API answers "Proxy gateway is mandatory for
+                # Proxy Chaining forwarding" to a PROXYCHAIN rule with the field
+                # absent or null, so there is no skeleton-rule option.
+                #
+                # A target that happens to already have a same-named gateway could
+                # in principle take the rule, but that is not something a template
+                # can rely on, and half of the chain would still be the operator's
+                # job.  Leaving the whole chain out keeps the template honest: it
+                # skips the rule and reports exactly what to build by hand.
+                if rtype == "forwarding_rule" and _is_proxychain(raw_config):
+                    rec = PushRecord(rtype, display_name, "skipped:proxy-chaining")
+                    rec.warnings.extend(
+                        self._proxychain_manual_steps(display_name, raw_config, resources)
+                    )
+                    skipped.append(rec)
+                    continue
+
                 # User-created resources: match by name only (no ID fallback).
                 # IDs are tenant-specific and can collide with system resource IDs
                 # in the target tenant (e.g. user DLP engine id=61 in source vs.
@@ -811,6 +909,13 @@ class ZIAPushService:
                     if source_id:
                         self._register_remap(source_id, target_id)
 
+                    # Already present and not ours to change — the remap above is
+                    # the point, so whatever references it lands on the target's
+                    # own copy.
+                    if rtype in _CREATE_ONLY_TYPES:
+                        skipped.append(PushRecord(rtype, display_name, "skipped:exists"))
+                        continue
+
                     if self._configs_match(rtype, raw_config, existing_entry["raw_config"]):
                         skipped.append(PushRecord(rtype, display_name, "skipped"))
                         continue
@@ -828,6 +933,19 @@ class ZIAPushService:
                                   __managed=False)
 
                 pending.setdefault(rtype, []).append(queued)
+
+        # Proxy gateways are in SKIP_TYPES, so the loop above never reaches them.
+        # Skipping a template's gateway without a word would leave the operator to
+        # work out for themselves why the chain does not carry traffic, so report
+        # each one with what to build.
+        for gw_entry in (resources.get("proxy_gateway") or []):
+            rec = PushRecord(
+                "proxy_gateway",
+                gw_entry.get("name") or str(gw_entry.get("id") or "?"),
+                "skipped:no-write-endpoint",
+            )
+            rec.warnings.extend(self._proxy_gateway_manual_steps(gw_entry, resources))
+            skipped.append(rec)
 
         # Identify extraneous resources present in the tenant but absent from baseline.
         # Only generate deletes for resource types that appear in the baseline file.
@@ -1177,6 +1295,9 @@ class ZIAPushService:
         update_method = getattr(self._client, update_method_name)
         try:
             payload = self._build_payload(resource_type, raw_config)
+            # Normalizers may embed a warning under this sentinel key; a rollback
+            # has nowhere to report it, but it must not reach the API either.
+            payload.pop("__norm_warning", None)
             self._do_update(resource_type, zia_id, update_method, payload)
             return PushRecord(resource_type, name, "rollback_restored", zia_id=zia_id)
         except Exception as exc:
@@ -2183,6 +2304,8 @@ class ZIAPushService:
             "traffic_capture_rule":   self._norm_traffic_capture_rule,
             "cloud_app_control_rule": self._norm_cloud_app_control_rule,
             "location":               self._norm_location,
+            "proxy":                  self._norm_proxy,
+            "root_certificate":       self._norm_root_certificate,
             "sandbox_rule":                  self._norm_sandbox_rule,
             "url_filter_cloud_app_settings": self._norm_url_filter_cloud_app_settings,
             "advanced_settings":             self._norm_advanced_settings,
@@ -2331,6 +2454,12 @@ class ZIAPushService:
                 cfg["zpa_gateway"] = {"id": gw_id}
             else:
                 cfg.pop("zpa_gateway", None)
+        # A third-party proxy gateway reference never survives to a payload —
+        # classify_baseline skips proxy-chaining rules outright (see
+        # _proxychain_manual_steps).  Drop it here too so a rule that reaches
+        # this path some other way (a re-push comparison, a hand-built config)
+        # cannot carry a source-tenant gateway ID into the target.
+        cfg.pop("proxy_gateway", None)
         self._norm_ref_fields(cfg,
             ref_fields=("src_ip_groups", "src_ipv6_groups", "dest_ip_groups", "dest_ipv6_groups",
                         "nw_services", "nw_service_groups", "nw_applications",
@@ -2350,6 +2479,47 @@ class ZIAPushService:
             empty_strip=("src_ips", "dest_addresses", "dest_countries", "time_windows"),
         )
         return cfg
+
+    # Fields the rootCertificates create body accepts.  camelCase, unlike the
+    # SDK-sourced resources around it — the certificate endpoint is reached by
+    # direct HTTP, so the import stores exactly what the API returned.
+    _ROOT_CERT_KEEP: tuple = ("cert", "displayName", "name", "certTypes")
+
+    def _norm_root_certificate(self, cfg: dict) -> dict:
+        """Reduce an imported certificate to an upload body.
+
+        The list response carries fields the create body has no slot for
+        (usage counts, type flags, the platform's own entries); send only the
+        four the endpoint names.  `cert` is raw PEM with its BEGIN/END armor —
+        base64-wrapping it fails with a misleading "Empty input".
+        """
+        body = {k: cfg[k] for k in self._ROOT_CERT_KEEP if cfg.get(k) is not None}
+        if not body.get("name"):
+            # Cosmetic in the admin UI, but the endpoint wants it: fall back to
+            # the label with the extension the uploaded file would have had.
+            body["name"] = f"{body.get('displayName', 'certificate')}.pem"
+        if not body.get("certTypes"):
+            body["certTypes"] = ["PROXY_CHAINING"]
+        return body
+
+    def _norm_proxy(self, cfg: dict) -> dict:
+        """Reduce a third-party proxy to what add_proxy accepts.
+
+        `cert` is reduced to `{id}` so `_apply_id_remap` can swap in the
+        certificate this push just created; the SDK takes it in that shape.
+        A proxy whose certificate did not come across is still worth pushing —
+        the operator attaches one by hand — so an unresolved reference is
+        dropped rather than treated as fatal.
+        """
+        keep = ("name", "description", "type", "address", "port", "cert",
+                "insert_xau_header", "base64_encode_xau_header")
+        body = {k: cfg[k] for k in keep if cfg.get(k) is not None}
+        cert = body.get("cert")
+        if isinstance(cert, dict) and cert.get("id"):
+            body["cert"] = {"id": cert["id"]}
+        else:
+            body.pop("cert", None)
+        return body
 
     def _norm_nat_control_rule(self, cfg: dict) -> dict:
         self._norm_ref_fields(cfg,
@@ -2657,6 +2827,179 @@ class ZIAPushService:
         """Store source→target ID mapping (both coerced to str)."""
         self._id_remap[str(source_id)] = str(target_id)
 
+    def _register_name_remaps(self, resource_type: str, baseline: dict, existing: dict) -> None:
+        """Remap a resource type by name rather than by pushing it.
+
+        For types that exist in both tenants but are never created by a push,
+        the source ID means nothing in the target.  Matching on name lets a
+        rule that references one keep pointing at the target's own copy.
+        Source entries come from the baseline, target entries from the DB.
+        A source entry with no name match is left unmapped on purpose — the
+        caller decides whether that is fatal for the referring rule.
+        """
+        target_by_name = {
+            entry["name"].lower(): entry["id"]
+            for entry in (existing.get(resource_type) or {}).values()
+            if entry.get("name")
+        }
+        for src_entry in (baseline.get("resources", {}).get(resource_type) or []):
+            src_id = str(src_entry.get("id", ""))
+            src_name = (src_entry.get("name") or "").lower()
+            if src_id and src_name and src_name in target_by_name:
+                self._register_remap(src_id, target_by_name[src_name])
+
+    def _resolve_proxy_chain(self, gateway_id, resources: dict) -> dict:
+        """Walk gateway → proxy → certificate through the baseline.
+
+        Returns whatever it finds; a link the template does not carry comes
+        back empty rather than absent, so callers can report it as a step the
+        operator still owns instead of silently dropping it.
+        """
+        def index(rtype: str) -> dict:
+            return {
+                str(entry.get("id")): entry
+                for entry in (resources.get(rtype) or [])
+                if entry.get("id") is not None
+            }
+
+        gw_entry = index("proxy_gateway").get(str(gateway_id or "")) or {}
+        gw_cfg = gw_entry.get("raw_config", {})
+
+        proxy_ref = gw_cfg.get("primary_proxy") or {}
+        proxy_entry = index("proxy").get(str(proxy_ref.get("id") or "")) or {}
+        proxy_cfg = proxy_entry.get("raw_config", {})
+
+        cert_ref = proxy_cfg.get("cert") or {}
+        cert_entry = index("root_certificate").get(str(cert_ref.get("id") or "")) or {}
+
+        return {
+            "gateway_name": gw_entry.get("name") or gw_cfg.get("name") or "",
+            "gateway_cfg": gw_cfg,
+            "proxy_name": proxy_entry.get("name") or proxy_ref.get("name") or "",
+            "proxy_cfg": proxy_cfg,
+            "proxy_in_template": bool(proxy_entry),
+            "cert_name": cert_entry.get("name") or cert_ref.get("name") or "",
+            "cert_in_template": bool(cert_entry),
+        }
+
+    @staticmethod
+    def _proxy_summary(proxy_cfg: dict) -> str:
+        """One-line description of a proxy, for a warning the operator reads."""
+        parts = []
+        if proxy_cfg.get("address"):
+            parts.append(str(proxy_cfg["address"]))
+        if proxy_cfg.get("port"):
+            parts[-1:] = [f"{parts[-1]}:{proxy_cfg['port']}"] if parts else [f"port {proxy_cfg['port']}"]
+        if proxy_cfg.get("insert_xau_header"):
+            parts.append(
+                "X-Authenticated-User header"
+                + (" (base64)" if proxy_cfg.get("base64_encode_xau_header") else "")
+            )
+        return ", ".join(parts)
+
+    def _proxychain_handled_note(self, chain: dict, extra: str = "") -> str:
+        """Name the chain pieces this push does handle, so the warning is fair."""
+        done = []
+        if chain["cert_in_template"] and chain["cert_name"]:
+            done.append(f"root certificate '{chain['cert_name']}'")
+        if chain["proxy_in_template"] and chain["proxy_name"]:
+            summary = self._proxy_summary(chain["proxy_cfg"])
+            done.append(
+                f"proxy '{chain['proxy_name']}'" + (f" ({summary})" if summary else "")
+            )
+        if extra:
+            done.append(extra)
+        if not done:
+            return ""
+        return (
+            "Already handled by this push: " + "; ".join(done) +
+            " — check the push results, then point the gateway at the proxy."
+        )
+
+    def _proxy_gateway_manual_steps(self, gw_entry: dict, resources: dict) -> List[str]:
+        """Say what to build for a proxy gateway the API will not create."""
+        chain = self._resolve_proxy_chain(gw_entry.get("id"), resources)
+        gw_cfg = gw_entry.get("raw_config", {})
+        name = gw_entry.get("name") or chain["gateway_name"] or "(unnamed)"
+
+        detail = []
+        proxy_name = chain["proxy_name"] or (gw_cfg.get("primary_proxy") or {}).get("name")
+        if proxy_name:
+            detail.append(f"primary proxy '{proxy_name}'")
+        secondary = (gw_cfg.get("secondary_proxy") or {}).get("name")
+        if secondary:
+            detail.append(f"secondary proxy '{secondary}'")
+        detail.append(f"fail closed: {'yes' if gw_cfg.get('fail_closed') else 'no'}")
+
+        steps = [
+            f"Proxy gateway '{name}' cannot be created through the API — the "
+            f"endpoint is read-only (POST answers 405). Build it by hand in the "
+            f"ZIA admin UI under Administration > Forwarding > Proxy Gateways: "
+            f"{', '.join(detail)}."
+        ]
+        note = self._proxychain_handled_note(chain)
+        if note:
+            steps.append(note)
+        elif proxy_name:
+            steps.append(
+                f"Proxy '{proxy_name}' is not in this template — create it, and the "
+                f"root certificate it presents, before the gateway."
+            )
+        return steps
+
+    def _proxychain_manual_steps(
+        self, rule_name: str, raw_config: dict, resources: dict
+    ) -> List[str]:
+        """Say what to build for a proxy-chaining rule that cannot be pushed.
+
+        The rule must name a proxy gateway — sent without one, or with it null,
+        the API answers "Proxy gateway is mandatory for Proxy Chaining
+        forwarding" — and no gateway can be created through the API.  So the
+        rule is skipped, and this reports the two things left to do by hand,
+        with the real values from the source, alongside what the push handled.
+        """
+        gw_ref = raw_config.get("proxy_gateway") or {}
+        chain = self._resolve_proxy_chain(gw_ref.get("id"), resources)
+        gw_name = gw_ref.get("name") or chain["gateway_name"] or "(unnamed)"
+
+        dest_groups = [
+            g.get("name") for g in (raw_config.get("dest_ip_groups") or [])
+            if isinstance(g, dict) and g.get("name")
+        ]
+        dest_text = ", ".join(f"'{g}'" for g in dest_groups) or "(none recorded)"
+        pushed_groups = {
+            entry.get("name") for entry in (resources.get("ip_destination_group") or [])
+        }
+
+        steps = [
+            f"Proxy-chaining forwarding rule '{rule_name}' is skipped — it has to "
+            f"name a proxy gateway, and the API creates neither the rule without "
+            f"one nor the gateway itself. Two steps remain, in the ZIA admin UI:"
+        ]
+        steps.append(
+            f"1. Proxy gateway '{gw_name}'"
+            + (f" — primary proxy '{chain['proxy_name']}'" if chain["proxy_name"] else "")
+            + (f", fail closed: {'yes' if chain['gateway_cfg'].get('fail_closed') else 'no'}"
+               if chain["gateway_cfg"] else "")
+            + "."
+        )
+        steps.append(
+            f"2. Forwarding rule '{rule_name}' — forwarding method Proxy Chaining, "
+            f"destination IPv4 groups {dest_text}, action Forward to Proxy Gateway "
+            f"'{gw_name}'. Add whatever scoping (locations, users, groups) this "
+            f"tenant needs, and leave the rule disabled until the chain is verified."
+        )
+
+        extra = ""
+        carried = [g for g in dest_groups if g in pushed_groups]
+        if carried:
+            extra = "destination IP group" + ("s " if len(carried) > 1 else " ") + \
+                ", ".join(f"'{g}'" for g in carried)
+        note = self._proxychain_handled_note(chain, extra)
+        if note:
+            steps.append(note)
+        return steps
+
     # ------------------------------------------------------------------
     # Shared utilities
     # ------------------------------------------------------------------
@@ -2902,6 +3245,18 @@ def _build_preserve_names(baseline: dict) -> Dict[str, Set[str]]:
         if names:
             result[rtype] = names
     return result
+
+
+def _is_proxychain(raw_config: dict) -> bool:
+    """Return True if this forwarding rule chains to a third-party proxy.
+
+    Either signal is enough: the forwarding method itself, or a gateway
+    reference left on a rule whose method was renamed in a later API version.
+    """
+    return (
+        raw_config.get("forward_method") == "PROXYCHAIN"
+        or bool((raw_config.get("proxy_gateway") or {}).get("id"))
+    )
 
 
 def _is_writable(raw_config: dict) -> bool:
