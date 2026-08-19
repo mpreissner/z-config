@@ -633,10 +633,17 @@ function TenantCard({
 }) {
   const navigate = useNavigate();
 
+  // An admin session manages tenants; it does not enter them. The kebab is the
+  // whole affordance here, so the card drops its hover-lift and pointer too —
+  // a tile that still looks clickable and then does nothing reads as a bug.
+  const open = isAdmin ? undefined : () => navigate(`/tenant/${tenant.id}/zia`);
+
   return (
     <div
-      onClick={() => navigate(`/tenant/${tenant.id}/zia`)}
-      className="relative bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md hover:border-zs-500 transition-all cursor-pointer"
+      onClick={open}
+      className={`relative bg-white border border-gray-200 rounded-lg p-4 transition-all ${
+        open ? "hover:shadow-md hover:border-zs-500 cursor-pointer" : ""
+      }`}
     >
       <div className="absolute top-3 right-3" onClick={(e) => e.stopPropagation()}>
         <KebabMenu tenant={tenant} isAdmin={isAdmin} onAction={onAction} />
@@ -800,13 +807,17 @@ export default function TenantsPage() {
               {filtered.map((t) => (
                 <tr key={t.id} className="hover:bg-gray-50">
                   <td className="whitespace-nowrap py-3 pl-4 pr-3 text-sm font-medium text-gray-900">
-                    <Link
-                      to={`/tenant/${t.id}/zia`}
-                      className="text-zs-600 hover:text-zs-700 hover:underline"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {t.name}
-                    </Link>
+                    {isAdmin ? (
+                      <span>{t.name}</span>
+                    ) : (
+                      <Link
+                        to={`/tenant/${t.id}/zia`}
+                        className="text-zs-600 hover:text-zs-700 hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {t.name}
+                      </Link>
+                    )}
                     {t.notes && <p className="text-xs text-gray-400 font-normal">{t.notes}</p>}
                   </td>
                   <td className="whitespace-nowrap px-3 py-3 text-sm text-gray-500">
