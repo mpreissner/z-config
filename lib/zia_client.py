@@ -1207,20 +1207,59 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.proxies.list_proxy_gateways()
         return _to_dicts(_unwrap(result, resp, err))
 
-    def list_root_certificates(self) -> List[Dict]:
+    def list_root_certificates(self, include_cert: bool = False) -> List[Dict]:
         """List root certificates uploaded for proxy chaining and isolation.
 
         Returns raw camelCase JSON.  Platform-supplied entries (the Zscaler
         Browser Isolation certificate) carry no `id` and are skipped by the
         importer, which leaves the uploaded PROXY_CHAINING certs.
 
-        The certificate material is write-only: neither this response nor any
-        item or download path returns `cert`.  An imported record can therefore
-        say that a certificate named X is required, but cannot reproduce it —
-        recreating one on another tenant needs the operator to supply the PEM.
+        The list response never contains certificate material.  With
+        `include_cert`, each entry that has an id gains a `cert` key holding
+        the PEM, fetched one call at a time -- so pass it only when the
+        certificate itself is wanted, such as during import.  A certificate
+        that will not download is left without the key rather than failing the
+        whole listing; the platform Browser Isolation entry is one of those.
         """
         data = self.zia_get(self._ROOT_CERT_PATH)
-        return data if isinstance(data, list) else []
+        certs = data if isinstance(data, list) else []
+        if not include_cert:
+            return certs
+        for cert in certs:
+            cert_id = cert.get("id")
+            if not cert_id:
+                continue
+            types = cert.get("certTypes") or []
+            pem = self.download_root_certificate(
+                str(cert_id), types[0] if types else "PROXY_CHAINING"
+            )
+            if pem:
+                cert["cert"] = pem
+        return certs
+
+    def download_root_certificate(
+        self, cert_id: str, cert_type: str = "PROXY_CHAINING"
+    ) -> Optional[str]:
+        """Return a root certificate's PEM text, or None if it will not download.
+
+        Note the path shape: the id trails `download/`, it is not a
+        sub-resource of the certificate.  `certTypes` is required -- without it
+        the endpoint answers 500 rather than a 4xx, which reads like the path
+        is wrong when it is the query string that is missing.
+
+        The platform-supplied Browser Isolation certificate cannot be
+        downloaded, hence the None rather than an exception.
+        """
+        try:
+            resp = self._zia_request(
+                "GET",
+                f"{self._ROOT_CERT_PATH}/download/{cert_id}",
+                params={"certTypes": cert_type},
+            )
+        except Exception:
+            return None
+        text = resp.text or ""
+        return text if "-----BEGIN CERTIFICATE-----" in text else None
 
     def create_root_certificate(
         self,
@@ -1249,12 +1288,15 @@ class ZIAClient:
         }
         return self.zia_post(self._ROOT_CERT_PATH, config)
 
-    def delete_root_certificate(self, cert_id: str) -> None:
-        """Delete a root certificate -- but see the caveat.
+    def delete_root_certificate(
+        self, cert_id: str, cert_type: str = "PROXY_CHAINING"
+    ) -> None:
+        """Delete a root certificate.
 
-        The API answers 204 and the certificate survives it, through an
-        activation and well beyond.  Observed against a live tenant; removing
-        one for real currently means the admin UI.  Callers must not treat a
-        clean return as proof the certificate is gone.
+        `certTypes` is required.  Without it the endpoint answers 204 and
+        leaves the certificate in place -- a silent no-op that survives an
+        activation, so a bare 204 is not on its own proof of deletion.
         """
-        self.zia_delete(f"{self._ROOT_CERT_PATH}/{cert_id}")
+        self.zia_delete(
+            f"{self._ROOT_CERT_PATH}/{cert_id}?certTypes={cert_type}"
+        )
