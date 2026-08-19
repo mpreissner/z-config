@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.5.1] - 2026-08-19
+
+A scoped template can name individual settings toggles instead of carrying a whole settings object.
+
+### Added
+
+- **Per-key selection for settings singletons** — ZIA keeps advanced settings, URL & cloud app settings, and browser control settings as one object each, holding dozens of unrelated toggles, and a template carrying one of those carried all of it. Taking a tenant's AI prompt controls meant taking its session timeouts along with them. A scoped template can now name the keys it wants: the picker opens a settings entry into its own filterable key list, and the template stores only what was ticked. Naming no keys still carries the whole object.
+
+### Changed
+
+- **A settings push merges rather than replaces** — the three settings endpoints replace the whole object on PUT, so a payload carrying a subset of the keys would reset everything it omits. The GET-then-merge that existed only for browser control settings, to keep the target's own Smart Isolation profile, now covers all three: the target's live settings are read first and the template's keys are laid over them. Classification compares only the keys a partial baseline carries, so a narrowed template does not report an update it does not intend to make. A full template carries every key, and merging one of those is the same PUT it always was.
+
+---
+
 ## [3.5.0] - 2026-08-19
 
 Policy Templates gain ownership, sharing, and scoped resource selection, and the proxy-chaining resources — root certificates, proxies, proxy gateways — are imported and pushed.

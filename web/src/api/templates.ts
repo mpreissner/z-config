@@ -33,6 +33,8 @@ export interface TemplateSelectionMeta {
     required_by: string;
   }[];
   warnings: string[];
+  /** Settings singletons narrowed to individual keys, if any were. */
+  fields?: Record<string, string[]>;
 }
 
 export interface ZIATemplateDetail extends ZIATemplate {
@@ -51,6 +53,14 @@ export interface TemplateShare {
   shared_by: string | null;
 }
 
+/** One individually selectable key of a settings singleton. */
+export interface TemplateEntryField {
+  key: string;
+  label: string;
+  /** Short rendering: "on"/"off" for toggles, a count for lists and objects. */
+  value: string;
+}
+
 export interface TemplateEntry {
   id: string;
   name: string;
@@ -58,6 +68,11 @@ export interface TemplateEntry {
   predefined: boolean;
   summary: string;
   order: number | null;
+  /**
+   * Settings singletons only. ZIA stores each as one object of dozens of
+   * unrelated toggles, so the key — not the object — is what anyone picks.
+   */
+  fields?: TemplateEntryField[];
 }
 
 export interface TemplatePreviewResult {
@@ -82,6 +97,11 @@ export interface TemplateCreateRequest {
   description?: string;
   /** Omit for a full template over everything portable in the snapshot. */
   selection?: Record<string, string[]>;
+  /**
+   * {settings_type: [key, …]} — narrows a selected settings singleton to these
+   * toggles. Omit a type to carry all of its keys.
+   */
+  field_selection?: Record<string, string[]>;
   visibility?: "private" | "shared" | "org";
 }
 

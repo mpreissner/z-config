@@ -58,6 +58,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
   const [snapshotId, setSnapshotId] = useState<number | "">("");
   const [scopeMode, setScopeMode] = useState<"full" | "scoped">("scoped");
   const [selection, setSelection] = useState<Record<string, string[]>>({});
+  const [fieldSelection, setFieldSelection] = useState<Record<string, string[]>>({});
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<"private" | "shared" | "org">("private");
@@ -100,6 +101,13 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
         // Omitting `selection` is what makes a template full — an empty object
         // would read as "a scoped template containing nothing".
         selection: scopeMode === "scoped" ? selection : undefined,
+        // Narrowed settings only mean anything inside a scoped template, and an
+        // empty map means "carry every key" — same undefined-vs-empty rule as
+        // selection above.
+        field_selection:
+          scopeMode === "scoped" && Object.keys(fieldSelection).length > 0
+            ? fieldSelection
+            : undefined,
         visibility,
       }),
     onSuccess: () => {
@@ -112,6 +120,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
   const preview = previewMut.data ?? null;
   const selectedCount = Object.values(selection).reduce((n, ids) => n + ids.length, 0);
   const selectedTypes = Object.keys(selection).filter((t) => selection[t].length > 0);
+  const narrowedSettings = Object.entries(fieldSelection).filter(([, keys]) => keys.length > 0);
   const sortedTenants = allTenants
     ? [...allTenants].sort((a, b) => a.name.localeCompare(b.name))
     : [];
@@ -229,6 +238,8 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                 entries={preview.entries}
                 selection={selection}
                 onChange={(next) => { setSelection(next); setErr(null); }}
+                fieldSelection={fieldSelection}
+                onFieldChange={(next) => { setFieldSelection(next); setErr(null); }}
                 disabled={scopeMode === "full"}
               />
 
@@ -340,7 +351,16 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                     <span className="font-medium text-gray-600">Scope:</span> {selectedCount} resource
                     {selectedCount !== 1 ? "s" : ""} across {selectedTypes.length} type{selectedTypes.length !== 1 ? "s" : ""}
                   </p>
-                ) : (
+                ) : null}
+                {scopeMode === "scoped" && narrowedSettings.length > 0 ? (
+                  <p>
+                    <span className="font-medium text-gray-600">Settings:</span>{" "}
+                    {narrowedSettings
+                      .map(([t, keys]) => `${t} (${keys.length} of its keys)`)
+                      .join(", ")}
+                  </p>
+                ) : null}
+                {scopeMode === "full" && (
                   <>
                     <p><span className="font-medium text-gray-600">Scope:</span> full snapshot</p>
                     <p><span className="font-medium text-gray-600">Included types:</span> {preview?.included.length ?? 0}</p>
@@ -854,6 +874,25 @@ function TemplateDetail({ templateId, onApply, onDelete, onShare }: {
                   <li key={i} className="text-xs text-amber-800">{w}</li>
                 ))}
               </ul>
+            </div>
+          )}
+          {tmpl.selection_meta.fields && Object.keys(tmpl.selection_meta.fields).length > 0 && (
+            <div>
+              {/* Worth stating plainly: applying this template writes only these
+                  keys and leaves the rest of the target's settings alone. */}
+              <p className="text-xs font-medium text-gray-700 mb-1.5">Settings narrowed to individual keys:</p>
+              <div className="space-y-1.5">
+                {Object.entries(tmpl.selection_meta.fields).map(([rtype, keys]) => (
+                  <div key={rtype}>
+                    <p className="text-xs font-mono text-gray-500">{rtype}</p>
+                    <div className="flex flex-wrap gap-1 mt-0.5">
+                      {keys.map((k) => (
+                        <span key={k} className="px-2 py-0.5 rounded-full text-[11px] bg-gray-100 text-gray-700 font-mono">{k}</span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {tmpl.selection_meta.auto_included.length > 0 && (
