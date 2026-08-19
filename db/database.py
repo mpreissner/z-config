@@ -10,7 +10,7 @@ from typing import Generator, Optional
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import QueuePool
 
 from .models import Base, AppSettings
 
@@ -85,7 +85,11 @@ def _make_sqlcipher_creator(db_path: str):
     """
     def creator():
         import sqlcipher3.dbapi2 as sqlcipher
-        conn = sqlcipher.connect(db_path, check_same_thread=False)
+        # timeout is SQLite's busy handler: with a pool there are now several
+        # connections, and WAL admits one writer at a time, so a write that
+        # arrives mid-import waits its turn instead of raising "database is
+        # locked" immediately.
+        conn = sqlcipher.connect(db_path, check_same_thread=False, timeout=30.0)
         key_bytes = _derive_sqlcipher_key()
         hex_key = binascii.hexlify(key_bytes).decode()
         conn.execute(f"PRAGMA key = \"x'{hex_key}'\"")
@@ -170,11 +174,28 @@ def init_db(db_url: Optional[str] = None) -> None:
         db_path = effective_url.removeprefix("sqlite:///")
         _migrate_to_encrypted(db_path)
         _sqlcipher_active = True
+        # A real pool, not StaticPool.  StaticPool hands the *same* DBAPI
+        # connection to every caller, and sqlcipher3 resets every open cursor on
+        # that connection whenever anything commits — so a background job
+        # iterating rows died with "Cursor needed to be reset because of
+        # commit/rollback" the moment an unrelated web request wrote.  Long jobs
+        # (template apply, import, scheduled sync) run in threads alongside
+        # normal traffic, so that collision was routine.  A pool gives each
+        # concurrent caller its own connection; WAL is already on, so readers
+        # don't block the writer.
+        #
+        # poolclass is explicit because the URL carries no path (the creator opens
+        # the file), which the SQLite dialect would otherwise read as :memory:
+        # and pool accordingly.
         _engine = create_engine(
             "sqlite+pysqlite://",
             echo=False,
             creator=_make_sqlcipher_creator(db_path),
-            poolclass=StaticPool,
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_pre_ping=True,
         )
     else:
         # PostgreSQL or explicit ZSCALER_DB_URL — no SQLCipher
@@ -353,6 +374,30 @@ def _migrate(engine) -> None:
             granted_by VARCHAR(255),
             UNIQUE (group_id, tenant_id)
         )""",
+        # Templates gained an owner, a visibility, and — for scoped templates —
+        # a record of what their author picked.
+        "ALTER TABLE zia_templates ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+        "ALTER TABLE zia_templates ADD COLUMN owner_username VARCHAR(255)",
+        "ALTER TABLE zia_templates ADD COLUMN visibility VARCHAR(16) NOT NULL DEFAULT 'private'",
+        "ALTER TABLE zia_templates ADD COLUMN scope VARCHAR(16) NOT NULL DEFAULT 'full'",
+        "ALTER TABLE zia_templates ADD COLUMN selection_meta JSON",
+        """CREATE TABLE IF NOT EXISTS template_shares (
+            id INTEGER PRIMARY KEY,
+            template_id INTEGER NOT NULL REFERENCES zia_templates(id) ON DELETE CASCADE,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            group_id INTEGER REFERENCES user_groups(id) ON DELETE CASCADE,
+            shared_at DATETIME NOT NULL,
+            shared_by VARCHAR(255)
+        )""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_template_share_user
+           ON template_shares (template_id, user_id) WHERE user_id IS NOT NULL""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_template_share_group
+           ON template_shares (template_id, group_id) WHERE group_id IS NOT NULL""",
+        # Templates that predate ownership were visible to every authenticated
+        # user, so they stay that way rather than vanishing from everyone's list
+        # on upgrade. Safe to re-run: after the first pass every legacy row is
+        # already 'org', and every row created since has a non-NULL owner.
+        "UPDATE zia_templates SET visibility = 'org' WHERE owner_user_id IS NULL",
     ]
     for stmt in migrations:
         with engine.connect() as conn:

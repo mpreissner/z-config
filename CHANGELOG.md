@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.5.0] - 2026-08-19
+
+Policy Templates gain ownership, sharing, and scoped resource selection, and the proxy-chaining resources — root certificates, proxies, proxy gateways — are imported and pushed.
+
+### Added
+
+- **Template ownership and sharing** — a template now belongs to the account that created it and is visible only to that account until it is shared. Sharing is per template, to users or groups, managed from the template itself; `template_share_service` is the single place visibility is resolved, so the list endpoint and every by-id lookup answer the same question the same way.
+- **Scoped resource selection** — a template no longer has to carry a whole snapshot. The wizard offers the resources the snapshot contains and stores only what is selected, which is now the default path through it. A scoped template records its scope, and wipe mode is refused for one: wipe deletes everything the baseline does not name, and a template that names four resources on purpose would empty the tenant. The refusal is enforced in the API, not only hidden in the UI.
+- **Proxy chaining resources** — proxies, proxy gateways, and root certificates are imported, the certificates with their PEM. Certificates and proxies are pushed; `rootCertificates` needs a `certTypes` parameter and the raw PEM unencoded, which the client now sends.
+
+### Changed
+
+- **A scoped apply imports only what it needs** — applying a scoped template read all 53 resource types twice, once before classification and once after the push, to pick up changes in a handful. Both are narrowed. The closing re-import takes the template's own types; the stale-marking pass takes the same filter, so types that were not re-read are not swept as deleted. The pre-push import cannot narrow that far — reference resolution drops any ID it cannot find in the local database, so a rule scoped to a location or group that was not imported would be pushed with that scoping silently stripped — so the types classification consults regardless of what a baseline contains are collected in `REFERENCE_TYPES` and unioned into whatever set the caller asks for. Measured against a live tenant with a six-type template: classification 66.9s → 23.2s, re-import 64.0s → 11.5s, with identical classification output. Full templates keep the full import at both ends.
+- **Proxy-chaining rules report what cannot be pushed** — `proxy_gateway` has no write endpoint (a POST answers `405 Allow: GET,OPTIONS`), so it and the PROXYCHAIN forwarding rule that sits above it are reported as manual build steps rather than pushed or silently dropped. Gateways already present in the target are matched by name so a report can name the target's own.
+
+### Fixed
+
+- **Cursor resets under concurrent database access** — a long-running job and an HTTP request could not use the database at the same time. `StaticPool` shares one SQLCipher connection across the whole process, and SQLCipher resets every open cursor on commit, so a background apply thread committing mid-query broke the request with `Cursor needed to be reset because of commit/rollback and can no longer be fetched from`. Each caller now gets its own connection from a `QueuePool`.
+- **A delta push reported no manual steps** — classification builds the manual-build reports for entries the API refuses to create, and the wipe path merged them into its result while the delta path — which every scoped apply takes — kept only the push records and threw the reports away. An apply that pushed a certificate and proxy but could not create the gateway or the rule above it reported success and said nothing about the half of the chain still to build by hand.
+- **The apply modal looked stuck on the last resource pushed** — the status line chose which phase to display by priority rather than by recency, so once a push event arrived it stayed pinned there, and the re-import that follows the push displayed as the last rule pushed for as long as it ran.
+- **A certificate's own PEM read as a reference** — the PEM body was matched by the reference-stripping pass and mangled on push.
+
+---
+
 ## [3.4.1] - 2026-08-03
 
 A maintenance release. Mostly internal plumbing, a TUI-only function surfaced to the web interface, and fixes to the identity handling that shipped in 3.4.0.

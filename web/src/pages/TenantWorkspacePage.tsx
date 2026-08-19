@@ -15,7 +15,7 @@ import {
   SnapshotPreview,
   ApplySnapshotResult,
 } from "../api/tenants";
-import { useJobStream } from "../hooks/useJobStream";
+import { useJobStream, describeProgress } from "../hooks/useJobStream";
 import {
   fetchActivationStatus,
   activateTenant,
@@ -3309,7 +3309,7 @@ function RestoreSnapshotModal({
   } = useJobStream<SnapshotPreview>(previewJobId);
 
   const {
-    latestByPhase: applyProgress,
+    latestEvent: applyLatest,
     jobStatus: applyJobStatus,
     result: applyResult,
     streamError: applyStreamError,
@@ -3321,17 +3321,7 @@ function RestoreSnapshotModal({
   const applyDone = applyJobStatus === "done";
   const applyCancelled = applyJobStatus === "cancelled" || (applyJobStatus === "done" && !!applyResult?.cancelled);
 
-  function applyPhaseLabel() {
-    const rollbackEv = applyProgress["rollback"];
-    const pushEv = applyProgress["push"];
-    const wipeEv = applyProgress["wipe"];
-    const importEv = applyProgress["import"];
-    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
-    if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
-    if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
-    if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
-    return "Applying changes…";
-  }
+  const applyPhaseLabel = () => describeProgress(applyLatest, "Applying changes…");
 
   const err = mutErr ?? previewStreamError ?? applyStreamError ?? null;
 
@@ -5826,7 +5816,7 @@ function CloneConfigPanel({ tenant }: { tenant: Tenant }) {
   } = useJobStream<SnapshotPreview>(previewJobId);
 
   const {
-    latestByPhase: applyProgress,
+    latestEvent: applyLatest,
     jobStatus: applyJobStatus,
     result: applyResult,
     streamError: applyStreamError,
@@ -5965,17 +5955,7 @@ function CloneConfigPanel({ tenant }: { tenant: Tenant }) {
   }
 
   // Phase label for apply progress
-  function applyPhaseLabel() {
-    const rollbackEv = applyProgress["rollback"];
-    const pushEv = applyProgress["push"];
-    const wipeEv = applyProgress["wipe"];
-    const importEv = applyProgress["import"];
-    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
-    if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
-    if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
-    if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
-    return "Applying changes…";
-  }
+  const applyPhaseLabel = () => describeProgress(applyLatest, "Applying changes…");
 
   return (
     <div className="space-y-4 p-1">

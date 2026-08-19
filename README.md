@@ -7,16 +7,15 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.4.1
+## What's New — v3.5.0
 
-> **v3.4.1 is the current release** — a maintenance release. See the [changelog](CHANGELOG.md) for full details.
+> **v3.5.0 is the current release.** See the [changelog](CHANGELOG.md) for full details.
 
-- **ZIA snapshot restore in the web UI** — previously TUI-only, and with the TUI deprecating in v4.0.0 it needed a home. Preview what a restore would change, then run it with streaming progress: push creates and updates, delete resources absent from the snapshot, activate, and verify.
-- **SCIM group handling completed** — v3.4.0 provisioned groups from your IdP without giving you anywhere to manage them. Groups now have their own admin page for membership, role mapping, and tenant grants, and you can create one locally alongside the ones SCIM owns.
-- **Group role mappings no longer overwrite an account's own role** — a locally created admin who joined a user-mapped group was silently demoted. A mapped role now adds to the roles an account may assume; only one is live at a time, and accounts holding more than one get a picker in the sidebar.
-- **Fixes** — the last-admin guard now counts admins who hold the role through a group, scheduled import tasks create correctly on pre-3.3.3 databases, and secret-looking values are redacted from push error text.
-
-Internal plumbing: the ZPA write engine moved out of the restore handler into a service, staged resource rows are implemented behind the existing `source` and `candidate_status` columns, and the extension points gained a declarative contract.
+- **Templates have owners and can be shared** — a template belongs to the account that created it and is visible only to that account until it is shared, per template, to users or groups.
+- **Scoped resource selection** — a template no longer has to carry a whole snapshot. Pick the resources you want out of one and the template stores only those. Wipe mode is refused for a scoped template: it deletes everything the baseline does not name, which would empty the tenant.
+- **Proxy chaining** — proxies, proxy gateways, and root certificates are imported, the certificates with their PEM. Certificates and proxies push; the gateway has no write endpoint, so it and the PROXYCHAIN forwarding rule above it are reported as manual build steps rather than dropped without a word.
+- **A scoped apply is faster** — it used to read all 53 resource types twice to pick up changes in a handful. Both passes are narrowed to what the template can touch, plus the types reference resolution needs. On a six-type template against a live tenant, the import time in an apply drops from roughly 131s to 35s.
+- **Fixes** — a background job and an HTTP request can now use the database at the same time, a delta push reports the manual steps it leaves behind, and the apply modal no longer looks stuck on the last resource pushed while the re-import runs.
 
 > [!NOTE]
 > **Heads-up:** the TUI will be formally deprecated in **v4.0.0**. It keeps working throughout 3.x, but new features are web-only from here — see [TUI Features](#tui-features).
@@ -127,7 +126,7 @@ Upload `zscaler.db` and `secret.key` from that directory. All schema migrations 
 All data is read from the local SQLite cache. Use **Import** in any product tab to refresh from the live API.
 
 **ZIA — Internet Access**
-Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save, restore with preview, delete), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; preview included/stripped resources; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
+Activation, URL Filtering, URL Categories, URL Lookup, Cloud App Instances, Tenancy Restrictions, Cloud App Rules, Advanced Settings, Allow/Deny Lists, Firewall Policy (with CSV export/sync), DNS Filter, IPS Rules, SSL Inspection, Forwarding Rules, Proxies/Proxy Gateways/Root Certificates, Users/Locations/Departments/Groups, DLP Engines/Dictionaries/Web Rules, Config Snapshots (save, restore with preview, delete), **Apply Snapshot from Another Tenant** (delta or wipe-first, with preview, streaming progress, mid-push stop and rollback), **Policy Templates** (create portable baselines from snapshots; select a scoped subset of resources or take the whole snapshot; preview included/stripped resources; per-template sharing to users or groups; apply to any tenant), **Scheduled Tasks** (cron-driven sync by resource type or label; fan-out to multiple target tenants; Import tasks for cache refresh without mutation)
 
 **ZPA — Private Access**
 App Connectors, Service Edges, Application Segments, Segment Groups, Browser Access Certificates, PRA Portals

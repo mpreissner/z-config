@@ -39,6 +39,13 @@ whose options the plugin computes is re-resolved when the action runs and the
 submitted value checked against the result, because the dropdown that offered
 it is on the far side of the request and proves nothing.
 
+*An action may ask a follow-up question.*  A result carrying a `prompt` is a
+stage that stopped on a decision, and the fields it wants were composed while it
+ran — so the description is kept here, keyed by job and by account, and the
+answer is checked against that copy rather than against anything the browser
+sends back.  The action the answer runs is the one the prompt named, never one
+the caller chose.
+
 *An action may produce a file.*  Anything an action returns under `file` is
 moved into a per-run spool directory and served from `/downloads/{job_id}` to
 the account that started the job, until it ages out on the same clock the job
@@ -95,6 +102,14 @@ _NOT_AUTHENTICATED = "Not authenticated to GitHub — log in first."
 _ARTIFACT_TTL_SECONDS = 3600            # api.jobs._FINISHED_TTL_SECONDS
 _artifacts: Dict[str, dict] = {}
 _artifacts_lock = threading.Lock()
+
+# Follow-up prompts, keyed by the job whose result carried one. The description
+# the browser was sent is kept here as well as there, and the submitted values
+# are checked against *this* copy: the fields were composed by the plugin while
+# it ran, so this server is the only place a record of what it offered exists.
+# Same TTL and the same owning account as an artifact, for the same reasons.
+_prompts: Dict[str, dict] = {}
+_prompts_lock = threading.Lock()
 
 
 def manager_enabled() -> bool:
@@ -180,6 +195,31 @@ def _register_artifact(job_id: str, spool: str, artifact: dict, user_id: int) ->
         _prune_artifacts_locked()
         _artifacts[job_id] = {**artifact, "spool": spool, "user_id": user_id,
                               "created_at": time.time()}
+
+
+def _register_prompt(job_id: str, package: str, prompt: dict, user_id: int) -> None:
+    with _prompts_lock:
+        cutoff = time.time() - _ARTIFACT_TTL_SECONDS
+        for stale in [j for j, p in _prompts.items() if p["created_at"] < cutoff]:
+            del _prompts[stale]
+        _prompts[job_id] = {"package": package, "prompt": prompt, "user_id": user_id,
+                            "created_at": time.time()}
+
+
+def _prompt_for(job_id: str, package: str, user: AuthUser) -> dict:
+    """The prompt one finished job asked, for the account that ran it.
+
+    404 for every miss — expired, never asked, someone else's job, or a job from
+    a different plugin — so a caller guessing job ids learns nothing from which
+    one they hit.
+    """
+    with _prompts_lock:
+        entry = _prompts.get(job_id)
+    if not entry or entry["user_id"] != user.user_id or entry["package"] != package:
+        raise HTTPException(
+            status_code=404, detail="That question has expired — run the step again."
+        )
+    return entry["prompt"]
 
 
 def _github_error(message: str) -> HTTPException:
@@ -692,8 +732,16 @@ def plugin_ui(package: str, user: AuthUser = Depends(require_plugin_user)):
     return spec
 
 
-def _resolve_action(package: str, action_key: str, user: AuthUser) -> tuple[dict, dict, dict]:
-    """`(plugin, described action, raw action)` for a package the caller may use."""
+def _resolve_action(
+    package: str, action_key: str, user: AuthUser
+) -> tuple[dict, dict, dict, dict]:
+    """`(plugin, spec, described action, raw action)` for a package the caller may use.
+
+    Both actions come back with the plugin's page-level context folded in as
+    ordinary parameters, so a value the user entered once at the top of the page
+    is coerced, entitlement-checked and re-resolved on exactly the same path as
+    one typed into the action's own form.
+    """
     plugin = _entitled_plugin(package, user)
     described = plugin_web.describe(plugin)
     action = next(
@@ -705,10 +753,28 @@ def _resolve_action(package: str, action_key: str, user: AuthUser) -> tuple[dict
     raw_action = plugin_web.find_action(plugin, action_key)
     if not raw_action or not callable(raw_action.get("run")):
         raise HTTPException(status_code=500, detail=f"Action '{action_key}' has no runnable")
-    return plugin, action, raw_action
+
+    bound = plugin_web.bind_context(described, action)
+    return (
+        plugin,
+        described,
+        bound,
+        plugin_web.bind_raw_context(plugin, raw_action, action),
+    )
 
 
-def _authorised_options(
+def _described(package: str, user: AuthUser) -> tuple[dict, dict]:
+    """`(plugin, described spec)` for a package the caller may use."""
+    plugin = _entitled_plugin(package, user)
+    described = plugin_web.describe(plugin)
+    if not described:
+        raise HTTPException(
+            status_code=404, detail=f"Plugin '{package}' has no web interface"
+        )
+    return plugin, described
+
+
+def _authorized_options(
     action: dict, raw_action: dict, param: str, supplied: Dict[str, Any], user: AuthUser
 ) -> List[dict]:
     """The current options for one dynamic select, with its tenant checked first.
@@ -759,9 +825,67 @@ def plugin_action_options(
     parameter values, and because a tenant id has no business in a URL that
     ends up in an access log.
     """
-    _, action, raw_action = _resolve_action(package, action_key, user)
-    options = _authorised_options(action, raw_action, param, body.params, user)
+    _, _, action, raw_action = _resolve_action(package, action_key, user)
+    options = _authorized_options(action, raw_action, param, body.params, user)
     return {"options": options}
+
+
+@router.post("/{package}/context/options/{param}")
+def plugin_context_options(
+    package: str,
+    param: str,
+    body: OptionsRequest,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """The options for one page-level context value.
+
+    The context bar is drawn before any action has been chosen, so it cannot ask
+    through an action's endpoint. The synthetic action it resolves against holds
+    the context parameters and nothing else, which keeps the coercion and the
+    tenant check identical to every other option load.
+    """
+    plugin, described = _described(package, user)
+    action = plugin_web.context_action(described)
+    raw_action = plugin_web.raw_context_action(plugin)
+    options = _authorized_options(action, raw_action, param, body.params, user)
+    return {"options": options}
+
+
+@router.post("/{package}/state")
+def plugin_workflow_state(
+    package: str,
+    body: OptionsRequest,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """How far along each declared step is, for the context the caller names.
+
+    Advisory only: it decides what the step strip looks like, never what may be
+    run. A step the plugin calls blocked is still an action the caller can post
+    to directly, and it is authorized there on its own terms.
+    """
+    plugin, described = _described(package, user)
+    workflow = described.get("workflow")
+    if not workflow:
+        raise HTTPException(status_code=404, detail=f"Plugin '{package}' has no workflow")
+
+    state_fn = plugin_web.find_workflow_state(plugin)
+    if not state_fn:
+        return {"state": plugin_web.normalize_state(None, workflow)}
+
+    action = plugin_web.context_action(described)
+    try:
+        params = plugin_web.coerce_params(action, body.params, partial=True)
+    except plugin_web.PluginWebError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    for name in plugin_web.tenant_params(action):
+        if params.get(name) is not None:
+            check_tenant_access(int(params[name]), user)
+
+    try:
+        return {"state": plugin_web.normalize_state(state_fn(dict(params)), workflow)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read plugin state: {exc}")
 
 
 async def _collect_params(request, action: dict) -> tuple[dict, Optional[str]]:
@@ -831,46 +955,99 @@ async def run_plugin_action(
     before the action starts. A plugin cannot widen the reach of the account
     running it, whatever tenant id it was handed.
     """
-    _, action, raw_action = _resolve_action(package, action_key, user)
+    _, described, action, raw_action = _resolve_action(package, action_key, user)
 
     supplied, tmpdir = await _collect_params(request, action)
     try:
-        try:
-            params = plugin_web.coerce_params(action, supplied)
-        except plugin_web.PluginWebError as exc:
-            raise HTTPException(status_code=exc.status, detail=str(exc))
-
-        # No admin exemption, unlike the tenant routers: an admin session cannot
-        # reach this endpoint at all, so every caller here is entitlement-checked.
-        for name in plugin_web.tenant_params(action):
-            if params.get(name) is not None:
-                check_tenant_access(int(params[name]), user)
-
-        # A dynamic select was validated against nothing when it was coerced —
-        # its options did not exist yet. Ask for them now that the tenant among
-        # the params has been checked, and refuse anything the plugin would not
-        # have offered. Without this, the dropdown is the only thing stopping a
-        # caller naming a row belonging to someone else's tenant.
-        for name in plugin_web.dynamic_params(action):
-            if params.get(name) is None:
-                continue
-            allowed = {
-                o["value"]
-                for o in _authorised_options(action, raw_action, name, supplied, user)
-            }
-            if str(params[name]) not in allowed:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"'{name}' is not one of the offered options",
-                )
+        params = _checked_params(action, raw_action, supplied, user)
     except Exception:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
         raise
 
+    return {
+        "job_id": _start_action_job(
+            package=package,
+            action_key=action_key,
+            label=action["label"],
+            run_callable=raw_action["run"],
+            params=params,
+            described=described,
+            user=user,
+            tmpdir=tmpdir,
+        ),
+        "already_running": False,
+    }
+
+
+def _checked_params(
+    action: dict, raw_action: dict, supplied: Dict[str, Any], user: AuthUser
+) -> Dict[str, Any]:
+    """Coerce what the caller sent and authorize every value that carries reach.
+
+    Shared by a run and a prompt answer, which differ only in where the form
+    came from: both arrive from the browser, and neither is trusted further than
+    the other.
+    """
+    try:
+        params = plugin_web.coerce_params(action, supplied)
+    except plugin_web.PluginWebError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+    # No admin exemption, unlike the tenant routers: an admin session cannot
+    # reach this endpoint at all, so every caller here is entitlement-checked.
+    for name in plugin_web.tenant_params(action):
+        if params.get(name) is not None:
+            check_tenant_access(int(params[name]), user)
+
+    # A dynamic select was validated against nothing when it was coerced — its
+    # options did not exist yet. Ask for them now that the tenant among the
+    # params has been checked, and refuse anything the plugin would not have
+    # offered. Without this, the dropdown is the only thing stopping a caller
+    # naming a row belonging to someone else's tenant. A prompt's own fields are
+    # never dynamic; they were checked against the list they carry as they were
+    # coerced.
+    for name in plugin_web.dynamic_params(action):
+        # Nothing supplied and nothing ticked both mean there is no value to
+        # check, and loading a grid's rows to validate an empty list is work
+        # for its own sake.
+        if not params.get(name):
+            continue
+        allowed = {
+            o["value"]
+            for o in _authorized_options(action, raw_action, name, supplied, user)
+        }
+        # A selection grid submits many values; each one has to have been on the
+        # list the plugin just produced, not merely most of them.
+        for value in plugin_web.submitted_values(action, name, params[name]):
+            if value not in allowed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{name}' is not one of the offered options",
+                )
+    return params
+
+
+def _start_action_job(
+    *,
+    package: str,
+    action_key: str,
+    label: str,
+    run_callable,
+    params: Dict[str, Any],
+    described: dict,
+    user: AuthUser,
+    tmpdir: Optional[str] = None,
+) -> str:
+    """Run one plugin callable as a job and shape what it returns. Returns the job id.
+
+    Backgrounded unconditionally: a plugin action is arbitrary work of unknown
+    length, and the job store already gives the page progress and cancellation
+    for free.
+    """
     job_id = store.create(key=f"plugin:{package}:{action_key}")
-    run_callable = raw_action["run"]
-    label = action["label"]
+    context_names = tuple(c["name"] for c in described.get("context") or [])
+    action_keys = tuple(a["key"] for a in described.get("actions") or [])
 
     def run():
         ctx = plugin_web.PluginContext(
@@ -909,7 +1086,9 @@ async def run_plugin_action(
                    plugin_action=action_key, by=user.username, error=str(exc))
             return
 
-        payload = plugin_web.normalise_result(rest)
+        payload = plugin_web.normalize_result(
+            rest, context_names=context_names, action_keys=action_keys
+        )
         if artifact:
             _register_artifact(job_id, spool, artifact, user.user_id)
             payload["download"] = {
@@ -920,12 +1099,63 @@ async def run_plugin_action(
         else:
             shutil.rmtree(spool, ignore_errors=True)
 
+        # Kept server-side as well as sent: the answer comes back checked
+        # against this copy, not against whatever the browser says was asked.
+        if payload["prompt"]:
+            _register_prompt(job_id, package, payload["prompt"], user.user_id)
+
         store.complete(job_id, payload)
         _audit("plugin_action", "EXECUTE", "SUCCESS", package,
                plugin_action=action_key, by=user.username)
 
     threading.Thread(target=run, daemon=True).start()
-    return {"job_id": job_id, "already_running": False}
+    return job_id
+
+
+class PromptAnswer(BaseModel):
+    """What the user filled into a follow-up form, plus the page's context."""
+
+    params: Dict[str, Any] = {}
+    context: Dict[str, Any] = {}
+
+
+@router.post("/{package}/prompts/{job_id}", status_code=202)
+def answer_plugin_prompt(
+    package: str,
+    job_id: str,
+    body: PromptAnswer,
+    user: AuthUser = Depends(require_plugin_user),
+):
+    """Answer the question a finished action stopped on. Returns a new job_id.
+
+    The action to run comes from the prompt this server recorded, never from the
+    caller: answering a prompt reaches whatever the plugin nominated, which is
+    generally a gate the workflow does not otherwise offer, so the job id is the
+    only thing the browser gets to choose here.
+
+    The values are checked against the fields that prompt declared, and the page
+    context that comes with them is coerced, entitlement-checked and re-resolved
+    exactly as it would be on an ordinary run.
+    """
+    prompt = _prompt_for(job_id, package, user)
+    _, described, action, raw_action = _resolve_action(package, prompt["action"], user)
+
+    form = plugin_web.prompt_action(described, action, prompt)
+    supplied = {**dict(body.context), **dict(body.params)}
+    params = _checked_params(form, raw_action, supplied, user)
+
+    return {
+        "job_id": _start_action_job(
+            package=package,
+            action_key=prompt["action"],
+            label=prompt["title"] or action["label"],
+            run_callable=raw_action["run"],
+            params=params,
+            described=described,
+            user=user,
+        ),
+        "already_running": False,
+    }
 
 
 @router.get("/downloads/{job_id}")
