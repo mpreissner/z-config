@@ -79,7 +79,7 @@ class ZIAClient:
     def _zia_request(self, method: str, path: str, json=None, params=None) -> "requests.Response":
         """Authenticated direct HTTP request with automatic 429 retry/backoff.
 
-        Retries up to 3 times on 429, honouring Retry-After when present and
+        Retries up to 3 times on 429, honoring Retry-After when present and
         falling back to exponential backoff (2 / 4 / 8 s) otherwise.
         """
         import requests

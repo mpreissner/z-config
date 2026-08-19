@@ -1197,6 +1197,9 @@ class ZIAPushService:
         update_method = getattr(self._client, update_method_name)
         try:
             payload = self._build_payload(resource_type, raw_config)
+            # Normalizers may embed a warning under this sentinel key; a rollback
+            # has nowhere to report it, but it must not reach the API either.
+            payload.pop("__norm_warning", None)
             self._do_update(resource_type, zia_id, update_method, payload)
             return PushRecord(resource_type, name, "rollback_restored", zia_id=zia_id)
         except Exception as exc:
@@ -2360,6 +2363,8 @@ class ZIAPushService:
                 cfg["proxy_gateway"] = {"id": pgw_id}
             else:
                 cfg.pop("proxy_gateway", None)
+        if cfg.get("forward_method") == "PROXYCHAIN" and cfg.get("proxy_gateway"):
+            cfg = self._reduce_proxychain_rule(cfg)
         self._norm_ref_fields(cfg,
             ref_fields=("src_ip_groups", "src_ipv6_groups", "dest_ip_groups", "dest_ipv6_groups",
                         "nw_services", "nw_service_groups", "nw_applications",
@@ -2378,6 +2383,54 @@ class ZIAPushService:
             ),
             empty_strip=("src_ips", "dest_addresses", "dest_countries", "time_windows"),
         )
+        return cfg
+
+    # The only fields a proxy-chaining rule keeps.  Everything else is either
+    # scoping we cannot carry cross-tenant or match criteria that would narrow
+    # the rule in ways the operator did not intend for the target.
+    _PROXYCHAIN_KEEP: set = {
+        "name", "description", "type", "order", "rank",
+        "forward_method", "dest_ip_groups", "proxy_gateway", "state",
+    }
+
+    def _reduce_proxychain_rule(self, cfg: dict) -> dict:
+        """Strip a proxy-chaining rule to its essentials and disable it.
+
+        A third-party proxy chain is deliberately narrow: send the destinations
+        in one IP group to one gateway.  Everything else the source rule carries
+        -- locations, users, groups, departments, time windows, network services
+        -- is tenant-specific scoping that either will not resolve in the target
+        or would silently narrow the rule to an audience the operator never
+        chose.  Dropping it and keeping the forwarding method, the destination
+        IP groups, and the gateway leaves a rule that is correct as far as it
+        goes and obviously incomplete where it is not.
+
+        The rule is inserted DISABLED unconditionally, on updates as well as
+        creates, because a proxy chain that starts forwarding the moment it
+        lands is the wrong default: the gateway may be wired to a different
+        third-party tenant, and the scoping above still needs rebuilding.  The
+        operator reviews it and enables it.
+
+        Dropped fields are omitted from the payload rather than emptied, which
+        is how _norm_ref_fields already treats an empty resolved reference.  So
+        a re-push leaves scoping the operator added in the target alone, and
+        only forces the rule back to DISABLED.
+        """
+        dropped = sorted(
+            key for key, value in cfg.items()
+            if key not in self._PROXYCHAIN_KEEP and value not in (None, [], {}, "")
+        )
+        for key in dropped:
+            cfg.pop(key, None)
+        cfg["state"] = "DISABLED"
+        warning = (
+            "proxy-chaining rule inserted DISABLED and reduced to its forwarding "
+            "method, destination IP groups, and proxy gateway — rebuild the scoping "
+            "you need, then enable it manually"
+        )
+        if dropped:
+            warning += f"; dropped {', '.join(dropped)}"
+        cfg["__norm_warning"] = warning
         return cfg
 
     def _norm_nat_control_rule(self, cfg: dict) -> dict:
