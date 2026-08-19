@@ -1,4 +1,3 @@
-import base64
 from typing import Dict, List, Optional
 
 from zscaler import ZscalerClient
@@ -1230,20 +1229,20 @@ class ZIAClient:
         file_name: str,
         cert_types: Optional[List[str]] = None,
     ) -> Dict:
-        """Upload a root certificate.
+        """Upload a root certificate.  Returns the created record.
 
-        `pem` is the certificate text; the API wants it base64-encoded, so the
-        encoding happens here — no caller ever holds the encoded form, because
-        the list endpoint does not return certificate material (see below).
+        `pem` is the certificate text exactly as it sits in the .pem file,
+        BEGIN/END armor included -- the API parses the PEM envelope itself and
+        rejects a base64-wrapped copy of it with a misleading "Empty input".
         `display_name` is the operator-facing label and the value the rest of
-        the chain matches on; `file_name` is cosmetic, the name of the .pem the
-        admin UI would have uploaded.  `cert_types` is validated against an
-        enum before the certificate is parsed, so a bad value fails fast.
+        the proxy chain matches on; `file_name` is cosmetic, the name of the
+        file the admin UI would have uploaded.  `cert_types` is enum-checked
+        before the certificate parses, so a bad value fails fast.
 
-        Note the endpoint rate-limits at one request per second.
+        The endpoint rate-limits at one request per second.
         """
         config = {
-            "cert": base64.b64encode(pem.encode()).decode(),
+            "cert": pem,
             "displayName": display_name,
             "name": file_name,
             "certTypes": list(cert_types or ["PROXY_CHAINING"]),
@@ -1251,4 +1250,11 @@ class ZIAClient:
         return self.zia_post(self._ROOT_CERT_PATH, config)
 
     def delete_root_certificate(self, cert_id: str) -> None:
+        """Delete a root certificate -- but see the caveat.
+
+        The API answers 204 and the certificate survives it, through an
+        activation and well beyond.  Observed against a live tenant; removing
+        one for real currently means the admin UI.  Callers must not treat a
+        clean return as proof the certificate is gone.
+        """
         self.zia_delete(f"{self._ROOT_CERT_PATH}/{cert_id}")
