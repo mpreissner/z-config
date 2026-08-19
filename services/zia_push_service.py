@@ -791,10 +791,15 @@ class ZIAPushService:
                     continue
 
                 # PROXYCHAIN forwarding rules point at a third-party proxy gateway.
-                # Gateways have no write endpoint, so the target must already have
-                # one by the same name — _register_name_remaps records the match.
-                # Without it the rule would push a source ID that means something
-                # else, or nothing, in the target.
+                # Gateways have no write endpoint on the OneAPI gateway, so the
+                # target must already have one by the same name —
+                # _register_name_remaps records the match.
+                #
+                # The rule cannot be pushed without one either: the API answers
+                # "Proxy gateway is mandatory for Proxy Chaining forwarding" to a
+                # PROXYCHAIN rule with the field absent or null, so there is no
+                # skeleton-rule option where the operator fills in the gateway
+                # afterwards.  It is push-with-a-gateway or skip.
                 if rtype == "forwarding_rule":
                     pgw = raw_config.get("proxy_gateway") or {}
                     pgw_id = str(pgw.get("id") or "")
@@ -803,8 +808,9 @@ class ZIAPushService:
                         rec = PushRecord(rtype, display_name, "skipped:missing-proxy-gateway")
                         rec.warnings.append(
                             f"Proxy-chaining forwarding rule skipped — no proxy gateway named "
-                            f"'{pgw.get('name') or pgw_id}' in target tenant; create the gateway "
-                            f"(and its proxy and root certificate) in the ZIA admin UI, then push again"
+                            f"'{pgw.get('name') or pgw_id}' in target tenant, and the API cannot "
+                            f"create one. Build the gateway (with its proxy and root certificate) "
+                            f"in the ZIA admin UI, then push again to pick it up by name."
                         )
                         skipped.append(rec)
                         continue
