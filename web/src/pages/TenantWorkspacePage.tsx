@@ -6497,12 +6497,12 @@ function SimulatorFlowDetail({ result }: { result: SimulationResult }) {
   const engines: { key: keyof SimulationResult; label: string }[] = [
     { key: "zcc_bypass",    label: "ZCC Bypass" },
     { key: "zpa",           label: "ZPA" },
-    { key: "zia_firewall",  label: "Firewall" },
     { key: "zia_dns",       label: "DNS Filter" },
-    { key: "zia_cloud_app", label: "Cloud App" },
-    { key: "zia_url",       label: "URL Filter" },
-    { key: "zia_exceptions",label: "Exceptions" },
+    { key: "zia_firewall",  label: "Firewall" },
     { key: "zia_ssl",       label: "SSL" },
+    { key: "zia_cloud_app", label: "Cloud App" },
+    { key: "zia_exceptions",label: "Exceptions" },
+    { key: "zia_url",       label: "URL Filter" },
   ];
 
   const ziaKeys = new Set(["zia_firewall","zia_dns","zia_cloud_app","zia_url","zia_exceptions","zia_ssl"]);
@@ -6879,12 +6879,13 @@ function SimulatorTab({ tenant }: { tenant: Tenant }) {
               </div>
             ) : (
               <>
-                <PolicyCheckCard check={result.zia_firewall} />
+                {/* Ordered to match ZIA's enforcement sequence */}
                 <PolicyCheckCard check={result.zia_dns} />
-                <PolicyCheckCard check={result.zia_cloud_app} />
-                <PolicyCheckCard check={result.zia_url} />
-                <PolicyCheckCard check={result.zia_exceptions} />
+                <PolicyCheckCard check={result.zia_firewall} />
                 <PolicyCheckCard check={result.zia_ssl} />
+                <PolicyCheckCard check={result.zia_cloud_app} />
+                <PolicyCheckCard check={result.zia_exceptions} />
+                <PolicyCheckCard check={result.zia_url} />
               </>
             )}
           </div>

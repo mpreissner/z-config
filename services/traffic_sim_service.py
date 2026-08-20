@@ -57,7 +57,7 @@ class SimulationResult:
     zia_ssl: PolicyCheck
     zia_cloud_app: PolicyCheck
     zia_exceptions: PolicyCheck
-    verdict: str          # ZCC_BYPASS | ZPA | ZIA_ALLOW | ZIA_BLOCK_FIREWALL | ZIA_BLOCK_DNS | ZIA_BLOCK_URL | ZIA_BLOCK_CLOUDAPP | INTERNET
+    verdict: str          # precedence: ZCC_BYPASS > ZPA > ZIA_BLOCK_DNS > ZIA_BLOCK_FIREWALL > ZIA_BLOCK_CLOUDAPP > ZIA_BLOCK_URL > ZIA_ALLOW (also ZCC_INACTIVE)
     verdict_label: str    # human-readable
 
 
@@ -1640,22 +1640,29 @@ def simulate(
     )
     zia_exceptions = _eval_security_exceptions(tenant_id, dest)
 
-    # Determine verdict
+    # Determine verdict.
+    #
+    # ZCC (on-device) and ZPA are decided before traffic reaches ZIA. The ZIA
+    # engines are then ranked to match Zscaler's real enforcement order for a
+    # transaction: DNS Control → Cloud Firewall → SSL Inspection (decrypt gate,
+    # never a block) → Cloud App Control → Security Exceptions (URL allow/deny
+    # override) → URL Filtering. So when more than one engine would block, the
+    # reported block is the one ZIA would actually enforce first.
     if zcc_bypass.matched and zcc_bypass.action == "BYPASS":
         verdict = "ZCC_BYPASS"
         verdict_label = f'Traffic bypasses ZCC tunnel — goes direct to internet via "{zcc_bypass.rule_name}"'
     elif zpa.matched:
         verdict = "ZPA"
         verdict_label = f'Routed through ZPA → "{zpa.rule_name}"'
+    elif zia_dns.matched and (zia_dns.action or "").upper() in _BLOCK_ACTIONS:
+        verdict = "ZIA_BLOCK_DNS"
+        verdict_label = f'Blocked by ZIA DNS Filter → "{zia_dns.rule_name}"'
     elif zia_fw.matched and (zia_fw.action or "").upper() in _BLOCK_ACTIONS:
         verdict = "ZIA_BLOCK_FIREWALL"
         verdict_label = f'Blocked by ZIA Firewall → "{zia_fw.rule_name}"'
     elif zia_cloud_app.matched and (zia_cloud_app.action or "").upper() in _BLOCK_ACTIONS:
         verdict = "ZIA_BLOCK_CLOUDAPP"
         verdict_label = f'Blocked by ZIA Cloud App Control → "{zia_cloud_app.rule_name}"'
-    elif zia_dns.matched and (zia_dns.action or "").upper() in _BLOCK_ACTIONS:
-        verdict = "ZIA_BLOCK_DNS"
-        verdict_label = f'Blocked by ZIA DNS Filter → "{zia_dns.rule_name}"'
     elif zia_url.matched and (zia_url.action or "").upper() in _BLOCK_ACTIONS and not (zia_exceptions.matched and zia_exceptions.action == "ALLOW"):
         verdict = "ZIA_BLOCK_URL"
         verdict_label = f'Blocked by ZIA URL Filter → "{zia_url.rule_name}"'
