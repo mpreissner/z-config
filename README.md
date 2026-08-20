@@ -7,10 +7,11 @@ Interactive TUI and browser-based UI for Zscaler OneAPI — manage ZPA, ZIA, ZCC
 
 ---
 
-## What's New — v3.5.1
+## What's New — v3.5.2
 
-> **v3.5.1 is the current release.** See the [changelog](CHANGELOG.md) for full details.
+> **v3.5.2 is the current release.** See the [changelog](CHANGELOG.md) for full details.
 
+- **Admin and user stay separated** — an account holding both roles could, while acting as admin, click a tenant tile and land in tenant configuration. Tenant configuration is now refused for an admin session outright, and a template is applied by its owner rather than by whoever is looking at it: an admin sees only templates whose owner is gone, to hand one to an account that can use it or delete it. Deprovisioning an account, by admin or by SCIM, releases the templates it owned into that queue. Import stays available to an admin — pre-loading a tenant before its first user arrives is a management function.
 - **Pick individual settings toggles** — ZIA keeps advanced settings, URL & cloud app settings, and browser control settings as one object each, holding dozens of unrelated toggles. A scoped template can now name the keys it wants rather than carrying the whole object, and applying it merges those keys over the target's live settings and leaves the rest alone.
 - **Templates have owners and can be shared** — a template belongs to the account that created it and is visible only to that account until it is shared, per template, to users or groups.
 - **Scoped resource selection** — a template no longer has to carry a whole snapshot. Pick the resources you want out of one and the template stores only those. Wipe mode is refused for a scoped template: it deletes everything the baseline does not name, which would empty the tenant.
@@ -142,7 +143,7 @@ All Devices (list/search/OTP), Trusted Networks, Forwarding Profiles, App Profil
 Users, Groups (with members), API Clients (details and secrets)
 
 **Admin (admin-only)**
-User Management, Groups (local or SCIM-provisioned; membership, role mapping, tenant grants), Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database
+User Management, Groups (local or SCIM-provisioned; membership, role mapping, tenant grants), Tenant Entitlements (multi-select grant), **Single Sign-On** (SAML 2.0 / OIDC with discovery lookup, test connection, auto-provisioning role and group claim), **SCIM Provisioning** (bearer token issue/revoke, group-to-role mapping, SCIM-managed account flags), System Settings (session timeout, idle timeout, login attempts, audit retention), SSL Certificate (upload or Let's Encrypt), Clear Data, Import Database, **Unowned Templates** (assign an orphaned template to an account that holds the user role, or delete it)
 
 ---
 
@@ -153,6 +154,7 @@ User Management, Groups (local or SCIM-provisioned; membership, role mapping, te
 - Idle timeout: configurable inactivity threshold (default 15 min) triggers a 2-minute warning, then automatic logout
 - Hardware security key support (WebAuthn/passkey) — register a YubiKey or platform authenticator from your profile page
 - Roles are effective, not fixed — an account may hold several (its own plus any its groups map), but only one is live at a time. Sessions start at least privilege and switch explicitly, and a role revoked mid-session is not honoured from a stale token
+- The two roles do not overlap. Tenant configuration — ZIA, ZPA, ZCC, ZDX, ZIdentity, and applying a template — is refused for an admin session whatever the account is entitled to; an admin who needs it switches roles, and the switch is audited
 - Single sign-on via SAML 2.0 or OIDC — the JWT is handed off through a one-time code, so it never appears in the URL bar, browser history, or `Referer` headers
 - IdP secrets (OIDC client secret, SAML SP private key, Cloudflare API token, SCIM bearer tokens) are write-only: encrypted at rest and never returned by the API. SCIM tokens are stored sha256-hashed and compared in constant time; the plaintext is shown once at creation
 
