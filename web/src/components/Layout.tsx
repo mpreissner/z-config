@@ -7,6 +7,7 @@ import { useAuth } from "../context/AuthContext";
 import { useActiveTenant } from "../context/ActiveTenantContext";
 import { usePluginManagerAvailable, useEntitledPlugins } from "../hooks/usePluginManager";
 import { fetchTenants, Tenant } from "../api/tenants";
+import { fetchTemplates } from "../api/templates";
 import zLogo from "../assets/z-logo.jpg";
 
 interface LayoutProps {
@@ -154,6 +155,17 @@ export default function Layout({ children }: LayoutProps) {
     ? [...tenants].sort((a, b) => a.name.localeCompare(b.name))
     : [];
 
+  // Shares the page's cache key on purpose: assigning or deleting the last
+  // unowned template invalidates ["templates"], and the nav item disappears in
+  // the same render as the row.
+  const { data: adminTemplates } = useQuery({
+    queryKey: ["templates"],
+    queryFn: fetchTemplates,
+    enabled: isAdmin,
+    staleTime: 60_000,
+  });
+  const unownedCount = isAdmin ? adminTemplates?.length ?? 0 : 0;
+
   async function handleLogout() {
     await logout();
     navigate("/login");
@@ -255,10 +267,20 @@ export default function Layout({ children }: LayoutProps) {
             </NavLink>
           )}
 
-          {/* Templates */}
-          {!isAdmin && (
+          {/* Templates. A user always has the item; an admin gets it only while
+              there is something there to deal with. GET /templates returns an
+              admin nothing but the unowned rows — templates whose owner was
+              deprovisioned, plus any predating ownership — so a non-empty list
+              *is* the work queue, and the item leaves again once the last one
+              has been handed over or deleted. */}
+          {(!isAdmin || unownedCount > 0) && (
             <NavLink to="/templates" className={navLinkClass}>
               Templates
+              {isAdmin && (
+                <span className="ml-2 px-1.5 py-0.5 rounded-full text-[11px] bg-amber-400 text-amber-900 font-medium">
+                  {unownedCount}
+                </span>
+              )}
             </NavLink>
           )}
 

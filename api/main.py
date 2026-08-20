@@ -49,7 +49,7 @@ from api.routers import scim as scim_router
 from api.routers import groups as groups_router
 from api.routers import plugins as plugins_router
 from api.auth_utils import decode_token
-from api.dependencies import require_auth, AuthUser
+from api.dependencies import require_auth, require_user, AuthUser
 from cli.banner import VERSION
 
 
@@ -234,11 +234,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(zpa.router, prefix="/api/v1/zpa", tags=["ZPA"])
-app.include_router(zia.router, prefix="/api/v1/zia", tags=["ZIA"])
-app.include_router(zcc_router.router, prefix="/api/v1/zcc", tags=["ZCC"])
-app.include_router(zdx_router.router, prefix="/api/v1/zdx", tags=["ZDX"])
-app.include_router(zid_router.router, prefix="/api/v1/zid", tags=["ZID"])
+# The five product routers are tenant configuration end to end, so the role
+# guard rides on the include rather than on each endpoint — a new route added
+# to any of them is covered without anyone remembering to ask. Entitlement is
+# still checked per endpoint; this only settles which role may ask at all.
+_tenant_scope = [Depends(require_user)]
+
+app.include_router(zpa.router, prefix="/api/v1/zpa", tags=["ZPA"], dependencies=_tenant_scope)
+app.include_router(zia.router, prefix="/api/v1/zia", tags=["ZIA"], dependencies=_tenant_scope)
+app.include_router(zcc_router.router, prefix="/api/v1/zcc", tags=["ZCC"], dependencies=_tenant_scope)
+app.include_router(zdx_router.router, prefix="/api/v1/zdx", tags=["ZDX"], dependencies=_tenant_scope)
+app.include_router(zid_router.router, prefix="/api/v1/zid", tags=["ZID"], dependencies=_tenant_scope)
 app.include_router(system.router)
 app.include_router(ssl_router.router)
 app.include_router(auth_router.router)

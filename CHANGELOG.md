@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.5.2] - 2026-08-19
+
+A bug fix release. Privilege separation between the admin and user roles, in the two places it was never applied.
+
+### Fixed
+
+- **An admin session could enter the tenant workspace** — an account holding both roles could, while acting as admin, click a tenant tile and land in tenant configuration. Entitlement cannot separate the two: `check_tenant_access` is role-agnostic by design, and an account holding both roles is entitled to the tenant either way, so only the assumed role can. The five product routers now carry a `require_user` guard on the include rather than per endpoint, so a route added to any of them is covered without anyone remembering to ask; entitlement is still checked as it was. An admin's tenant tile stops being a link and drops the hover-lift that advertised it, and a bookmark or deep link into a workspace returns to the dashboard instead of rendering a page of 403s. Import stays available to an admin — pre-loading a new tenant environment before its first user arrives is a management function, not tenant configuration. The stale `require_admin` guards on the ZCC and ZIdentity routers, left from before roles were assumable, become `require_auth` plus entitlement; they would otherwise have been unreachable.
+- **An admin could see, apply, and share every user's templates** — the template list came back unfiltered for an admin, and `can_apply` was an alias for `can_read`. An admin now sees exactly the templates with no owner, and has two moves on them: hand one to an account that holds the user role, or delete it. Applying is refused at every ownership state, as are create, share, and preview, and PATCH accepts nothing from an admin but `owner_user_id`. Assigning to an admin-only account is refused — it would only rename the stranded state.
+- **A deprovisioned account's templates were left owned by it** — nobody could apply them and nobody could delete them. Deleting or deactivating an account now clears the owner on its templates and audits what moved, in every path: admin delete, admin deactivate, and SCIM PUT, PATCH, and DELETE. Done explicitly rather than through the column's `ON DELETE SET NULL`, since SCIM only soft-deletes and both kinds of deprovisioning have to leave the same state behind. The owner's name survives as attribution, so the admin picking these up can still see whose they were. The Templates item appears for an admin only while that queue is non-empty, and carries its count.
+
+---
+
 ## [3.5.1] - 2026-08-19
 
 A scoped template can name individual settings toggles instead of carrying a whole settings object.

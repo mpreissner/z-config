@@ -18,8 +18,10 @@ export interface ZIATemplate {
   /** "scoped" templates hold only what their author picked — never wipe with one. */
   scope: "full" | "scoped";
   is_owner: boolean;
-  /** Owner or admin: may rename, re-share, and delete. */
+  /** Rename, re-share, delete. The owner, or an admin on an unowned template. */
   can_manage: boolean;
+  /** False for every admin session — pushing config is the user role's job. */
+  can_apply: boolean;
   share_count: number;
 }
 
@@ -109,7 +111,10 @@ export interface TemplateUpdateRequest {
   name?: string;
   description?: string;
   visibility?: "private" | "shared" | "org";
-  /** Admin-only: adopt a template that predates ownership. */
+  /**
+   * Hand an unowned template to an account that holds the user role. An admin
+   * session may send this field and nothing else — the rest is the owner's.
+   */
   owner_user_id?: number;
 }
 
@@ -177,6 +182,21 @@ export interface ShareTargets {
 /** Open to any authenticated account — sharing is not an admin action. */
 export const fetchShareTargets = (): Promise<ShareTargets> =>
   apiFetch<ShareTargets>("/api/v1/templates/share-targets");
+
+export interface AssignableOwner {
+  id: number;
+  username: string;
+  /** Effective roles — own row plus any a group maps in. Always includes "user". */
+  roles: string[];
+}
+
+/**
+ * Candidates for adopting an unowned template. Admin-only, and narrower than
+ * share-targets: an account that cannot hold the user role cannot apply the
+ * template, so handing it over would only rename the problem.
+ */
+export const fetchAssignableOwners = (): Promise<{ users: AssignableOwner[] }> =>
+  apiFetch<{ users: AssignableOwner[] }>("/api/v1/templates/assignable-owners");
 
 export const fetchTemplateShares = (id: number): Promise<TemplateShare[]> =>
   apiFetch<TemplateShare[]>(`/api/v1/templates/${id}/shares`);

@@ -86,3 +86,19 @@ def check_tenant_access(tenant_id: int, user: AuthUser) -> None:
     from services.group_service import effective_tenant_ids
     if tenant_id not in effective_tenant_ids(user.user_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
+
+
+def require_user(user: AuthUser = Depends(require_auth)) -> AuthUser:
+    """The mirror of require_admin: refuses a session holding `admin`.
+
+    Tenant configuration is the user role's job. An account that holds both
+    roles is entitled to the tenant either way, so entitlement alone cannot
+    keep the two apart — only the assumed role can. An admin who wants in
+    switches roles, and the switch is audited.
+    """
+    if user.role == "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Switch to the user role to work with tenant configuration",
+        )
+    return user
