@@ -1,7 +1,7 @@
 {
   "name": "zs-config-web",
   "private": true,
-  "version": "0.0.0",
+  "version": "3.3.3.5",
   "type": "module",
   "scripts": {
     "dev": "vite",

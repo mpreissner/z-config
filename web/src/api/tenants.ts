@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, getAuthHeaders } from "./client";
 
 /** FedRAMP tier, named as zscaler-sdk-python names it in its `cloud` config key.
  *  "gov" is FedRAMP High (.net domains), "govus" is FedRAMP Moderate (.us). */
@@ -84,6 +84,137 @@ export const importZPA = (id: number): Promise<JobRef> =>
 
 export const importZCC = (id: number): Promise<JobRef> =>
   apiFetch<JobRef>(`/api/v1/tenants/${id}/import/zcc`, { method: "POST" });
+
+export const clearZCCDisabledResources = (id: number): Promise<{ cleared: string[] }> =>
+  apiFetch<{ cleared: string[] }>(`/api/v1/tenants/${id}/import/zcc/disabled-resources`, { method: "DELETE" });
+
+export interface PolicyCheck {
+  engine: string;
+  matched: boolean;
+  rule_name: string | null;
+  action: string | null;
+  reason: string;
+  category: string | null;
+  caveats: string[];
+}
+
+export interface SimulationResult {
+  destination: string;
+  port: number;
+  protocol: string;
+  zcc_bypass: PolicyCheck;
+  zpa: PolicyCheck;
+  zia_firewall: PolicyCheck;
+  zia_dns: PolicyCheck;
+  zia_url: PolicyCheck;
+  zia_ssl: PolicyCheck;
+  zia_cloud_app: PolicyCheck;
+  zia_exceptions: PolicyCheck;
+  verdict: "ZCC_BYPASS" | "ZCC_INACTIVE" | "ZPA" | "ZIA_ALLOW" | "ZIA_BLOCK_FIREWALL" | "ZIA_BLOCK_DNS" | "ZIA_BLOCK_URL" | "ZIA_BLOCK_CLOUDAPP" | "INTERNET";
+  verdict_label: string;
+}
+
+export interface SimulateParams {
+  destination: string;
+  port: number;
+  protocol: string;
+  nwApplication?: string;
+  appServiceGroup?: string;
+  cloudApp?: string;
+  zccProfile?: string;
+  srcIp?: string;
+  userName?: string;
+  deptName?: string;
+  groupName?: string;
+  locationName?: string;
+  networkContext?: "on" | "vpn" | "off";
+}
+
+export const simulateTraffic = (tenantId: number, p: SimulateParams): Promise<SimulationResult> =>
+  apiFetch<SimulationResult>(`/api/v1/tenants/${tenantId}/simulate`, {
+    method: "POST",
+    body: JSON.stringify({
+      destination: p.destination,
+      port: p.port,
+      protocol: p.protocol,
+      nw_application: p.nwApplication || null,
+      app_service_group: p.appServiceGroup || null,
+      cloud_app: p.cloudApp || null,
+      zcc_profile: p.zccProfile || null,
+      src_ip: p.srcIp || null,
+      user_name: p.userName || null,
+      dept_name: p.deptName || null,
+      group_name: p.groupName || null,
+      location_name: p.locationName || null,
+      network_context: p.networkContext || null,
+    }),
+    headers: { "Content-Type": "application/json" },
+  });
+
+export interface SimulationResultAll {
+  on: SimulationResult;
+  vpn: SimulationResult;
+  off: SimulationResult;
+}
+
+export const simulateTrafficAll = (tenantId: number, p: SimulateParams): Promise<SimulationResultAll> =>
+  apiFetch<SimulationResultAll>(`/api/v1/tenants/${tenantId}/simulate/all`, {
+    method: "POST",
+    body: JSON.stringify({
+      destination: p.destination,
+      port: p.port,
+      protocol: p.protocol,
+      nw_application: p.nwApplication || null,
+      app_service_group: p.appServiceGroup || null,
+      cloud_app: p.cloudApp || null,
+      zcc_profile: p.zccProfile || null,
+      src_ip: p.srcIp || null,
+      user_name: p.userName || null,
+      dept_name: p.deptName || null,
+      group_name: p.groupName || null,
+      location_name: p.locationName || null,
+    }),
+    headers: { "Content-Type": "application/json" },
+  });
+
+export const fetchSimApplications = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/applications`);
+
+export const fetchSimCloudApps = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/cloud-apps`);
+
+export const fetchSimZccProfiles = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/zcc-profiles`);
+
+export const fetchSimAppServiceGroups = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/app-service-groups`);
+
+export const fetchSimUsers = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/users`);
+
+export const fetchSimDepartments = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/departments`);
+
+export const fetchSimGroups = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/groups`);
+
+export const fetchSimLocations = (tenantId: number): Promise<string[]> =>
+  apiFetch<string[]>(`/api/v1/tenants/${tenantId}/simulate/locations`);
+
+export async function downloadTerraform(tenantId: number, product: "zia" | "zpa", tenantName: string): Promise<void> {
+  const res = await fetch(`/api/v1/tenants/${tenantId}/terraform/${product}`, {
+    headers: getAuthHeaders(),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error("Export failed");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${tenantName.replace(/\s+/g, "_")}_${product}.tf`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export interface SnapshotDiffItem {
   action: "create" | "update" | "delete";

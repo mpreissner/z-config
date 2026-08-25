@@ -1,4 +1,4 @@
-import { useState, useEffect, ReactNode, Fragment } from "react";
+import React, { useState, useEffect, ReactNode, Fragment } from "react";
 import { formatDateTime, formatDate } from "../utils/time";
 import { Link, useParams, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -8,6 +8,20 @@ import {
   importZIA,
   importZPA,
   importZCC,
+  clearZCCDisabledResources,
+  downloadTerraform,
+  simulateTrafficAll,
+  SimulationResultAll,
+  fetchSimApplications,
+  fetchSimCloudApps,
+  fetchSimZccProfiles,
+  fetchSimAppServiceGroups,
+  fetchSimUsers,
+  fetchSimDepartments,
+  fetchSimGroups,
+  fetchSimLocations,
+  type SimulationResult,
+  type PolicyCheck,
   previewApplySnapshot,
   applySnapshot,
   Tenant,
@@ -5642,6 +5656,7 @@ function ImportProductModal({
   const qc = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
   const [mutErr, setMutErr] = useState<string | null>(null);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
   // True when we attached to an import that was already running when the modal
   // opened, rather than one started from this modal.
   const [resumed, setResumed] = useState(false);
@@ -5676,6 +5691,16 @@ function ImportProductModal({
       setJobId(data.job_id);
       if (data.already_running) setResumed(true);
     },
+    onError: (e: Error) => setMutErr(e.message),
+  });
+
+  const resetMut = useMutation({
+    mutationFn: () => clearZCCDisabledResources(tenant.id),
+    onSuccess: (data) => setResetMsg(
+      data.cleared.length > 0
+        ? `Cleared: ${data.cleared.join(", ")}. Run import to retry.`
+        : "No disabled resources to clear."
+    ),
     onError: (e: Error) => setMutErr(e.message),
   });
 
@@ -5740,6 +5765,7 @@ function ImportProductModal({
             </div>
           )}
           {err && <p className="text-xs text-red-600">{err}</p>}
+          {resetMsg && <p className="text-xs text-blue-700 bg-blue-50 px-3 py-2 rounded">{resetMsg}</p>}
           {isDone && result && (
             <div className={`p-3 rounded-md text-sm ${result.status === "SUCCESS" || result.status === "PARTIAL" ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"}`}>
               <p className="font-medium">{result.status}</p>
@@ -5747,19 +5773,31 @@ function ImportProductModal({
               {result.error_message && <p className="text-xs mt-1">{result.error_message}</p>}
             </div>
           )}
-          <div className="flex justify-end gap-2">
-            {!isDone && (
+          <div className="flex justify-between gap-2">
+            {product === "ZCC" && !isDone && !isRunning && (
               <button
-                onClick={() => mut.mutate()}
-                disabled={isRunning || checking}
-                className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+                onClick={() => { setResetMsg(null); resetMut.mutate(); }}
+                disabled={resetMut.isPending}
+                title="Clear any resource types that were auto-disabled after a previous API error, so they will be retried on the next import"
+                className="px-3 py-2 text-xs rounded-md border border-gray-300 hover:bg-gray-50 text-gray-600 disabled:opacity-60"
               >
-                {checking ? "Checking…" : isRunning ? "Importing…" : `Import ${product}`}
+                {resetMut.isPending ? "Clearing…" : "Reset N/A Resources"}
               </button>
             )}
-            <button onClick={onClose} className="px-4 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50">
-              {isDone ? "Done" : "Cancel"}
-            </button>
+            <div className="flex gap-2 ml-auto">
+              {!isDone && (
+                <button
+                  onClick={() => mut.mutate()}
+                  disabled={isRunning}
+                  className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+                >
+                  {isRunning ? "Importing…" : `Import ${product}`}
+                </button>
+              )}
+              <button onClick={onClose} className="px-4 py-2 text-sm rounded-md border border-gray-300 hover:bg-gray-50">
+                {isDone ? "Done" : "Cancel"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -6218,7 +6256,682 @@ function SectionGroup({
 
 // ── Tab panels ────────────────────────────────────────────────────────────────
 
-type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid";
+type TabId = "zia" | "zpa" | "zdx" | "zcc" | "zid" | "sim";
+
+// ── Traffic Simulator tab ─────────────────────────────────────────────────────
+
+const PROTOCOLS = ["HTTPS", "HTTP", "TCP", "UDP", "DNS", "FTP", "SMTP", "SSH"];
+
+function SimulatorFlowDiagram({ result, results, networkCtx, setNetworkCtx, profileName }: {
+  result: SimulationResult | null;
+  results: SimulationResultAll | null;
+  networkCtx: "on" | "vpn" | "off";
+  setNetworkCtx: (v: "on" | "vpn" | "off") => void;
+  profileName: string | null;
+}) {
+  const verdict = result?.verdict ?? null;
+  const localActive = verdict === "ZCC_BYPASS" || verdict === "ZCC_INACTIVE";
+  const zpaActive   = verdict === "ZPA";
+  const ziaActive   = !!verdict && verdict.startsWith("ZIA_");
+  const ziaBlocked  = !!verdict && verdict.includes("BLOCK");
+  const zccInactive = verdict === "ZCC_INACTIVE";
+  const zccOn       = !!result && !zccInactive;
+
+  // Colour of the winning end-to-end path.
+  const pathColor = !verdict ? "#9ca3af"
+    : localActive ? "#f97316"
+    : zpaActive ? "#4f46e5"
+    : ziaBlocked ? "#ef4444" : "#22c55e";
+  const pathMk = !verdict ? "url(#sfd-gray)"
+    : localActive ? "url(#sfd-ora)"
+    : zpaActive ? "url(#sfd-ind)"
+    : ziaBlocked ? "url(#sfd-red)" : "url(#sfd-grn)";
+
+  const CTX = { on: "#7c3aed", vpn: "#4f46e5", off: "#0d9488" } as const;
+  const CTX_MK = { on: "url(#sfd-vio)", vpn: "url(#sfd-ind)", off: "url(#sfd-teal)" } as const;
+  const ctxColor = CTX[networkCtx];
+
+  const ctxY = networkCtx === "on" ? 50 : networkCtx === "vpn" ? 108 : 166;
+  const destY = localActive ? 166 : zpaActive ? 108 : ziaActive ? 50 : null;
+  const pacBypass = !!result?.zcc_bypass?.reason && /\bPAC\b/i.test(result.zcc_bypass.reason);
+
+  // Short per-context outcome label for the network-context node subtitles.
+  function shortVerdict(v?: string): { txt: string; color: string } {
+    switch (v) {
+      case "ZCC_BYPASS":   return { txt: "→ Direct (bypass)",   color: "#c2410c" };
+      case "ZCC_INACTIVE": return { txt: "→ Direct (inactive)", color: "#6b7280" };
+      case "ZPA":          return { txt: "→ ZPA private app",   color: "#4338ca" };
+      case "ZIA_ALLOW":    return { txt: "→ ZIA allow",         color: "#15803d" };
+      case "ZIA_BLOCK_FIREWALL":
+      case "ZIA_BLOCK_DNS":
+      case "ZIA_BLOCK_URL":
+      case "ZIA_BLOCK_CLOUDAPP": return { txt: "→ ZIA block", color: "#b91c1c" };
+      default: return { txt: "", color: "#9ca3af" };
+    }
+  }
+
+  // Destination-node subtitles derived from the winning verdict.
+  const ziaSub = !ziaActive ? "Internet gateway"
+    : ziaBlocked
+      ? ((verdict === "ZIA_BLOCK_FIREWALL" ? result!.zia_firewall.rule_name
+          : verdict === "ZIA_BLOCK_DNS" ? result!.zia_dns.rule_name
+          : verdict === "ZIA_BLOCK_URL" ? result!.zia_url.rule_name
+          : result!.zia_cloud_app.rule_name) || "Blocked by ZIA")
+      : "Allowed through ZIA to internet";
+  const zpaSub = zpaActive ? (result!.zpa.rule_name || "App segment matched") : "ZPA-enrolled private access";
+  const localSub = localActive
+    ? (zccInactive ? "ZCC inactive on this network — direct" : (result!.zcc_bypass.rule_name || "Direct — tunnel bypass"))
+    : "PAC DIRECT / tunnel bypass";
+
+  const ctxNodes = [
+    { id: "on"  as const, y: 27, cy: 50,  fill: "#faf5ff", stroke: "#7c3aed", title: "On Trusted Network"  },
+    { id: "vpn" as const, y: 85, cy: 108, fill: "#eef2ff", stroke: "#4f46e5", title: "VPN Trusted Network" },
+    { id: "off" as const, y: 143, cy: 166, fill: "#f0fdfa", stroke: "#0d9488", title: "Off Trusted Network" },
+  ];
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white overflow-hidden select-none">
+      <svg viewBox="0 0 908 225" xmlns="http://www.w3.org/2000/svg" className="w-full" style={{ display: "block" }}>
+        <defs>
+          <marker id="sfd-gray" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#d1d5db"/></marker>
+          <marker id="sfd-ora"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#f97316"/></marker>
+          <marker id="sfd-ind"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#4f46e5"/></marker>
+          <marker id="sfd-grn"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#22c55e"/></marker>
+          <marker id="sfd-red"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#ef4444"/></marker>
+          <marker id="sfd-vio"  markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#7c3aed"/></marker>
+          <marker id="sfd-teal" markerWidth="7" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3z" fill="#0d9488"/></marker>
+          <filter id="sfd-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.08"/></filter>
+        </defs>
+
+        {/* ── Left edges: Device → ZCC → junction → selected context ── */}
+        <line x1="108" y1="108" x2="186" y2="108" stroke={pathColor} strokeWidth="2" markerEnd={result ? pathMk : "url(#sfd-gray)"}/>
+        <line x1="336" y1="108" x2="358" y2="108" stroke={result ? pathColor : "#d1d5db"} strokeWidth="2"/>
+        <line x1="358" y1="50"  x2="358" y2="166" stroke="#e5e7eb" strokeWidth="2"/>
+        {ctxY !== 108 && (
+          <line x1="358" y1="108" x2="358" y2={ctxY} stroke={ctxColor} strokeWidth="2"/>
+        )}
+        <line x1="358" y1={ctxY} x2="385" y2={ctxY} stroke={ctxColor} strokeWidth="1.5" markerEnd={CTX_MK[networkCtx]}/>
+
+        {/* ── Right fork: gray structure + coloured winning path ── */}
+        <line x1="596" y1="50" x2="596" y2="166" stroke="#e5e7eb" strokeWidth="2"/>
+        {[50, 108, 166].map(y => (
+          <line key={y} x1="596" y1={y} x2="644" y2={y} stroke="#e5e7eb" strokeWidth="1.5" markerEnd="url(#sfd-gray)"/>
+        ))}
+        {destY !== null && (
+          <>
+            <line x1="566" y1={ctxY} x2="596" y2={ctxY} stroke={pathColor} strokeWidth="2"/>
+            {ctxY !== destY && <line x1="596" y1={ctxY} x2="596" y2={destY} stroke={pathColor} strokeWidth="2"/>}
+            <line x1="596" y1={destY} x2="644" y2={destY} stroke={pathColor} strokeWidth="2" markerEnd={pathMk}/>
+          </>
+        )}
+
+        {/* ── Node: Device ── */}
+        <g filter="url(#sfd-shadow)">
+          <rect x="8" y="86" width="100" height="44" rx="8" fill="white" stroke="#e5e7eb" strokeWidth="1.5"/>
+        </g>
+        <rect x="16" y="95" width="18" height="12" rx="1.5" fill="none" stroke="#9ca3af" strokeWidth="1.3"/>
+        <line x1="13" y1="107" x2="37" y2="107" stroke="#9ca3af" strokeWidth="1.3"/>
+        <text x="40" y="102" fontSize="11" fontWeight="600" fill="#374151">Device</text>
+        <text x="40" y="115" fontSize="9" fill="#9ca3af">Endpoint</text>
+
+        {/* ── Node: ZCC ── */}
+        <g filter="url(#sfd-shadow)">
+          <rect x="186" y="76" width="150" height="64" rx="8" fill="white" stroke="#93c5fd" strokeWidth="1.5"/>
+        </g>
+        <path d="M197 105 L197 92 L207 89 L217 92 L217 105 C217 111 207 114 207 114 C207 114 197 111 197 105Z"
+          fill="none" stroke="#3b82f6" strokeWidth="1.4"/>
+        <text x="224" y="96" fontSize="11" fontWeight="600" fill="#1d4ed8">ZCC</text>
+        <circle cx="326" cy="84" r="5" fill={!result ? "#d1d5db" : zccOn ? "#22c55e" : "#d1d5db"}/>
+        <text x="224" y="110" fontSize="8" fill="#9ca3af">{profileName || "All profiles"}</text>
+
+        {/* ── 3 Network Context Nodes (translate +80) ── */}
+        <g transform="translate(80, 0)">
+          {ctxNodes.map(nc => {
+            const sel = networkCtx === nc.id;
+            const sv = results ? shortVerdict(results[nc.id]?.verdict) : { txt: "", color: "#9ca3af" };
+            return (
+              <g key={nc.id}>
+                <g filter="url(#sfd-shadow)" className="cursor-pointer" onClick={() => setNetworkCtx(nc.id)}>
+                  <rect x="314" y={nc.y} width="172" height="46" rx="7"
+                    fill={sel ? nc.fill : "white"} stroke={sel ? nc.stroke : "#e5e7eb"} strokeWidth={sel ? 2 : 1.5}/>
+                </g>
+                <text x="330" y={nc.cy - 4} fontSize="10" fontWeight="600"
+                  fill={sel ? nc.stroke : "#374151"} className="pointer-events-none">{nc.title}</text>
+                <text x="330" y={nc.cy + 10} fontSize="8"
+                  fill={sel ? sv.color : "#9ca3af"} className="pointer-events-none">{sv.txt || "Not evaluated"}</text>
+              </g>
+            );
+          })}
+        </g>
+
+        {/* ── Destination nodes (translate +126) ── */}
+        <g transform="translate(126, 0)">
+          {/* ZIA Cloud */}
+          <g filter="url(#sfd-shadow)">
+            <rect x="524" y="26" width="240" height="48" rx="8"
+              fill={ziaActive ? (ziaBlocked ? "#fef2f2" : "#f0fdf4") : "white"}
+              stroke={ziaActive ? (ziaBlocked ? "#ef4444" : "#22c55e") : "#e5e7eb"}
+              strokeWidth={ziaActive ? 2 : 1.5}/>
+          </g>
+          <path d="M533 56 C530 56 529 53 531 50 C529 48 530 45 534 44 C534 40 539 37 544 39 C545 36 551 35 554 38 C559 36 564 40 562 45 C565 45 567 48 565 51 C566 54 564 57 561 57Z"
+            fill="none" stroke={ziaActive ? (ziaBlocked ? "#ef4444" : "#22c55e") : "#9ca3af"} strokeWidth="1.2" className="pointer-events-none"/>
+          <text x="571" y="42" fontSize="10" fontWeight="600" fill={ziaActive ? (ziaBlocked ? "#991b1b" : "#15803d") : "#6b7280"} className="pointer-events-none">ZIA Cloud</text>
+          <text x="571" y="57" fontSize="8.5" fill={ziaActive ? (ziaBlocked ? "#b91c1c" : "#166534") : "#9ca3af"} className="pointer-events-none">{ziaSub}</text>
+          {ziaActive && (
+            <>
+              <rect x="716" y="28" width="44" height="16" rx="4"
+                fill={ziaBlocked ? "#fee2e2" : "#dcfce7"} stroke={ziaBlocked ? "#ef4444" : "#22c55e"} strokeWidth="0.8"/>
+              <text x="738" y="39" fontSize="8" fontWeight="700" textAnchor="middle"
+                fill={ziaBlocked ? "#991b1b" : "#15803d"} className="pointer-events-none">{ziaBlocked ? "BLOCK" : "ALLOW"}</text>
+            </>
+          )}
+
+          {/* ZPA Private Apps */}
+          <g filter="url(#sfd-shadow)">
+            <rect x="524" y="84" width="240" height="48" rx="8"
+              fill={zpaActive ? "#eef2ff" : "white"}
+              stroke={zpaActive ? "#4f46e5" : "#e5e7eb"} strokeWidth={zpaActive ? 2 : 1.5}/>
+          </g>
+          <rect x="533" y="100" width="14" height="11" rx="2" fill="none" stroke={zpaActive ? "#4f46e5" : "#9ca3af"} strokeWidth="1.3"/>
+          <path d="M536 100 A4 4 0 0 1 544 100" fill="none" stroke={zpaActive ? "#4f46e5" : "#9ca3af"} strokeWidth="1.3"/>
+          <circle cx="540" cy="106" r="1.5" fill={zpaActive ? "#4f46e5" : "#9ca3af"}/>
+          <text x="554" y="102" fontSize="10" fontWeight="600" fill={zpaActive ? "#3730a3" : "#6b7280"} className="pointer-events-none">ZPA Private Apps</text>
+          <text x="554" y="117" fontSize="8.5" fill={zpaActive ? "#4338ca" : "#9ca3af"} className="pointer-events-none">{zpaSub}</text>
+          <rect x="726" y="86" width="34" height="15" rx="4" fill={zpaActive ? "#eef2ff" : "#f9fafb"} stroke={zpaActive ? "#a5b4fc" : "#e5e7eb"} strokeWidth="0.8"/>
+          <text x="743" y="96" fontSize="7.5" textAnchor="middle" fill={zpaActive ? "#4f46e5" : "#d1d5db"} className="pointer-events-none">{zpaActive ? "active" : "off"}</text>
+
+          {/* Local / Direct */}
+          <g filter="url(#sfd-shadow)">
+            <rect x="524" y="142" width="240" height="48" rx="8"
+              fill={localActive ? "#fff7ed" : "white"}
+              stroke={localActive ? "#f97316" : "#e5e7eb"} strokeWidth={localActive ? 2 : 1.5}/>
+          </g>
+          <circle cx="538" cy="166" r="9" fill="none" stroke={localActive ? "#f97316" : "#9ca3af"} strokeWidth="1.3" className="pointer-events-none"/>
+          <ellipse cx="538" cy="166" rx="4.5" ry="9" fill="none" stroke={localActive ? "#f97316" : "#9ca3af"} strokeWidth="1" className="pointer-events-none"/>
+          <line x1="529" y1="166" x2="547" y2="166" stroke={localActive ? "#f97316" : "#9ca3af"} strokeWidth="1" className="pointer-events-none"/>
+          <text x="555" y="161" fontSize="10" fontWeight="600" fill={localActive ? "#c2410c" : "#6b7280"} className="pointer-events-none">Local / Direct</text>
+          <text x="555" y="175" fontSize="8" fill={localActive ? "#c2410c" : "#9ca3af"} className="pointer-events-none">{localSub}</text>
+          {localActive && pacBypass && (
+            <>
+              <rect x="730" y="144" width="30" height="16" rx="4" fill="#fef3c7" stroke="#fbbf24" strokeWidth="1"/>
+              <text x="745" y="155" fontSize="8" fontWeight="600" fill="#92400e" textAnchor="middle" className="pointer-events-none">PAC</text>
+            </>
+          )}
+        </g>
+
+        {/* ── Legend ── */}
+        <circle cx="10" cy="217" r="4" fill={zccOn ? "#22c55e" : "#d1d5db"}/>
+        <text x="18" y="221" fontSize="8.5" fill="#9ca3af">{zccInactive ? "ZCC inactive" : "Active"}</text>
+        <line x1="80" y1="217" x2="94" y2="217" stroke="#22c55e" strokeWidth="2"/>
+        <text x="98" y="221" fontSize="8.5" fill="#9ca3af">ZIA tunnel</text>
+        <line x1="164" y1="217" x2="178" y2="217" stroke="#f97316" strokeWidth="2"/>
+        <text x="182" y="221" fontSize="8.5" fill="#9ca3af">PAC DIRECT</text>
+        <line x1="250" y1="217" x2="264" y2="217" stroke="#4f46e5" strokeWidth="2"/>
+        <text x="268" y="221" fontSize="8.5" fill="#9ca3af">ZPA</text>
+      </svg>
+    </div>
+  );
+}
+
+function SimulatorFlowDetail({ result }: { result: SimulationResult }) {
+  const engines: { key: keyof SimulationResult; label: string }[] = [
+    { key: "zcc_bypass",    label: "ZCC Bypass" },
+    { key: "zpa",           label: "ZPA" },
+    { key: "zia_dns",       label: "DNS Filter" },
+    { key: "zia_firewall",  label: "Firewall" },
+    { key: "zia_ssl",       label: "SSL" },
+    { key: "zia_cloud_app", label: "Cloud App" },
+    { key: "zia_exceptions",label: "Exceptions" },
+    { key: "zia_url",       label: "URL Filter" },
+  ];
+
+  const ziaKeys = new Set(["zia_firewall","zia_dns","zia_cloud_app","zia_url","zia_exceptions","zia_ssl"]);
+  const skipZia = result.verdict === "ZPA" || result.verdict === "ZCC_BYPASS" || result.verdict === "ZCC_INACTIVE";
+
+  const matched = engines.filter(e => {
+    if (skipZia && ziaKeys.has(e.key as string)) return false;
+    const c = result[e.key] as PolicyCheck;
+    return c?.matched;
+  });
+
+  if (!matched.length) return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      {matched.map(({ key, label }) => {
+        const c = result[key] as PolicyCheck;
+        const actionColor = c.action && ["BLOCK","BLOCK_DROP","BLOCK_ICMP","BLOCK_RESET"].some(a => (c.action||"").toUpperCase().includes(a))
+          ? "text-red-700" : c.action === "BYPASS" ? "text-orange-700" : "text-green-700";
+        return (
+          <div key={key} className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[10px]">
+            <div className="flex items-center justify-between gap-1">
+              <span className="font-semibold text-gray-700">{label}</span>
+              {c.action && <span className={`font-bold ${actionColor}`}>{c.action}</span>}
+            </div>
+            {c.rule_name && <p className="text-gray-500 truncate" title={c.rule_name}>{c.rule_name}</p>}
+            {c.category && <p className="text-gray-400 truncate" title={c.category}>{c.category}</p>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const VERDICT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  ZCC_BYPASS:         { bg: "bg-orange-50", text: "text-orange-800", label: "ZCC Bypass" },
+  ZCC_INACTIVE:       { bg: "bg-gray-50",  text: "text-gray-700",  label: "ZCC Inactive — Direct" },
+  ZPA:                { bg: "bg-blue-50",  text: "text-blue-800",  label: "ZPA" },
+  ZIA_ALLOW:          { bg: "bg-green-50", text: "text-green-800", label: "ZIA Allow" },
+  ZIA_BLOCK_FIREWALL:  { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_CLOUDAPP:  { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_DNS:       { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  ZIA_BLOCK_URL:       { bg: "bg-red-50",   text: "text-red-800",   label: "ZIA Block" },
+  INTERNET:           { bg: "bg-gray-50",  text: "text-gray-700",  label: "Internet" },
+};
+
+function PolicyCheckCard({ check }: { check: PolicyCheck }) {
+  const actionColor =
+    check.action && ["BLOCK", "BLOCK_DROP", "BLOCK_ICMP", "BLOCK_RESET", "BLOCK_BYPASS"].includes(check.action.toUpperCase())
+      ? "text-red-700 bg-red-50"
+      : check.action === "ALLOW"
+      ? "text-green-700 bg-green-50"
+      : "text-gray-700 bg-gray-100";
+
+  return (
+    <div className={`rounded-lg border p-4 space-y-2 ${check.matched ? "border-gray-300 bg-white" : "border-gray-200 bg-gray-50"}`}>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <span className="text-sm font-medium text-gray-800">{check.engine}</span>
+        <div className="flex items-center gap-2">
+          {check.matched ? (
+            <>
+              {check.action && (
+                <span className={`text-xs font-semibold px-2 py-0.5 rounded ${actionColor}`}>
+                  {check.action}
+                </span>
+              )}
+              <span className="text-xs bg-gray-200 text-gray-700 px-2 py-0.5 rounded">Matched</span>
+            </>
+          ) : (
+            <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">No match</span>
+          )}
+        </div>
+      </div>
+      <p className="text-xs text-gray-600">{check.reason}</p>
+      {check.rule_name && (
+        <p className="text-xs text-gray-500">Rule: <span className="font-medium text-gray-700">{check.rule_name}</span></p>
+      )}
+      {check.category && (
+        <p className="text-xs text-gray-500">Category: <span className="font-medium text-gray-700">{check.category}</span></p>
+      )}
+      {check.caveats.length > 0 && (
+        <div className="mt-1 space-y-1">
+          {check.caveats.map((c, i) => (
+            <p key={i} className="text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded">⚠ {c}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SimulatorTab({ tenant }: { tenant: Tenant }) {
+  const [dest, setDest] = useState("");
+  const [port, setPort] = useState("443");
+  const [protocol, setProtocol] = useState("HTTPS");
+  const [nwApp, setNwApp] = useState("");
+  const [appSvcGroup, setAppSvcGroup] = useState("");
+  const [cloudApp, setCloudApp] = useState("");
+  const [zccProfile, setZccProfile] = useState("");
+  const [srcIp, setSrcIp] = useState("");
+  const [userName, setUserName] = useState("");
+  const [deptName, setDeptName] = useState("");
+  const [groupName, setGroupName] = useState("");
+  const [locationName, setLocationName] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [networkCtx, setNetworkCtx] = useState<"on" | "vpn" | "off">("off");
+  const [results, setResults] = useState<SimulationResultAll | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const result = results ? results[networkCtx] : null;
+
+  const { data: appOptions = [] } = useQuery({ queryKey: ["sim-applications", tenant.id], queryFn: () => fetchSimApplications(tenant.id) });
+  const { data: appSvcGroupOptions = [] } = useQuery({ queryKey: ["sim-app-service-groups", tenant.id], queryFn: () => fetchSimAppServiceGroups(tenant.id) });
+  const { data: cloudAppOptions = [] } = useQuery({ queryKey: ["sim-cloud-apps", tenant.id], queryFn: () => fetchSimCloudApps(tenant.id) });
+  const { data: zccProfileOptions = [] } = useQuery({ queryKey: ["sim-zcc-profiles", tenant.id], queryFn: () => fetchSimZccProfiles(tenant.id) });
+  const { data: userOptions = [] } = useQuery({ queryKey: ["sim-users", tenant.id], queryFn: () => fetchSimUsers(tenant.id) });
+  const { data: deptOptions = [] } = useQuery({ queryKey: ["sim-depts", tenant.id], queryFn: () => fetchSimDepartments(tenant.id) });
+  const { data: groupOptions = [] } = useQuery({ queryKey: ["sim-groups", tenant.id], queryFn: () => fetchSimGroups(tenant.id) });
+  const { data: locationOptions = [] } = useQuery({ queryKey: ["sim-locations", tenant.id], queryFn: () => fetchSimLocations(tenant.id) });
+
+  const mut = useMutation({
+    mutationFn: () => simulateTrafficAll(tenant.id, {
+      destination: dest.trim(), port: parseInt(port) || 443, protocol,
+      nwApplication: nwApp.trim() || undefined,
+      appServiceGroup: appSvcGroup.trim() || undefined,
+      cloudApp: cloudApp.trim() || undefined,
+      zccProfile: zccProfile || undefined,
+      srcIp: srcIp.trim() || undefined,
+      userName: userName.trim() || undefined,
+      deptName: deptName.trim() || undefined,
+      groupName: groupName.trim() || undefined,
+      locationName: locationName.trim() || undefined,
+    }),
+    onSuccess: (data) => { setResults(data); setErr(null); },
+    onError: (e: Error) => setErr(e.message),
+  });
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!dest.trim()) return;
+    setResults(null);
+    mut.mutate();
+  }
+
+  // Auto-set port when protocol changes
+  function handleProtocol(p: string) {
+    setProtocol(p);
+    const defaults: Record<string, string> = { HTTPS: "443", HTTP: "80", DNS: "53", FTP: "21", SMTP: "25", SSH: "22" };
+    if (defaults[p]) setPort(defaults[p]);
+  }
+
+  const verdictStyle = result ? (VERDICT_STYLES[result.verdict] ?? VERDICT_STYLES.INTERNET) : null;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold text-gray-900">Traffic Simulator</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Evaluate how a connection would be handled against ZPA application segments and ZIA firewall,
+          DNS, and URL filtering policies — based on your last imported data.
+        </p>
+      </div>
+
+      <div className="flex gap-6 items-start">
+      {/* ── Left: form + verdict + policy chain ── */}
+      <div className="space-y-4" style={{ width: "35%" }}>
+      <form onSubmit={handleSubmit} className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="col-span-2 sm:col-span-1">
+            <label className="block text-xs font-medium text-gray-700 mb-1">Destination</label>
+            <input
+              type="text"
+              value={dest}
+              onChange={e => setDest(e.target.value)}
+              placeholder="8.8.8.8 or example.com"
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Protocol</label>
+            <select
+              value={protocol}
+              onChange={e => handleProtocol(e.target.value)}
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+            >
+              {PROTOCOLS.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Port</label>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={port}
+              onChange={e => setPort(e.target.value)}
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">ZCC App Profile</label>
+            <select value={zccProfile} onChange={e => setZccProfile(e.target.value)}
+              className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+              <option value="">(all profiles)</option>
+              {zccProfileOptions.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+        </div>
+        {/* Advanced Options toggle */}
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced(v => !v)}
+            className="text-xs text-zs-600 hover:text-zs-700 font-medium flex items-center gap-1"
+          >
+            <svg className={`h-3 w-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            Advanced Options
+          </button>
+        </div>
+
+        {showAdvanced && (
+          <div className="space-y-3 pt-1 border-t border-gray-100">
+            {/* Row 1: app-layer */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Network Application</label>
+                {(() => {
+                  const popular = ["QUIC","HTTP","HTTP2","FTP","SFTP","SSH","DNS","SMTP","SMTPS","POP3","POP3S","IMAP","IMAPS","RDP","VNC","TELNET","LDAP","LDAPS","NTP","SNMP","SMB","MSSQL","MYSQL","ORACLE_DB","POSTGRESQL","KERBEROS","RADIUS","ZSCALER_PROXY_TRAFFIC"];
+                  const extra = appOptions.filter(a => !popular.includes(a));
+                  return (
+                    <select value={nwApp} onChange={e => setNwApp(e.target.value)}
+                      className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                      <option value="">(none)</option>
+                      <optgroup label="Common">
+                        {popular.map(a => <option key={a} value={a}>{a}</option>)}
+                      </optgroup>
+                      {extra.length > 0 && (
+                        <optgroup label="In Your Rules">
+                          {extra.map(a => <option key={a} value={a}>{a}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                  );
+                })()}
+                <p className="mt-0.5 text-xs text-gray-400">Matches nw_applications rules (e.g. BLOCK_QUIC)</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">App Service Group</label>
+                {(() => {
+                  const popular = ["OFFICE365","GSUITE","ZOOM","WEBEX","SLACK","TEAMS","DROPBOX","BOX","SALESFORCE","SERVICENOW","WORKDAY","OKTA","GITHUB","JIRA","CONFLUENCE","SHAREPOINT","ONEDRIVE","AZURE","AWS","GCP","ZSCALER","UCAAS","CCAAS"];
+                  const extra = appSvcGroupOptions.filter(g => !popular.includes(g));
+                  return (
+                    <select value={appSvcGroup} onChange={e => setAppSvcGroup(e.target.value)}
+                      className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                      <option value="">(none)</option>
+                      <optgroup label="Common">
+                        {popular.map(g => <option key={g} value={g}>{g}</option>)}
+                      </optgroup>
+                      {extra.length > 0 && (
+                        <optgroup label="In Your Rules">
+                          {extra.map(g => <option key={g} value={g}>{g}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                  );
+                })()}
+                <p className="mt-0.5 text-xs text-gray-400">Matches app_service_groups rules (e.g. Office365, UCaaS)</p>
+              </div>
+            </div>
+            {/* Row 1b: cloud app */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Cloud Application</label>
+                {(() => {
+                  const popular = ["MSTEAM","SHAREPOINTONLINE","OTHER_OFFICE365","YAMMER","SWAY_ENTERPRISE","DYNAMICS","DELVE","POWERBI","MSPLANNER","GOOGLEDRIVE","GMAIL","GDOCS","GSHEETS","GSLIDES","DROPBOX","BOX","SLACK","ZOOM","WEBEX","SALESFORCE","SERVICENOW","WORKDAY","GITHUB","JIRA","CONFLUENCE","OKTA","AWS","AZURE","GCP"];
+                  const extra = cloudAppOptions.filter(a => !popular.includes(a));
+                  return (
+                    <select value={cloudApp} onChange={e => setCloudApp(e.target.value)}
+                      className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                      <option value="">(none)</option>
+                      <optgroup label="Common">
+                        {popular.map(a => <option key={a} value={a}>{a}</option>)}
+                      </optgroup>
+                      {extra.length > 0 && (
+                        <optgroup label="In Your Rules">
+                          {extra.map(a => <option key={a} value={a}>{a}</option>)}
+                        </optgroup>
+                      )}
+                    </select>
+                  );
+                })()}
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates Cloud App Control and SSL inspection rules</p>
+              </div>
+            </div>
+            {/* Row 2: source */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Source IP</label>
+                <input type="text" value={srcIp} onChange={e => setSrcIp(e.target.value)}
+                  placeholder="e.g. 10.0.0.5"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates src_ip_groups constraints</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Location</label>
+                <select value={locationName} onChange={e => setLocationName(e.target.value)}
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500 bg-white">
+                  <option value="">(none)</option>
+                  {locationOptions.map(l => <option key={l} value={l}>{l}</option>)}
+                </select>
+                <p className="mt-0.5 text-xs text-gray-400">Evaluates location-scoped rules</p>
+              </div>
+            </div>
+            {/* Row 3: identity */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">User</label>
+                <input list="user-options" type="text" value={userName} onChange={e => setUserName(e.target.value)}
+                  placeholder="username or email"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="user-options">{userOptions.map(u => <option key={u} value={u} />)}</datalist>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
+                <input list="dept-options" type="text" value={deptName} onChange={e => setDeptName(e.target.value)}
+                  placeholder="department name"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="dept-options">{deptOptions.map(d => <option key={d} value={d} />)}</datalist>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Group</label>
+                <input list="group-options" type="text" value={groupName} onChange={e => setGroupName(e.target.value)}
+                  placeholder="group name"
+                  className="w-full text-sm px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-zs-500" />
+                <datalist id="group-options">{groupOptions.map(g => <option key={g} value={g} />)}</datalist>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400">
+              Identity and location fields narrow scoped rules. If left blank, scoped rules are evaluated permissively (worst-case assumption).
+            </p>
+          </div>
+        )}
+        {err && <p className="text-xs text-red-600">{err}</p>}
+        <button
+          type="submit"
+          disabled={mut.isPending || !dest.trim()}
+          className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+        >
+          {mut.isPending ? "Simulating…" : "Simulate"}
+        </button>
+      </form>
+
+      {result && (
+        <div className="space-y-3">
+          <div className={`rounded-xl border p-3 ${verdictStyle!.bg}`}>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${verdictStyle!.text} border-current`}>
+                {verdictStyle!.label}
+              </span>
+              <span className={`text-xs font-medium ${verdictStyle!.text}`}>{result.verdict_label}</span>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Policy Evaluation Chain</p>
+            {result.verdict !== "ZCC_INACTIVE" && <PolicyCheckCard check={result.zcc_bypass} />}
+            {result.verdict !== "ZCC_INACTIVE" && <PolicyCheckCard check={result.zpa} />}
+            {(result.verdict === "ZPA" || result.verdict === "ZCC_BYPASS" || result.verdict === "ZCC_INACTIVE") ? (
+              <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-400 italic">
+                {result.verdict === "ZCC_INACTIVE"
+                  ? "ZCC client inactive on this network — traffic goes direct, ZPA and ZIA not evaluated"
+                  : `ZIA policies not evaluated — traffic routed via ${result.verdict === "ZPA" ? "ZPA" : "ZCC Bypass"} before reaching ZIA`}
+              </div>
+            ) : (
+              <>
+                {/* Ordered to match ZIA's enforcement sequence */}
+                <PolicyCheckCard check={result.zia_dns} />
+                <PolicyCheckCard check={result.zia_firewall} />
+                <PolicyCheckCard check={result.zia_ssl} />
+                <PolicyCheckCard check={result.zia_cloud_app} />
+                <PolicyCheckCard check={result.zia_exceptions} />
+                <PolicyCheckCard check={result.zia_url} />
+              </>
+            )}
+          </div>
+          <p className="text-xs text-gray-400">
+            Results are based on your last imported policy snapshot. Predefined URL categories,
+            user/group scoping, and time-based rules require a live ZIA lookup for full accuracy.
+          </p>
+        </div>
+      )}
+      </div>
+
+      {/* ── Right: diagram ── */}
+      <div className="space-y-3" style={{ width: "65%" }}>
+        <SimulatorFlowDiagram result={result} results={results} networkCtx={networkCtx} setNetworkCtx={setNetworkCtx} profileName={zccProfile || null} />
+        {result && <SimulatorFlowDetail result={result} />}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function TerraformExportPanel({ tenant, product }: { tenant: Tenant; product: "zia" | "zpa" }) {
+  const [pending, setPending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function handleExport() {
+    setErr(null);
+    setPending(true);
+    try {
+      await downloadTerraform(tenant.id, product, tenant.name);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 p-1">
+      <p className="text-sm text-gray-600">
+        Generate a <code className="text-xs bg-gray-100 px-1 rounded">.tf</code> file from your
+        imported {product.toUpperCase()} configuration using the{" "}
+        <a
+          href="https://registry.terraform.io/providers/zscaler/zscaler/latest"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-zs-600 hover:underline"
+        >
+          Zscaler Terraform provider
+        </a>
+        . Cross-references between resources are flagged as comments for manual wiring.
+      </p>
+      {err && <p className="text-xs text-red-600">{err}</p>}
+      <button
+        onClick={handleExport}
+        disabled={pending}
+        className="px-4 py-2 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-60"
+      >
+        {pending ? "Generating…" : `Export ${product.toUpperCase()} as Terraform`}
+      </button>
+      <p className="text-xs text-gray-400">
+        Requires a completed import. Run import first if your data is stale.
+      </p>
+    </div>
+  );
+}
 
 function ZiaTab({ tenant }: { tenant: Tenant }) {
   const [groups, setGroups] = useState<Record<string, boolean>>({ activation: true });
@@ -6334,6 +7047,11 @@ function ZiaTab({ tenant }: { tenant: Tenant }) {
       {/* Clone Config */}
       <SectionGroup title="Clone Config from Another Tenant" isOpen={!!groups.applySnapshot} onToggle={() => toggleGroup("applySnapshot")}>
         <CloneConfigPanel tenant={tenant} />
+      </SectionGroup>
+
+      {/* Terraform Export */}
+      <SectionGroup title="Terraform Export" isOpen={!!groups.terraform} onToggle={() => toggleGroup("terraform")}>
+        <TerraformExportPanel tenant={tenant} product="zia" />
       </SectionGroup>
     </div>
   );
@@ -6699,6 +7417,11 @@ function ZpaTab({ tenant }: { tenant: Tenant }) {
         <Accordion title="Snapshots" isOpen={!!open.snapshots} onToggle={() => toggle("snapshots")}>
           <ZpaSnapshotsSection tenant={tenant} isOpen={!!open.snapshots} />
         </Accordion>
+      </SectionGroup>
+
+      {/* Terraform Export */}
+      <SectionGroup title="Terraform Export" isOpen={!!groups.terraform} onToggle={() => toggleGroup("terraform")}>
+        <TerraformExportPanel tenant={tenant} product="zpa" />
       </SectionGroup>
     </div>
   );
@@ -8670,7 +9393,7 @@ export default function TenantWorkspacePage() {
 
   // Determine active tab from URL segment
   const pathSegment = location.pathname.split("/").pop() as TabId | undefined;
-  const activeTab: TabId = (["zia", "zpa", "zdx", "zcc", "zid"].includes(pathSegment ?? "") ? pathSegment : "zia") as TabId;
+  const activeTab: TabId = (["zia", "zpa", "zdx", "zcc", "zid", "sim"].includes(pathSegment ?? "") ? pathSegment : "zia") as TabId;
 
   const { data: tenant, isLoading, error } = useQuery({
     queryKey: ["tenant", Number(id)],
@@ -8721,6 +9444,7 @@ export default function TenantWorkspacePage() {
     { id: "zdx", label: "ZDX", show: true },
     { id: "zcc", label: "ZCC", show: hasZcc },
     { id: "zid", label: "ZID", show: true },
+    { id: "sim", label: "Simulator", show: true },
   ];
 
   // If trying to view ZPA tab but no ZPA, redirect to ZIA
@@ -8808,6 +9532,7 @@ export default function TenantWorkspacePage() {
       {activeTab === "zdx" && <ZdxTab key={tenant.id} tenant={tenant} />}
       {activeTab === "zcc" && <ZccTab key={tenant.id} tenant={tenant} />}
       {activeTab === "zid" && <ZidTab key={tenant.id} tenant={tenant} />}
+      {activeTab === "sim" && <SimulatorTab key={tenant.id} tenant={tenant} />}
 
       {importModal && (
         <ImportProductModal

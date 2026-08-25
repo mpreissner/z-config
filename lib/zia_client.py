@@ -1120,6 +1120,36 @@ class ZIAClient:
         data = self.zia_get("/zia/api/v1/pacFiles?filter=pac_content")
         return data if isinstance(data, list) else []
 
+    def list_pac_files_with_content(self) -> List[Dict]:
+        """List all PAC files, enriched with the deployed version's script body.
+
+        The bulk list endpoint omits pac_content; for offline evaluation (traffic
+        simulator, traffic-profile visualizer) we fetch each PAC's version list and
+        embed the pacContent of its currently deployed version (matched by
+        pacVersion, falling back to the highest version number). A per-file fetch
+        failure degrades gracefully to metadata-only for that file.
+        """
+        pac_files = self.list_pac_files()
+        for pac in pac_files:
+            if not isinstance(pac, dict) or pac.get("id") is None:
+                continue
+            try:
+                versions = self.get_pac_file_versions(int(pac["id"]))
+            except Exception:
+                continue
+            if not versions:
+                continue
+            deployed = pac.get("pacVersion")
+            chosen = None
+            if deployed is not None:
+                chosen = next((v for v in versions if v.get("pacVersion") == deployed), None)
+            if chosen is None:
+                chosen = max(versions, key=lambda v: v.get("pacVersion", 0))
+            content = chosen.get("pacContent")
+            if content:
+                pac["pacContent"] = content
+        return pac_files
+
     def get_pac_file_versions(self, pac_id: int) -> List[Dict]:
         """Return all versions of a PAC file by ID."""
         data = self.zia_get(f"/zia/api/v1/pacFiles/{pac_id}/version")

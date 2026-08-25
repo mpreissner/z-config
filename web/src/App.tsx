@@ -101,7 +101,7 @@ export default function App() {
                   <Route path="/templates" element={<TemplatesPage />} />
                   {/* Tenant workspace routes */}
                   <Route path="/tenant/:id" element={<Navigate to="zia" replace />} />
-                  {["zia", "zpa", "zdx", "zcc", "zid"].map((product) => (
+                  {["zia", "zpa", "zdx", "zcc", "zid", "sim"].map((product) => (
                     <Route
                       key={product}
                       path={`/tenant/:id/${product}`}
