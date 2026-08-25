@@ -79,7 +79,7 @@ class ZIAClient:
     def _zia_request(self, method: str, path: str, json=None, params=None) -> "requests.Response":
         """Authenticated direct HTTP request with automatic 429 retry/backoff.
 
-        Retries up to 3 times on 429, honouring Retry-After when present and
+        Retries up to 3 times on 429, honoring Retry-After when present and
         falling back to exponential backoff (2 / 4 / 8 s) otherwise.
         """
         import requests
@@ -1215,3 +1215,126 @@ class ZIAClient:
     def delete_pac_file(self, pac_id: int) -> None:
         """Delete a PAC file and all its versions."""
         self.zia_delete(f"/zia/api/v1/pacFiles/{pac_id}")
+
+    # ------------------------------------------------------------------
+    # Proxies, Proxy Gateways, and Root Certificates
+    #
+    # These back the third-party proxy chaining path (a forwarding rule with
+    # forwardMethod=PROXYCHAIN points at a proxyGateway, which points at a
+    # proxy, which points at the root certificate the third party presents).
+    #
+    # rootCertificates is not in zscaler-sdk-python and is undocumented, but
+    # it is live on the OneAPI gateway, so it goes through direct HTTP.
+    # ------------------------------------------------------------------
+
+    _ROOT_CERT_PATH = "/zia/api/v1/rootCertificates"
+
+    def list_proxies(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.proxies.list_proxies()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def create_proxy(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.proxies.add_proxy(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_proxy(self, proxy_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.proxies.update_proxy(proxy_id, **config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_proxy(self, proxy_id: str) -> None:
+        result, resp, err = self._sdk.zia.proxies.delete_proxy(proxy_id)
+        _unwrap(result, resp, err)
+
+    def list_proxy_gateways(self) -> List[Dict]:
+        result, resp, err = self._sdk.zia.proxies.list_proxy_gateways()
+        return _to_dicts(_unwrap(result, resp, err))
+
+    def list_root_certificates(self, include_cert: bool = False) -> List[Dict]:
+        """List root certificates uploaded for proxy chaining and isolation.
+
+        Returns raw camelCase JSON.  Platform-supplied entries (the Zscaler
+        Browser Isolation certificate) carry no `id` and are skipped by the
+        importer, which leaves the uploaded PROXY_CHAINING certs.
+
+        The list response never contains certificate material.  With
+        `include_cert`, each entry that has an id gains a `cert` key holding
+        the PEM, fetched one call at a time -- so pass it only when the
+        certificate itself is wanted, such as during import.  A certificate
+        that will not download is left without the key rather than failing the
+        whole listing; the platform Browser Isolation entry is one of those.
+        """
+        data = self.zia_get(self._ROOT_CERT_PATH)
+        certs = data if isinstance(data, list) else []
+        if not include_cert:
+            return certs
+        for cert in certs:
+            cert_id = cert.get("id")
+            if not cert_id:
+                continue
+            types = cert.get("certTypes") or []
+            pem = self.download_root_certificate(
+                str(cert_id), types[0] if types else "PROXY_CHAINING"
+            )
+            if pem:
+                cert["cert"] = pem
+        return certs
+
+    def download_root_certificate(
+        self, cert_id: str, cert_type: str = "PROXY_CHAINING"
+    ) -> Optional[str]:
+        """Return a root certificate's PEM text, or None if it will not download.
+
+        Note the path shape: the id trails `download/`, it is not a
+        sub-resource of the certificate.  `certTypes` is required -- without it
+        the endpoint answers 500 rather than a 4xx, which reads like the path
+        is wrong when it is the query string that is missing.
+
+        The platform-supplied Browser Isolation certificate cannot be
+        downloaded, hence the None rather than an exception.
+        """
+        try:
+            resp = self._zia_request(
+                "GET",
+                f"{self._ROOT_CERT_PATH}/download/{cert_id}",
+                params={"certTypes": cert_type},
+            )
+        except Exception:
+            return None
+        text = resp.text or ""
+        return text if "-----BEGIN CERTIFICATE-----" in text else None
+
+    def create_root_certificate(self, config: Dict) -> Dict:
+        """Upload a root certificate.  Returns the created record.
+
+        `config` is the request body, camelCase as the endpoint wants it:
+
+            cert         the certificate text exactly as it sits in the .pem
+                         file, BEGIN/END armor included -- the API parses the
+                         PEM envelope itself and rejects a base64-wrapped copy
+                         of it with a misleading "Empty input"
+            displayName  the operator-facing label, and the value the rest of
+                         the proxy chain matches on
+            name         cosmetic: the name of the file the admin UI would
+                         have uploaded
+            certTypes    ["PROXY_CHAINING"] etc.  Enum-checked before the
+                         certificate parses, so a bad value fails fast
+
+        Takes a dict rather than named arguments so the push service can call
+        it the same way it calls every other create_*.
+
+        The endpoint rate-limits at one request per second.
+        """
+        return self.zia_post(self._ROOT_CERT_PATH, config)
+
+    def delete_root_certificate(
+        self, cert_id: str, cert_type: str = "PROXY_CHAINING"
+    ) -> None:
+        """Delete a root certificate.
+
+        `certTypes` is required.  Without it the endpoint answers 204 and
+        leaves the certificate in place -- a silent no-op that survives an
+        activation, so a bare 204 is not on its own proof of deletion.
+        """
+        self.zia_delete(
+            f"{self._ROOT_CERT_PATH}/{cert_id}?certTypes={cert_type}"
+        )

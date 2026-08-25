@@ -766,7 +766,9 @@ def apply_snapshot(
                         dry_run = service.classify_baseline(
                             baseline, import_progress_callback=on_import_progress
                         )
-                        push_records_bl = service.push_classified(
+                        # dry_run.skipped carries the manual-step reports (see
+                        # the delta branch below).
+                        push_records_bl = dry_run.skipped + service.push_classified(
                             dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                         )
                         wipe_records = fc_wipe_records
@@ -799,7 +801,12 @@ def apply_snapshot(
                         import_progress_callback=on_import_progress,
                         skip_import=True,
                     )
-                    push_records = service.push_classified(
+                    # dry_run.skipped carries the manual-step reports for entries
+                    # the API refuses to create — the proxy gateway and its
+                    # PROXYCHAIN forwarding rule above all.  apply_baseline merges
+                    # them for the wipe path; the delta path has to do it here or
+                    # they never reach the operator.
+                    push_records = dry_run.skipped + service.push_classified(
                         dry_run, progress_callback=on_push_progress, stop_fn=stop_fn
                     )
 

@@ -3,20 +3,25 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchTemplates,
   fetchTemplate,
-  previewTemplate,
+  previewTemplateDetail,
   createTemplate,
   deleteTemplate,
   applyTemplate,
+  updateTemplate,
+  fetchAssignableOwners,
   ZIATemplate,
   ZIATemplateDetail,
 } from "../api/templates";
 import { fetchTenants } from "../api/tenants";
 import { fetchSnapshots } from "../api/zia";
-import { useJobStream } from "../hooks/useJobStream";
+import { useJobStream, describeProgress } from "../hooks/useJobStream";
 import { cancelJob } from "../api/jobs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import ErrorMessage from "../components/ErrorMessage";
+import TemplateResourcePicker from "../components/TemplateResourcePicker";
+import TemplateShareDialog from "../components/TemplateShareDialog";
 import { formatDateTime } from "../utils/time";
+import { useAuth } from "../context/AuthContext";
 
 // ---------------------------------------------------------------------------
 // Progress bar
@@ -40,12 +45,26 @@ function ProgressBar({ active, message }: { active: boolean; message?: string })
 // Create Template Dialog
 // ---------------------------------------------------------------------------
 
+/**
+ * Four steps: pick a snapshot, pick what goes in, name it, confirm.
+ *
+ * Step 2 is the one that earns its place. A full template mirrors everything
+ * portable in the snapshot — fine for cloning a tenant, far too much for
+ * describing a single integration. A scoped template holds only the ticked
+ * entries plus whatever they reference, which the server closes over at create
+ * time; that closure is reported back on the finished template rather than
+ * previewed here, so the boxes stay a record of what was actually chosen.
+ */
 function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [sourceTenantId, setSourceTenantId] = useState<number | "">("");
   const [snapshotId, setSnapshotId] = useState<number | "">("");
+  const [scopeMode, setScopeMode] = useState<"full" | "scoped">("scoped");
+  const [selection, setSelection] = useState<Record<string, string[]>>({});
+  const [fieldSelection, setFieldSelection] = useState<Record<string, string[]>>({});
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState<"private" | "shared" | "org">("private");
   const [err, setErr] = useState<string | null>(null);
 
   const { data: allTenants } = useQuery({
@@ -67,7 +86,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
 
   const previewMut = useMutation({
     mutationFn: () =>
-      previewTemplate({
+      previewTemplateDetail({
         source_tenant_id: sourceTenantId as number,
         snapshot_id: snapshotId as number,
       }),
@@ -82,6 +101,17 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
         snapshot_id: snapshotId as number,
         name: name.trim(),
         description: description.trim() || undefined,
+        // Omitting `selection` is what makes a template full — an empty object
+        // would read as "a scoped template containing nothing".
+        selection: scopeMode === "scoped" ? selection : undefined,
+        // Narrowed settings only mean anything inside a scoped template, and an
+        // empty map means "carry every key" — same undefined-vs-empty rule as
+        // selection above.
+        field_selection:
+          scopeMode === "scoped" && Object.keys(fieldSelection).length > 0
+            ? fieldSelection
+            : undefined,
+        visibility,
       }),
     onSuccess: () => {
       onCreated();
@@ -91,13 +121,18 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
   });
 
   const preview = previewMut.data ?? null;
+  const selectedCount = Object.values(selection).reduce((n, ids) => n + ids.length, 0);
+  const selectedTypes = Object.keys(selection).filter((t) => selection[t].length > 0);
+  const narrowedSettings = Object.entries(fieldSelection).filter(([, keys]) => keys.length > 0);
   const sortedTenants = allTenants
     ? [...allTenants].sort((a, b) => a.name.localeCompare(b.name))
     : [];
 
+  const STEP_LABELS = ["Select Snapshot", "Choose Resources", "Template Details", "Confirm"];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-xl mx-4 flex flex-col max-h-[90vh]">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
           <h2 className="text-base font-semibold text-gray-900">Create Template from Snapshot</h2>
@@ -110,11 +145,14 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
 
         {/* Step indicator */}
         <div className="flex items-center gap-2 px-5 py-3 border-b border-gray-100 text-xs text-gray-500">
-          <span className={step === 1 ? "font-semibold text-zs-600" : ""}>1. Select Snapshot</span>
-          <span>&rarr;</span>
-          <span className={step === 2 ? "font-semibold text-zs-600" : ""}>2. Template Details</span>
-          <span>&rarr;</span>
-          <span className={step === 3 ? "font-semibold text-zs-600" : ""}>3. Confirm</span>
+          {STEP_LABELS.map((label, i) => (
+            <span key={label} className="flex items-center gap-2">
+              {i > 0 && <span>&rarr;</span>}
+              <span className={step === i + 1 ? "font-semibold text-zs-600" : ""}>
+                {i + 1}. {label}
+              </span>
+            </span>
+          ))}
         </div>
 
         {/* Body */}
@@ -131,6 +169,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                   onChange={(e) => {
                     setSourceTenantId(e.target.value ? Number(e.target.value) : "");
                     setSnapshotId("");
+                    setSelection({});
                     setErr(null);
                   }}
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500"
@@ -147,6 +186,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                   value={snapshotId}
                   onChange={(e) => {
                     setSnapshotId(e.target.value ? Number(e.target.value) : "");
+                    setSelection({});
                     setErr(null);
                   }}
                   disabled={!sourceTenantId || !snapshots}
@@ -169,40 +209,43 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                 </div>
               )}
               {previewMut.isPending && (
-                <ProgressBar active message="Analysing snapshot resources…" />
+                <ProgressBar active message="Analyzing snapshot resources…" />
               )}
             </div>
           )}
 
-          {/* Step 2 */}
+          {/* Step 2 — scope */}
           {step === 2 && preview && (
             <div className="space-y-4">
-              {/* Resource preview */}
-              <div>
-                <p className="text-xs font-medium text-gray-700 mb-2">Included resource types ({preview.included.length}):</p>
-                {preview.included.length > 0 ? (
-                  <div className="max-h-40 overflow-y-auto border border-gray-200 rounded-md">
-                    <table className="min-w-full text-xs divide-y divide-gray-100">
-                      <thead className="bg-gray-50 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Resource Type</th>
-                          <th className="px-3 py-1.5 text-right font-medium text-gray-500 uppercase">Count</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 bg-white">
-                        {preview.included.map((r) => (
-                          <tr key={r.resource_type}>
-                            <td className="px-3 py-1.5 font-mono text-gray-700">{r.resource_type}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-700">{r.count}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+              <div className="border border-gray-200 rounded-md px-3 py-2">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={scopeMode === "full"}
+                    onChange={(e) => { setScopeMode(e.target.checked ? "full" : "scoped"); setErr(null); }}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-gray-800">Include everything portable in this snapshot</span>
+                    <p className="text-xs text-gray-500">
+                      A full template across all {preview.included.length} resource type
+                      {preview.included.length !== 1 ? "s" : ""} ({preview.included.reduce((n, r) => n + r.count, 0)} resources).
+                      Only a full template can be applied in wipe mode. Leave this unticked to pick
+                      individual resources below.
+                    </p>
                   </div>
-                ) : (
-                  <p className="text-xs text-gray-500 italic">No portable resources found in this snapshot.</p>
-                )}
+                </label>
               </div>
+
+              <TemplateResourcePicker
+                entries={preview.entries}
+                selection={selection}
+                onChange={(next) => { setSelection(next); setErr(null); }}
+                fieldSelection={fieldSelection}
+                onFieldChange={(next) => { setFieldSelection(next); setErr(null); }}
+                disabled={scopeMode === "full"}
+              />
+
               {preview.stripped.length > 0 && (
                 <div>
                   <p className="text-xs font-medium text-amber-700 mb-2">Stripped types (tenant-specific, {preview.stripped.length}):</p>
@@ -251,8 +294,12 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                   </div>
                 </div>
               )}
+            </div>
+          )}
 
-              {/* Metadata fields */}
+          {/* Step 3 — details */}
+          {step === 3 && (
+            <div className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Template Name <span className="text-red-500">*</span></label>
                 <input
@@ -273,18 +320,76 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
                   className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-zs-500 resize-none"
                 />
               </div>
+              <div>
+                <p className="text-xs font-medium text-gray-600 mb-1.5">Who can see it</p>
+                <div className="space-y-1.5">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="newvis" checked={visibility === "private"} onChange={() => setVisibility("private")} className="mt-0.5" />
+                    <div>
+                      <span className="text-sm font-medium text-gray-800">Private</span>
+                      <p className="text-xs text-gray-500">Only you and administrators. You can share it with named people afterwards.</p>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="newvis" checked={visibility === "org"} onChange={() => setVisibility("org")} className="mt-0.5" />
+                    <div>
+                      <span className="text-sm font-medium text-gray-800">Org-wide</span>
+                      <p className="text-xs text-gray-500">Every account in this deployment can see and apply it.</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
             </div>
           )}
 
-          {/* Step 3 — confirm */}
-          {step === 3 && (
+          {/* Step 4 — confirm */}
+          {step === 4 && (
             <div className="space-y-3">
               <div className="bg-gray-50 border border-gray-200 rounded-md px-4 py-3 text-sm space-y-1.5">
                 <p><span className="font-medium text-gray-600">Name:</span> {name}</p>
                 {description && <p><span className="font-medium text-gray-600">Description:</span> {description}</p>}
-                <p><span className="font-medium text-gray-600">Included types:</span> {preview?.included.length ?? 0}</p>
+                <p><span className="font-medium text-gray-600">Visibility:</span> {visibility === "org" ? "Org-wide" : "Private"}</p>
+                {scopeMode === "scoped" ? (
+                  <p>
+                    <span className="font-medium text-gray-600">Scope:</span> {selectedCount} resource
+                    {selectedCount !== 1 ? "s" : ""} across {selectedTypes.length} type{selectedTypes.length !== 1 ? "s" : ""}
+                  </p>
+                ) : null}
+                {scopeMode === "scoped" && narrowedSettings.length > 0 ? (
+                  <p>
+                    <span className="font-medium text-gray-600">Settings:</span>{" "}
+                    {narrowedSettings
+                      .map(([t, keys]) => `${t} (${keys.length} of its keys)`)
+                      .join(", ")}
+                  </p>
+                ) : null}
+                {scopeMode === "full" && (
+                  <>
+                    <p><span className="font-medium text-gray-600">Scope:</span> full snapshot</p>
+                    <p><span className="font-medium text-gray-600">Included types:</span> {preview?.included.length ?? 0}</p>
+                  </>
+                )}
                 <p><span className="font-medium text-gray-600">Stripped types:</span> {preview?.stripped.length ?? 0}</p>
               </div>
+
+              {scopeMode === "scoped" && (
+                <div className="text-xs text-gray-600 bg-blue-50 border border-blue-200 rounded-md px-3 py-2 space-y-1">
+                  <p>
+                    Anything the selected resources reference — network services, IP groups, labels,
+                    URL categories — is pulled in automatically. The finished template lists exactly
+                    what was added and flags any reference it could not resolve.
+                  </p>
+                  <p>
+                    Rules are renumbered to close the gaps left by rules you did not select, so their
+                    order relative to each other is kept but their numbers will differ from the source.
+                  </p>
+                  <p>
+                    A scoped template can only be applied in merge mode — wipe mode would delete
+                    everything the template does not contain.
+                  </p>
+                </div>
+              )}
+
               {createMut.isPending && <ProgressBar active message="Creating template…" />}
             </div>
           )}
@@ -301,7 +406,7 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
           <div className="flex gap-2">
             {step > 1 && (
               <button
-                onClick={() => { setStep((s) => (s - 1) as 1 | 2 | 3); setErr(null); }}
+                onClick={() => { setStep((s) => (s - 1) as 1 | 2 | 3 | 4); setErr(null); }}
                 className="px-4 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50"
               >
                 Back
@@ -319,8 +424,14 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
             {step === 2 && (
               <button
                 onClick={() => {
-                  if (!name.trim()) { setErr("Template name is required."); return; }
-                  if (!preview || preview.included.length === 0) { setErr("No portable resources — cannot create a template with zero included types."); return; }
+                  if (scopeMode === "full" && (!preview || preview.included.length === 0)) {
+                    setErr("No portable resources — cannot create a template with zero included types.");
+                    return;
+                  }
+                  if (scopeMode === "scoped" && selectedCount === 0) {
+                    setErr("Select at least one resource, or switch to a full template.");
+                    return;
+                  }
                   setErr(null);
                   setStep(3);
                 }}
@@ -330,6 +441,18 @@ function CreateTemplateDialog({ onClose, onCreated }: { onClose: () => void; onC
               </button>
             )}
             {step === 3 && (
+              <button
+                onClick={() => {
+                  if (!name.trim()) { setErr("Template name is required."); return; }
+                  setErr(null);
+                  setStep(4);
+                }}
+                className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+              >
+                Next
+              </button>
+            )}
+            {step === 4 && (
               <button
                 onClick={() => createMut.mutate()}
                 disabled={createMut.isPending}
@@ -367,6 +490,9 @@ interface ApplyTemplateResult {
 function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onClose: () => void }) {
   const [targetTenantId, setTargetTenantId] = useState<number | "">("");
   const [wipeMode, setWipeMode] = useState(false);
+  //: A scoped template covers part of a tenant, so wiping the rest is never
+  //  what was meant. The API 422s it too — this only keeps the toggle honest.
+  const isScoped = template.scope === "scoped";
   const [applyJobId, setApplyJobId] = useState<string | null>(null);
   const [mutErr, setMutErr] = useState<string | null>(null);
 
@@ -384,7 +510,7 @@ function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onC
   });
 
   const {
-    latestByPhase: applyProgress,
+    latestEvent: applyLatest,
     jobStatus: applyJobStatus,
     result: applyResult,
     streamError: applyStreamError,
@@ -400,17 +526,7 @@ function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onC
 
   const err = mutErr ?? applyStreamError ?? null;
 
-  function applyPhaseLabel() {
-    const rollbackEv = applyProgress["rollback"];
-    const pushEv = applyProgress["push"];
-    const wipeEv = applyProgress["wipe"];
-    const importEv = applyProgress["import"];
-    if (rollbackEv) return `Rolling back ${rollbackEv.resource_type}: ${rollbackEv.name ?? ""}`;
-    if (pushEv) return `Pushing ${pushEv.resource_type}: ${pushEv.name ?? ""}`;
-    if (wipeEv) return `Wiping ${wipeEv.resource_type}: ${wipeEv.name ?? ""}`;
-    if (importEv) return `Importing ${importEv.resource_type}… ${importEv.done}${importEv.total ? `/${importEv.total}` : ""}`;
-    return "Applying template…";
-  }
+  const applyPhaseLabel = () => describeProgress(applyLatest, "Applying template…");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -548,18 +664,24 @@ function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onC
                       <p className="text-xs text-gray-500">Applies creates and updates only. Resources not in the template are left untouched.</p>
                     </div>
                   </label>
-                  <label className="flex items-start gap-2 cursor-pointer">
+                  <label className={`flex items-start gap-2 ${isScoped ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
                     <input
                       type="radio"
                       name="mode"
                       checked={wipeMode}
                       onChange={() => setWipeMode(true)}
-                      disabled={isApplyRunning}
+                      disabled={isApplyRunning || isScoped}
                       className="mt-0.5"
                     />
                     <div>
                       <span className="text-sm font-medium text-red-700">Wipe &amp; Push</span>
                       <p className="text-xs text-gray-500">Deletes all user-created resources first, then pushes the full template. More thorough but destructive.</p>
+                      {isScoped && (
+                        <p className="text-xs text-amber-700 mt-0.5">
+                          Unavailable for a scoped template: it holds only part of a tenant, so a wipe
+                          would delete everything it leaves out. The API rejects this combination.
+                        </p>
+                      )}
                     </div>
                   </label>
                 </div>
@@ -616,14 +738,49 @@ function ApplyTemplateDialog({ template, onClose }: { template: ZIATemplate; onC
 }
 
 // ---------------------------------------------------------------------------
+// Chips
+// ---------------------------------------------------------------------------
+
+/** Reach at a glance. "Shared" carries the count because 0 recipients means the
+ *  template reaches nobody but its owner, which the word alone hides. */
+function VisibilityChip({ template }: { template: ZIATemplate }) {
+  const styles: Record<string, string> = {
+    private: "bg-gray-100 text-gray-600",
+    shared: "bg-blue-50 text-blue-700",
+    org: "bg-green-50 text-green-700",
+  };
+  const label =
+    template.visibility === "org"
+      ? "Org-wide"
+      : template.visibility === "shared"
+        ? `Shared with ${template.share_count}`
+        : "Private";
+  return (
+    <span className={`px-2 py-0.5 rounded-full text-xs ${styles[template.visibility] ?? styles.private}`}>
+      {label}
+    </span>
+  );
+}
+
+function ScopeChip({ scope }: { scope: string }) {
+  if (scope !== "scoped") return null;
+  return (
+    <span className="px-2 py-0.5 rounded-full text-xs bg-purple-50 text-purple-700">Scoped</span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Template detail panel
 // ---------------------------------------------------------------------------
 
-function TemplateDetail({ templateId, onApply, onDelete }: {
+function TemplateDetail({ templateId, onApply, onDelete, onShare, onAssign }: {
   templateId: number;
   onApply: (t: ZIATemplate) => void;
   onDelete: (t: ZIATemplate) => void;
+  onShare: (t: ZIATemplate) => void;
+  onAssign: (t: ZIATemplate) => void;
 }) {
+  const { isAdmin } = useAuth();
   const { data: tmpl, isLoading, error } = useQuery<ZIATemplateDetail>({
     queryKey: ["template", templateId],
     queryFn: () => fetchTemplate(templateId),
@@ -635,20 +792,64 @@ function TemplateDetail({ templateId, onApply, onDelete }: {
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-start justify-between mb-4">
-        <div>
+        <div className="min-w-0">
           <h2 className="text-lg font-semibold text-gray-900">{tmpl.name}</h2>
           {tmpl.description && <p className="text-sm text-gray-500 mt-0.5">{tmpl.description}</p>}
+          <div className="flex items-center gap-2 mt-1.5">
+            <VisibilityChip template={tmpl} />
+            <ScopeChip scope={tmpl.scope} />
+            <span className="text-xs text-gray-500">
+              {tmpl.owner_user_id !== null
+                ? `Owned by ${tmpl.is_owner ? "you" : tmpl.owner_username}`
+                : tmpl.owner_username
+                  // owner_username outlives the account it names, so a
+                  // disowned template still says whose it was.
+                  ? `No owner — ${tmpl.owner_username}'s account was removed`
+                  : "No owner — predates ownership"}
+            </span>
+          </div>
         </div>
+        {/* Two sets of actions, never mixed. An admin is here to clear the
+            template off the unowned queue — assign it or bin it — and gets no
+            Apply and no Share, because pushing config and handing out access
+            are both the user role's. The API refuses those either way. */}
         <div className="flex gap-2 flex-shrink-0 ml-4">
-          <button
-            onClick={() => onApply(tmpl)}
-            className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
-          >
-            Apply to Tenant
-          </button>
+          {isAdmin ? (
+            <button
+              onClick={() => onAssign(tmpl)}
+              className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+            >
+              Assign Owner
+            </button>
+          ) : (
+            <>
+              {tmpl.can_apply && (
+                <button
+                  onClick={() => onApply(tmpl)}
+                  className="px-3 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+                >
+                  Apply to Tenant
+                </button>
+              )}
+              {tmpl.can_manage && (
+                <button
+                  onClick={() => onShare(tmpl)}
+                  className="px-3 py-1.5 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+                >
+                  Share
+                </button>
+              )}
+            </>
+          )}
           <button
             onClick={() => onDelete(tmpl)}
-            className="px-3 py-1.5 text-sm rounded-md border border-red-300 text-red-600 hover:bg-red-50"
+            disabled={!tmpl.can_manage}
+            title={
+              tmpl.can_manage
+                ? undefined
+                : `Only ${tmpl.owner_username ?? "the owner"} can delete this template`
+            }
+            className="px-3 py-1.5 text-sm rounded-md border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
           >
             Delete
           </button>
@@ -682,6 +883,76 @@ function TemplateDetail({ templateId, onApply, onDelete }: {
               <span key={t} className="px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800 font-mono">{t}</span>
             ))}
           </div>
+        </div>
+      )}
+
+      {tmpl.selection_meta && (
+        <div className="mb-4 space-y-3">
+          {tmpl.selection_meta.warnings.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50 rounded-md px-3 py-2">
+              <p className="text-xs font-medium text-amber-800 mb-1">
+                Unresolved references ({tmpl.selection_meta.warnings.length}):
+              </p>
+              <ul className="space-y-0.5">
+                {tmpl.selection_meta.warnings.map((w, i) => (
+                  <li key={i} className="text-xs text-amber-800">{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tmpl.selection_meta.fields && Object.keys(tmpl.selection_meta.fields).length > 0 && (
+            <div>
+              {/* Worth stating plainly: applying this template writes only these
+                  keys and leaves the rest of the target's settings alone. */}
+              <p className="text-xs font-medium text-gray-700 mb-1.5">Settings narrowed to individual keys:</p>
+              <div className="space-y-1.5">
+                {Object.entries(tmpl.selection_meta.fields).map(([rtype, keys]) => (
+                  <div key={rtype}>
+                    <p className="text-xs font-mono text-gray-500">{rtype}</p>
+                    <div className="flex flex-wrap gap-1 mt-0.5">
+                      {keys.map((k) => (
+                        <span key={k} className="px-2 py-0.5 rounded-full text-[11px] bg-gray-100 text-gray-700 font-mono">{k}</span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {tmpl.selection_meta.auto_included.length > 0 && (
+            <div>
+              {/* Named separately from the picked resources so it stays clear
+                  what the author chose and what the closure dragged in. */}
+              <p className="text-xs font-medium text-gray-700 mb-1.5">
+                Pulled in automatically ({tmpl.selection_meta.auto_included.length}):
+              </p>
+              <div className="overflow-y-auto border border-gray-200 rounded-md" style={{ maxHeight: "160px" }}>
+                <table className="min-w-full text-xs divide-y divide-gray-100">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Type</th>
+                      <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Name</th>
+                      <th className="px-3 py-1.5 text-left font-medium text-gray-500 uppercase">Required by</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {tmpl.selection_meta.auto_included.map((a, i) => (
+                      <tr key={i}>
+                        <td className="px-3 py-1 font-mono text-gray-500">{a.resource_type}</td>
+                        <td className="px-3 py-1 text-gray-800">
+                          {a.name}
+                          {a.predefined && (
+                            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-gray-400">predefined</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-1 text-gray-500">{a.required_by}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -754,15 +1025,117 @@ function DeleteConfirmDialog({ template, onClose, onDeleted }: {
 }
 
 // ---------------------------------------------------------------------------
+// Assign owner (admin)
+// ---------------------------------------------------------------------------
+
+/**
+ * The admin's one constructive move on an unowned template: find it a home.
+ *
+ * The candidate list is not every account — it is every account that holds the
+ * user role, because an owner who cannot apply the template cannot do anything
+ * with it. Handing one to an admin-only account would leave the template exactly
+ * as stranded as it is now, under a different name, so the API refuses it and
+ * this list never offers it.
+ */
+function AssignOwnerDialog({ template, onClose, onAssigned }: {
+  template: ZIATemplate;
+  onClose: () => void;
+  onAssigned: () => void;
+}) {
+  const [ownerId, setOwnerId] = useState<number | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["assignable-owners"],
+    queryFn: fetchAssignableOwners,
+  });
+  const owners = data?.users ?? [];
+
+  const assignMut = useMutation({
+    mutationFn: () => updateTemplate(template.id, { owner_user_id: ownerId! }),
+    onSuccess: () => { onAssigned(); onClose(); },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-5 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-gray-900">Assign Owner</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            <span className="font-medium">{template.name}</span> has no owner
+            {template.owner_username && <> — {template.owner_username}&rsquo;s account is gone</>}.
+            Its new owner can apply, share, and delete it.
+          </p>
+        </div>
+
+        {isLoading && <LoadingSpinner />}
+        {error && (
+          <ErrorMessage message={error instanceof Error ? error.message : "Failed to load accounts"} />
+        )}
+
+        {!isLoading && !error && owners.length === 0 && (
+          <p className="text-sm text-gray-500">
+            No active account holds the user role, so there is nobody who could use this
+            template. Grant someone the user role, or delete the template.
+          </p>
+        )}
+
+        {owners.length > 0 && (
+          <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-md divide-y divide-gray-100">
+            {owners.map((o) => (
+              <label
+                key={o.id}
+                className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-gray-50 ${
+                  ownerId === o.id ? "bg-zs-50" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="owner"
+                  checked={ownerId === o.id}
+                  onChange={() => setOwnerId(o.id)}
+                  className="text-zs-500 focus:ring-zs-500"
+                />
+                <span className="text-sm text-gray-800">{o.username}</span>
+                <span className="ml-auto text-xs text-gray-400">{o.roles.join(", ")}</span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        {assignMut.isError && (
+          <ErrorMessage message={assignMut.error instanceof Error ? assignMut.error.message : "Assign failed"} />
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-1.5 text-sm rounded-md border border-gray-300 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button
+            onClick={() => assignMut.mutate()}
+            disabled={ownerId === null || assignMut.isPending}
+            className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white disabled:opacity-50"
+          >
+            {assignMut.isPending ? "Assigning…" : "Assign"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
 export default function TemplatesPage() {
   const queryClient = useQueryClient();
+  const { isAdmin } = useAuth();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [applyTarget, setApplyTarget] = useState<ZIATemplate | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ZIATemplate | null>(null);
+  const [shareTarget, setShareTarget] = useState<ZIATemplate | null>(null);
+  const [assignTarget, setAssignTarget] = useState<ZIATemplate | null>(null);
 
   const { data: templates, isLoading, error, refetch, isFetching } = useQuery<ZIATemplate[]>({
     queryKey: ["templates"],
@@ -780,11 +1153,32 @@ export default function TemplatesPage() {
     }
   }
 
+  function handleAssigned() {
+    // An assigned template leaves the admin's list entirely — it is owned now,
+    // and this view only ever held the unowned ones. Clear the selection so the
+    // detail pane is not left querying a row it can no longer read.
+    queryClient.invalidateQueries({ queryKey: ["templates"] });
+    if (assignTarget && selectedId === assignTarget.id) {
+      setSelectedId(null);
+    }
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* Page header */}
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-semibold text-gray-900">ZIA Templates</h1>
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            {isAdmin ? "Unowned Templates" : "ZIA Templates"}
+          </h1>
+          {isAdmin && (
+            <p className="text-sm text-gray-500 mt-0.5">
+              Templates with no owner — their owner&rsquo;s account was removed, or they
+              predate ownership. Assign each one to an account that holds the user role,
+              or delete it. Nobody can apply a template while it sits here.
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => { refetch(); }}
@@ -802,12 +1196,14 @@ export default function TemplatesPage() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
-          >
-            Create Template from Snapshot
-          </button>
+          {!isAdmin && (
+            <button
+              onClick={() => setShowCreate(true)}
+              className="px-4 py-1.5 text-sm rounded-md bg-zs-500 hover:bg-zs-600 text-white"
+            >
+              Create Template from Snapshot
+            </button>
+          )}
         </div>
       </div>
 
@@ -820,13 +1216,15 @@ export default function TemplatesPage() {
           <div className="w-72 flex-shrink-0 flex flex-col border border-gray-200 rounded-lg overflow-hidden">
             <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-                Templates ({templates.length})
+                {isAdmin ? "Unowned" : "Templates"} ({templates.length})
               </p>
             </div>
             {templates.length === 0 ? (
               <div className="flex-1 flex items-center justify-center p-6">
                 <p className="text-sm text-gray-400 text-center">
-                  No templates yet. Save a snapshot from a ZIA tenant and create a template from it.
+                  {isAdmin
+                    ? "Nothing to sort out — every template has an owner."
+                    : "No templates yet. Save a snapshot from a ZIA tenant and create a template from it."}
                 </p>
               </div>
             ) : (
@@ -843,9 +1241,16 @@ export default function TemplatesPage() {
                     {t.description && (
                       <p className="text-xs text-gray-500 truncate mt-0.5">{t.description}</p>
                     )}
+                    <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                      <VisibilityChip template={t} />
+                      <ScopeChip scope={t.scope} />
+                    </div>
                     <div className="flex items-center justify-between mt-1">
-                      <span className="text-xs text-gray-400">{t.resource_count} resources</span>
-                      <span className="text-xs text-gray-400">
+                      <span className="text-xs text-gray-400 truncate">
+                        {t.resource_count} resources
+                        {t.owner_username && ` · ${t.is_owner ? "you" : t.owner_username}`}
+                      </span>
+                      <span className="text-xs text-gray-400 flex-shrink-0 ml-2">
                         {t.created_at ? formatDateTime(t.created_at) : ""}
                       </span>
                     </div>
@@ -862,12 +1267,16 @@ export default function TemplatesPage() {
                 templateId={selectedId}
                 onApply={(t) => setApplyTarget(t)}
                 onDelete={(t) => setDeleteTarget(t)}
+                onShare={(t) => setShareTarget(t)}
+                onAssign={(t) => setAssignTarget(t)}
               />
             ) : (
               <div className="h-full flex items-center justify-center">
                 <p className="text-sm text-gray-400">
                   {templates.length === 0
-                    ? "Create your first template using the button above."
+                    ? isAdmin
+                      ? "Nothing to sort out — every template has an owner."
+                      : "Create your first template using the button above."
                     : "Select a template from the list to view its details."}
                 </p>
               </div>
@@ -877,7 +1286,7 @@ export default function TemplatesPage() {
       )}
 
       {/* Dialogs */}
-      {showCreate && (
+      {showCreate && !isAdmin && (
         <CreateTemplateDialog
           onClose={() => setShowCreate(false)}
           onCreated={handleCreated}
@@ -889,11 +1298,28 @@ export default function TemplatesPage() {
           onClose={() => setApplyTarget(null)}
         />
       )}
+      {shareTarget && (
+        <TemplateShareDialog
+          template={shareTarget}
+          onClose={() => setShareTarget(null)}
+          onChanged={() => {
+            queryClient.invalidateQueries({ queryKey: ["templates"] });
+            queryClient.invalidateQueries({ queryKey: ["template", shareTarget.id] });
+          }}
+        />
+      )}
       {deleteTarget && (
         <DeleteConfirmDialog
           template={deleteTarget}
           onClose={() => setDeleteTarget(null)}
           onDeleted={handleDeleted}
+        />
+      )}
+      {assignTarget && (
+        <AssignOwnerDialog
+          template={assignTarget}
+          onClose={() => setAssignTarget(null)}
+          onAssigned={handleAssigned}
         />
       )}
     </div>

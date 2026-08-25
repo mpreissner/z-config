@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.5.2] - 2026-08-19
+
+A bug fix release. Privilege separation between the admin and user roles, in the two places it was never applied.
+
+### Fixed
+
+- **An admin session could enter the tenant workspace** — an account holding both roles could, while acting as admin, click a tenant tile and land in tenant configuration. Entitlement cannot separate the two: `check_tenant_access` is role-agnostic by design, and an account holding both roles is entitled to the tenant either way, so only the assumed role can. The five product routers now carry a `require_user` guard on the include rather than per endpoint, so a route added to any of them is covered without anyone remembering to ask; entitlement is still checked as it was. An admin's tenant tile stops being a link and drops the hover-lift that advertised it, and a bookmark or deep link into a workspace returns to the dashboard instead of rendering a page of 403s. Import stays available to an admin — pre-loading a new tenant environment before its first user arrives is a management function, not tenant configuration. The stale `require_admin` guards on the ZCC and ZIdentity routers, left from before roles were assumable, become `require_auth` plus entitlement; they would otherwise have been unreachable.
+- **An admin could see, apply, and share every user's templates** — the template list came back unfiltered for an admin, and `can_apply` was an alias for `can_read`. An admin now sees exactly the templates with no owner, and has two moves on them: hand one to an account that holds the user role, or delete it. Applying is refused at every ownership state, as are create, share, and preview, and PATCH accepts nothing from an admin but `owner_user_id`. Assigning to an admin-only account is refused — it would only rename the stranded state.
+- **A deprovisioned account's templates were left owned by it** — nobody could apply them and nobody could delete them. Deleting or deactivating an account now clears the owner on its templates and audits what moved, in every path: admin delete, admin deactivate, and SCIM PUT, PATCH, and DELETE. Done explicitly rather than through the column's `ON DELETE SET NULL`, since SCIM only soft-deletes and both kinds of deprovisioning have to leave the same state behind. The owner's name survives as attribution, so the admin picking these up can still see whose they were. The Templates item appears for an admin only while that queue is non-empty, and carries its count.
+
+---
+
+## [3.5.1] - 2026-08-19
+
+A scoped template can name individual settings toggles instead of carrying a whole settings object.
+
+### Added
+
+- **Per-key selection for settings singletons** — ZIA keeps advanced settings, URL & cloud app settings, and browser control settings as one object each, holding dozens of unrelated toggles, and a template carrying one of those carried all of it. Taking a tenant's AI prompt controls meant taking its session timeouts along with them. A scoped template can now name the keys it wants: the picker opens a settings entry into its own filterable key list, and the template stores only what was ticked. Naming no keys still carries the whole object.
+
+### Changed
+
+- **A settings push merges rather than replaces** — the three settings endpoints replace the whole object on PUT, so a payload carrying a subset of the keys would reset everything it omits. The GET-then-merge that existed only for browser control settings, to keep the target's own Smart Isolation profile, now covers all three: the target's live settings are read first and the template's keys are laid over them. Classification compares only the keys a partial baseline carries, so a narrowed template does not report an update it does not intend to make. A full template carries every key, and merging one of those is the same PUT it always was.
+
+---
+
+## [3.5.0] - 2026-08-19
+
+Policy Templates gain ownership, sharing, and scoped resource selection, and the proxy-chaining resources — root certificates, proxies, proxy gateways — are imported and pushed.
+
+### Added
+
+- **Template ownership and sharing** — a template now belongs to the account that created it and is visible only to that account until it is shared. Sharing is per template, to users or groups, managed from the template itself; `template_share_service` is the single place visibility is resolved, so the list endpoint and every by-id lookup answer the same question the same way.
+- **Scoped resource selection** — a template no longer has to carry a whole snapshot. The wizard offers the resources the snapshot contains and stores only what is selected, which is now the default path through it. A scoped template records its scope, and wipe mode is refused for one: wipe deletes everything the baseline does not name, and a template that names four resources on purpose would empty the tenant. The refusal is enforced in the API, not only hidden in the UI.
+- **Proxy chaining resources** — proxies, proxy gateways, and root certificates are imported, the certificates with their PEM. Certificates and proxies are pushed; `rootCertificates` needs a `certTypes` parameter and the raw PEM unencoded, which the client now sends.
+
+### Changed
+
+- **A scoped apply imports only what it needs** — applying a scoped template read all 53 resource types twice, once before classification and once after the push, to pick up changes in a handful. Both are narrowed. The closing re-import takes the template's own types; the stale-marking pass takes the same filter, so types that were not re-read are not swept as deleted. The pre-push import cannot narrow that far — reference resolution drops any ID it cannot find in the local database, so a rule scoped to a location or group that was not imported would be pushed with that scoping silently stripped — so the types classification consults regardless of what a baseline contains are collected in `REFERENCE_TYPES` and unioned into whatever set the caller asks for. Measured against a live tenant with a six-type template: classification 66.9s → 23.2s, re-import 64.0s → 11.5s, with identical classification output. Full templates keep the full import at both ends.
+- **Proxy-chaining rules report what cannot be pushed** — `proxy_gateway` has no write endpoint (a POST answers `405 Allow: GET,OPTIONS`), so it and the PROXYCHAIN forwarding rule that sits above it are reported as manual build steps rather than pushed or silently dropped. Gateways already present in the target are matched by name so a report can name the target's own.
+
+### Fixed
+
+- **Cursor resets under concurrent database access** — a long-running job and an HTTP request could not use the database at the same time. `StaticPool` shares one SQLCipher connection across the whole process, and SQLCipher resets every open cursor on commit, so a background apply thread committing mid-query broke the request with `Cursor needed to be reset because of commit/rollback and can no longer be fetched from`. Each caller now gets its own connection from a `QueuePool`.
+- **A delta push reported no manual steps** — classification builds the manual-build reports for entries the API refuses to create, and the wipe path merged them into its result while the delta path — which every scoped apply takes — kept only the push records and threw the reports away. An apply that pushed a certificate and proxy but could not create the gateway or the rule above it reported success and said nothing about the half of the chain still to build by hand.
+- **The apply modal looked stuck on the last resource pushed** — the status line chose which phase to display by priority rather than by recency, so once a push event arrived it stayed pinned there, and the re-import that follows the push displayed as the last rule pushed for as long as it ran.
+- **A certificate's own PEM read as a reference** — the PEM body was matched by the reference-stripping pass and mangled on push.
+
+---
+
 ## [3.4.1] - 2026-08-03
 
 A maintenance release. Mostly internal plumbing, a TUI-only function surfaced to the web interface, and fixes to the identity handling that shipped in 3.4.0.

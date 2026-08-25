@@ -54,6 +54,16 @@ function PluginUserRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** The tenant workspace is the user role's ground. An admin session that
+ *  reaches one — a bookmark, a deep link, a role switch mid-session — is sent
+ *  back to the dashboard rather than shown a page of 403s. The API refuses it
+ *  either way; this only keeps the UI honest. */
+function TenantWorkspaceRoute({ children }: { children: React.ReactNode }) {
+  const { isAdmin } = useAuth();
+  if (isAdmin) return <Navigate to="/tenants" replace />;
+  return <>{children}</>;
+}
+
 /** Admin, and only on a deployment that registered the plugin API. */
 function PluginRoute({ children }: { children: React.ReactNode }) {
   const { available, resolved } = usePluginManagerProbe();
@@ -91,12 +101,13 @@ export default function App() {
                   <Route path="/templates" element={<TemplatesPage />} />
                   {/* Tenant workspace routes */}
                   <Route path="/tenant/:id" element={<Navigate to="zia" replace />} />
-                  <Route path="/tenant/:id/zia" element={<TenantWorkspacePage />} />
-                  <Route path="/tenant/:id/zpa" element={<TenantWorkspacePage />} />
-                  <Route path="/tenant/:id/zdx" element={<TenantWorkspacePage />} />
-                  <Route path="/tenant/:id/zcc" element={<TenantWorkspacePage />} />
-                  <Route path="/tenant/:id/zid" element={<TenantWorkspacePage />} />
-                  <Route path="/tenant/:id/sim" element={<TenantWorkspacePage />} />
+                  {["zia", "zpa", "zdx", "zcc", "zid", "sim"].map((product) => (
+                    <Route
+                      key={product}
+                      path={`/tenant/:id/${product}`}
+                      element={<TenantWorkspaceRoute><TenantWorkspacePage /></TenantWorkspaceRoute>}
+                    />
+                  ))}
                   {/* Legacy redirects */}
                   <Route path="/zia/:tenant" element={<Navigate to="/tenants" replace />} />
                   <Route path="/zpa/:tenant" element={<Navigate to="/tenants" replace />} />

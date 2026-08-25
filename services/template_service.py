@@ -4,6 +4,12 @@ A template is a sanitised ZIA snapshot with tenant-specific and reference-only
 resource types stripped out.  Templates are global (not tied to any single tenant)
 and can be applied to any target tenant via ZIAPushService.
 
+A template is owned by whoever created it and holds either everything portable in
+the source snapshot (scope='full') or only the entries its author picked, closed
+over their references (scope='scoped').  Who may see it is decided in
+template_share_service, not here — this module only takes the resulting set of
+visible IDs.
+
 Usage:
     from db.database import get_session
     from services.template_service import (
@@ -27,12 +33,17 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
 from db.models import RestorePoint, ZIATemplate
+from services.zia_import_service import (
+    SETTINGS_METADATA_FIELDS,
+    SETTINGS_SINGLETONS,
+)
 
 
 # Resource types stripped entirely when creating a template.
@@ -267,6 +278,511 @@ def _strip_snapshot(
     return kept, sorted(stripped_types), sorted(included_types), stripped_entry_counts
 
 
+# ---------------------------------------------------------------------------
+# Reference resolution (scoped templates)
+# ---------------------------------------------------------------------------
+
+# raw_config field name → the snapshot resource type it points at.
+#
+# This is deliberately a *separate* table from the _norm_* handlers in
+# zia_push_service: those decide payload shape, this decides template contents.
+# Merging them would let a payload fix silently change which resources a scoped
+# template pulls in.  Both snake_case and camelCase spellings appear in
+# raw_config depending on which SDK path produced the entry, so both are listed.
+#
+# Fields NOT listed here are references that need no closure: app_service_groups
+# and nw_applications name predefined ZIA objects whose IDs are identical in
+# every tenant, and the identity/location/ZPA fields belong to types a template
+# never carries at all (an entry referencing one is stripped outright).
+_REF_FIELDS: Dict[str, str] = {
+    "labels":                 "rule_label",
+    "nw_services":            "network_service",
+    "nwServices":             "network_service",
+    "nw_service_groups":      "network_svc_group",
+    "nwServiceGroups":        "network_svc_group",
+    "nw_application_groups":  "network_app_group",
+    "nwApplicationGroups":    "network_app_group",
+    "src_ip_groups":          "ip_source_group",
+    "srcIpGroups":            "ip_source_group",
+    "source_ip_groups":       "ip_source_group",
+    "sourceIpGroups":         "ip_source_group",
+    "dest_ip_groups":         "ip_destination_group",
+    "destIpGroups":           "ip_destination_group",
+    "dlp_engines":            "dlp_engine",
+    "dlpEngines":             "dlp_engine",
+    "dlp_dictionaries":       "dlp_dictionary",
+    "sub_dictionaries":       "dlp_dictionary",
+    "subDictionaries":        "dlp_dictionary",
+    "time_windows":           "time_interval",
+    "timeWindows":            "time_interval",
+    "workload_groups":        "workload_group",
+    "workloadGroups":         "workload_group",
+    "bandwidth_classes":      "bandwidth_class",
+    "bandwidthClasses":       "bandwidth_class",
+    "proxy_gateways":         "proxy_gateway",
+    "proxyGateways":          "proxy_gateway",
+    "proxy_gateway":          "proxy_gateway",
+    "proxyGateway":           "proxy_gateway",
+    "primary_proxy":          "proxy",
+    "primaryProxy":           "proxy",
+    "secondary_proxy":        "proxy",
+    "secondaryProxy":         "proxy",
+    "cert":                   "root_certificate",
+    "url_categories":         "url_category",
+    "urlCategories":          "url_category",
+    "tenancy_profile_ids":    "tenancy_restriction_profile",
+}
+
+#: Types whose entries are identified by a string rather than a numeric ID.
+#: url_category is the only one: predefined categories key on their constant
+#: ("ADULT_THEMES") and custom ones on "CUSTOM_nn", and the same field carries
+#: bare strings on some rule types and {id, ...} objects on others.
+_STR_ID_TYPES: frozenset = frozenset({"url_category"})
+
+
+def _resolves_without_travelling(ref_type: str, ref_id: str) -> bool:
+    """Whether a reference missing from the snapshot still lands in the target.
+
+    Only ZIA's internal super-categories qualify: `GLOBAL_INT_OFC_SSL_BYPASS`,
+    `OFFICE_365` and friends are referenced by the one-click rules but are not
+    returned by the category listing, so they can never be in a snapshot — and
+    they carry the same constant ID in every tenant, exactly like the
+    app_service_groups and nw_applications _REF_FIELDS leaves out.  A custom
+    category has to travel, so `CUSTOM_nn` is still a real warning.
+    """
+    return ref_type == "url_category" and not ref_id.startswith("CUSTOM_")
+
+
+def _iter_refs(raw_config: dict) -> Iterator[Tuple[str, str]]:
+    """Yield (resource_type, referenced_id) for every reference in one entry.
+
+    Walks nested structures, because a few references live below the top level
+    (an SSL rule's certificate hangs off `action`).  Only field names in
+    _REF_FIELDS are followed, so an unknown embedded object is ignored rather
+    than guessed at.
+    """
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                rtype = _REF_FIELDS.get(key)
+                if rtype is not None:
+                    items = value if isinstance(value, list) else [value]
+                    for item in items:
+                        ref_id = None
+                        if isinstance(item, dict):
+                            if item.get("id") is not None:
+                                ref_id = str(item["id"])
+                        elif rtype in _STR_ID_TYPES and isinstance(item, (str, int)) and item != "":
+                            # Only the string-keyed types name a target inline.
+                            # Everywhere else a reference is an {id, name} object,
+                            # and a bare scalar under the same key is payload, not
+                            # a pointer — a root certificate's own `cert` field
+                            # holds its PEM, which read as a reference produced a
+                            # warning quoting the entire certificate.
+                            ref_id = str(item)
+                        if ref_id is None:
+                            continue
+                        # url_category entries key on their constant ("ADULT_THEMES",
+                        # "CUSTOM_03"), but a DLP web rule reports the same field as
+                        # [{"id": 130}] — an internal ordinal with no entry to match.
+                        # Those are unresolvable by construction, so they are not
+                        # references to chase and not warnings to raise.
+                        if rtype in _STR_ID_TYPES and ref_id.isdigit():
+                            continue
+                        yield rtype, ref_id
+                yield from walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from walk(item)
+
+    yield from walk(raw_config)
+
+
+def _index(resources: Dict[str, List[dict]]) -> Dict[str, Dict[str, dict]]:
+    """resource_type → {entry id (as str) → entry}."""
+    return {
+        rtype: {str(e.get("id")): e for e in entries}
+        for rtype, entries in resources.items()
+    }
+
+
+def resolve_dependencies(
+    selection: Dict[str, List[str]],
+    available: Dict[str, List[dict]],
+) -> Tuple[Dict[str, List[str]], List[dict], List[str]]:
+    """Close a user's selection over the references its entries make.
+
+    A rule the user ticked is useless in the target tenant without the objects it
+    names, so those objects are pulled in behind it — transitively, since a
+    service group names services and a proxy names a certificate.
+
+    Three outcomes per reference:
+      * the target is in `available`      → add it, and follow its own references
+      * the target's type isn't portable  → warn; the reference travels unresolved
+      * the target is missing from the snapshot → warn; same
+
+    In the last two cases nothing is dropped from the selected entry itself: the
+    push service already tolerates an unmapped reference, and silently editing a
+    user's rule would be worse than telling them about it.
+
+    Returns (closed_selection, additions, warnings).  `additions` describes what
+    the closure pulled in — each entry carries `predefined`, so the UI can show a
+    referenced built-in without implying the push will create it.
+    """
+    index = _index(available)
+    closed: Dict[str, Set[str]] = {
+        rtype: {str(i) for i in ids} for rtype, ids in selection.items() if ids
+    }
+    chosen: Set[Tuple[str, str]] = {
+        (rtype, eid) for rtype, ids in closed.items() for eid in ids
+    }
+
+    additions: List[dict] = []
+    warnings: List[str] = []
+    warned: Set[Tuple[str, str]] = set()
+
+    # Worklist over (type, id) pairs; `seen` bounds it, so a reference cycle
+    # (a rule label on a rule that labels it back) terminates instead of looping.
+    worklist: List[Tuple[str, str]] = sorted(chosen)
+    seen: Set[Tuple[str, str]] = set(worklist)
+
+    while worklist:
+        rtype, eid = worklist.pop()
+        entry = index.get(rtype, {}).get(eid)
+        if entry is None:
+            continue
+        for ref_type, ref_id in _iter_refs(entry.get("raw_config") or {}):
+            key = (ref_type, ref_id)
+            if key in seen:
+                continue
+            target = index.get(ref_type, {}).get(ref_id)
+            if target is None:
+                if key not in warned and not _resolves_without_travelling(ref_type, ref_id):
+                    warned.add(key)
+                    why = ("is not portable and was stripped from the template"
+                           if ref_type in TEMPLATE_STRIP_TYPES
+                           else "is not present in the snapshot")
+                    # Capped: an ID reaches the UI verbatim, and raw_config holds
+                    # values far longer than a name.
+                    shown = ref_id if len(ref_id) <= 60 else ref_id[:60] + "…"
+                    warnings.append(
+                        f'"{entry.get("name") or eid}" references {ref_type} '
+                        f"{shown}, which {why}. The reference will not resolve "
+                        f"in the target tenant."
+                    )
+                continue
+            seen.add(key)
+            worklist.append(key)
+            closed.setdefault(ref_type, set()).add(ref_id)
+            rc = target.get("raw_config") or {}
+            additions.append({
+                "resource_type": ref_type,
+                "id": ref_id,
+                "name": _entry_name(ref_type, target),
+                "predefined": _is_predefined(ref_type, rc),
+                "required_by": entry.get("name") or eid,
+            })
+
+    return {rtype: sorted(ids) for rtype, ids in closed.items()}, additions, warnings
+
+
+# ---------------------------------------------------------------------------
+# Per-entry preview
+# ---------------------------------------------------------------------------
+
+def _is_predefined(rtype: str, rc: dict) -> bool:
+    """Whether an entry already exists in every tenant and is matched, not created."""
+    if rc.get("predefined") is True:
+        return True
+    if rtype == "url_category":
+        return rc.get("custom_category") is not True
+    if rtype == "network_service":
+        return rc.get("type") in ("PREDEFINED", "STANDARD")
+    if rtype == "dlp_engine":
+        return rc.get("custom_dlp_engine") is False
+    for flag in ("is_name_l10n_tag", "isNameL10nTag", "name_l10n_tag",
+                 "default_rule", "defaultRule"):
+        if rc.get(flag) is True:
+            return True
+    return False
+
+
+def _entry_name(rtype: str, entry: dict) -> str:
+    """A display name for one entry.
+
+    Predefined URL categories carry an empty `name` and put the useful string in
+    the ID ("ADULT_THEMES"); custom ones put it in `configured_name` and get an
+    opaque "CUSTOM_03" ID; DLP engines use `predefined_engine_name`.  Everything
+    else has a real name.
+    """
+    name = (entry.get("name") or "").strip()
+    if name:
+        return name
+    rc = entry.get("raw_config") or {}
+    for field in ("configured_name", "configuredName", "predefined_engine_name",
+                  "predefinedEngineName", "display_name", "displayName"):
+        candidate = (rc.get(field) or "").strip()
+        if candidate:
+            return candidate
+    return str(entry.get("id"))
+
+
+def _summarize(rtype: str, rc: dict) -> str:
+    """One line of context for a picker row — enough to tell two rules apart.
+
+    Never includes raw_config itself: the picker is shown to anyone who can
+    create a template, and a rule's full config can name internal hosts.
+    """
+    bits: List[str] = []
+    action = rc.get("action")
+    if isinstance(action, dict):
+        action = action.get("type")
+    if isinstance(action, str) and action:
+        bits.append(action.replace("_", " ").title())
+    forward = rc.get("forward_method") or rc.get("forwardMethod")
+    if forward:
+        bits.append(str(forward))
+    state = rc.get("state")
+    if state:
+        bits.append("Enabled" if state == "ENABLED" else "Disabled")
+
+    if rtype in ("ip_destination_group", "ip_source_group"):
+        n = len(rc.get("addresses") or rc.get("ip_addresses") or [])
+        if n:
+            bits.append(f"{n} address{'es' if n != 1 else ''}")
+        if rc.get("type"):
+            bits.append(str(rc["type"]))
+    elif rtype == "url_category":
+        n = len(rc.get("urls") or [])
+        if n:
+            bits.append(f"{n} URL{'s' if n != 1 else ''}")
+    elif rtype == "network_svc_group":
+        n = len(rc.get("services") or [])
+        if n:
+            bits.append(f"{n} service{'s' if n != 1 else ''}")
+    elif rtype == "root_certificate":
+        bits.extend(str(t) for t in (rc.get("cert_types") or rc.get("certTypes") or []))
+
+    if not bits:
+        desc = (rc.get("description") or "").strip()
+        if desc:
+            return desc[:120]
+    return " · ".join(bits)
+
+
+# Words a naive camelCase split gets wrong.  Only the ones that actually occur in
+# the settings singletons — this is a readability pass on a picker label, not a
+# general-purpose humanizer.
+_LABEL_WORDS = {
+    "ai": "AI", "api": "API", "dlp": "DLP", "dns": "DNS", "ftp": "FTP",
+    "gpt": "GPT", "http": "HTTP", "https": "HTTPS", "id": "ID", "ip": "IP",
+    "ipv6": "IPv6", "ips": "IPS", "nss": "NSS", "ocr": "OCR", "pac": "PAC",
+    "poe": "POE", "saml": "SAML", "ssl": "SSL", "ui": "UI", "url": "URL",
+    "zia": "ZIA", "zpa": "ZPA",
+}
+
+# Product names the split breaks in two.
+_LABEL_PHRASES = {
+    "Chat GPT": "ChatGPT",
+    "Co Pilot": "Copilot",
+    "Per Plexity": "Perplexity",
+    "Deep Seek": "DeepSeek",
+    "Quillbot AI": "QuillBot",
+    "I Pv6": "IPv6",
+}
+
+
+def _field_label(key: str) -> str:
+    """"enableChatGptPrompt" → "Enable ChatGPT Prompt"."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", key.replace("_", " "))
+    # Second pass for runs of capitals: "SSLBypass" splits before the last one,
+    # which the lower→upper rule above cannot see.
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    label = " ".join(
+        _LABEL_WORDS.get(w.lower(), w[0].upper() + w[1:])
+        for w in spaced.split() if w
+    )
+    for wrong, right in _LABEL_PHRASES.items():
+        label = label.replace(wrong, right)
+    return label
+
+
+def _field_value(value) -> str:
+    """A short, safe rendering of one settings value for the picker.
+
+    Scalars are shown as-is because that is the whole point — someone picking
+    AI prompt toggles wants to see which are on.  Lists and objects are shown as
+    a count: they hold URLs, user references and exempted app names, and the
+    picker is visible to anyone who may create a template (see _summarize).
+    """
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if value is None:
+        return "unset"
+    if isinstance(value, (list, tuple, set)):
+        n = len(value)
+        return f"{n} item{'s' if n != 1 else ''}"
+    if isinstance(value, dict):
+        return f"{len(value)} field{'s' if len(value) != 1 else ''}"
+    text = str(value)
+    return text if len(text) <= 40 else text[:37] + "…"
+
+
+def _settings_fields(rc: dict) -> List[dict]:
+    """The individually selectable keys of a settings singleton, sorted by label.
+
+    The wrapper fields the client adds so a singleton stores like a resource are
+    not settings and are never offered.
+    """
+    return sorted(
+        (
+            {"key": k, "label": _field_label(k), "value": _field_value(v)}
+            for k, v in rc.items()
+            if k not in SETTINGS_METADATA_FIELDS
+        ),
+        key=lambda f: f["label"].lower(),
+    )
+
+
+def preview_template_detail(
+    snapshot_id: int,
+    source_tenant_id: int,
+    session: Session,
+) -> Dict:
+    """Every selectable entry in a snapshot, grouped by type, for the picker.
+
+    Returns the same included/stripped breakdown as preview_template_from_snapshot
+    plus an `entries` map:
+
+        {"firewall_rule": [{"id", "name", "predefined", "summary", "order"}, …]}
+
+    raw_config is deliberately absent — see _summarize.
+    """
+    base = preview_template_from_snapshot(snapshot_id, source_tenant_id, session)
+    snap = _load_snapshot(snapshot_id, source_tenant_id, session)
+    kept, _, included_types, _ = _strip_snapshot(snap.snapshot.get("resources", {}))
+
+    entries: Dict[str, List[dict]] = {}
+    for rtype in included_types:
+        rows = []
+        for e in kept[rtype]:
+            rc = e.get("raw_config") or {}
+            row = {
+                "id": str(e.get("id")),
+                "name": _entry_name(rtype, e),
+                "predefined": _is_predefined(rtype, rc),
+                "summary": _summarize(rtype, rc),
+                "order": rc.get("order"),
+            }
+            # A settings singleton is one object holding dozens of unrelated
+            # toggles, so the entry is not the unit anyone chooses — the key is.
+            # Its keys ride along on the row and the picker offers them
+            # individually; see field_selection in create_template_from_snapshot.
+            if rtype in SETTINGS_SINGLETONS:
+                row["fields"] = _settings_fields(rc)
+            rows.append(row)
+        rows.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["name"].lower()))
+        entries[rtype] = rows
+
+    base["entries"] = entries
+    return base
+
+
+def _apply_selection(
+    kept: Dict[str, List[dict]],
+    selection: Dict[str, List[str]],
+    field_selection: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, List[dict]]:
+    """Reduce the stripped snapshot to the closed selection, renumbering rules.
+
+    Rule order is per-tenant and 1-based with no gaps, so dropping rule 2 of 5
+    means the survivors have to be renumbered — the same renumbering a type-level
+    strip already does.
+
+    Raises ValueError if the selection names something that isn't there: a
+    stale picker is better rejected than quietly honored in part.
+    """
+    result: Dict[str, List[dict]] = {}
+    for rtype, ids in selection.items():
+        if not ids:
+            continue
+        available = kept.get(rtype)
+        if available is None:
+            raise ValueError(
+                f"invalid_selection:Resource type '{rtype}' is not portable and "
+                f"cannot be included in a template"
+            )
+        wanted = {str(i) for i in ids}
+        picked = [e for e in available if str(e.get("id")) in wanted]
+        missing = wanted - {str(e.get("id")) for e in picked}
+        if missing:
+            raise ValueError(
+                f"invalid_selection:{rtype} entr{'y' if len(missing) == 1 else 'ies'} "
+                f"{', '.join(sorted(missing))} cannot be included — stripped as "
+                f"tenant-specific, or no longer in the snapshot"
+            )
+        group_field = "type" if rtype == "cloud_app_control_rule" else None
+        result[rtype] = _renumber_orders(picked, group_field=group_field)
+    if field_selection:
+        _apply_field_selection(result, field_selection)
+    return result
+
+
+def _apply_field_selection(
+    result: Dict[str, List[dict]],
+    field_selection: Dict[str, List[str]],
+) -> None:
+    """Reduce each selected settings singleton to the keys its author picked.
+
+    Entries are replaced with copies rather than edited: `kept` still points at
+    the loaded RestorePoint's own dicts, and a template must never write back
+    into the snapshot it was cut from.  The wrapper fields stay — they are what
+    makes the entry storable and what tells the push whether the object is
+    writable at all.
+
+    A type absent from field_selection, or present with no keys, keeps every key
+    — "include the whole object" stays expressible.
+
+    Raises ValueError if a type is not a settings singleton, was not selected, or
+    a named key is not in the snapshot; a picker built against a different
+    snapshot is better rejected than honored in part.
+    """
+    for rtype, keys in field_selection.items():
+        if not keys:
+            continue
+        if rtype not in SETTINGS_SINGLETONS:
+            raise ValueError(
+                f"invalid_selection:'{rtype}' has no individually selectable "
+                f"settings — pick the whole resource instead"
+            )
+        picked = result.get(rtype)
+        if not picked:
+            raise ValueError(
+                f"invalid_selection:Settings were chosen for '{rtype}' but the "
+                f"resource itself was not selected"
+            )
+        wanted = set(keys)
+        narrowed = []
+        for entry in picked:
+            rc = entry.get("raw_config") or {}
+            missing = wanted - set(rc)
+            if missing:
+                raise ValueError(
+                    f"invalid_selection:{rtype} setting"
+                    f"{'s' if len(missing) != 1 else ''} "
+                    f"{', '.join(sorted(missing))} "
+                    f"{'are' if len(missing) != 1 else 'is'} no longer in the snapshot"
+                )
+            narrowed.append({
+                **entry,
+                "raw_config": {
+                    k: v for k, v in rc.items()
+                    if k in wanted or k in SETTINGS_METADATA_FIELDS
+                },
+            })
+        result[rtype] = narrowed
+
+
 def _load_snapshot(
     snapshot_id: int,
     source_tenant_id: int,
@@ -325,14 +841,35 @@ def create_template_from_snapshot(
     name: str,
     description: Optional[str],
     session: Session,
+    selection: Optional[Dict[str, List[str]]] = None,
+    field_selection: Optional[Dict[str, List[str]]] = None,
+    owner_user_id: Optional[int] = None,
+    owner_username: Optional[str] = None,
+    visibility: str = "private",
 ) -> ZIATemplate:
     """Create a ZIATemplate from an existing ZIA RestorePoint.
 
-    Strips tenant-specific and reference-only resource types before saving.
+    Strips tenant-specific and reference-only resource types before saving.  With
+    `selection` given, the result is narrowed further to the entries the author
+    picked plus everything those entries reference (see resolve_dependencies);
+    the template is marked scope='scoped' and records what was picked, what the
+    closure added, and which references could not be resolved.
+
+    selection=None keeps the historical behavior byte for byte: a full template
+    over everything portable in the snapshot.
+
+    `field_selection` narrows the settings singletons further, to the individual
+    keys named per type.  ZIA stores each of these as one object holding dozens
+    of unrelated toggles, so carrying the whole object means carrying the source
+    tenant's session timeouts along with its AI prompt controls; naming keys
+    keeps a template to the setting it is actually about.  The push merges the
+    named keys over the target's live settings, leaving the rest alone.  It is
+    only meaningful alongside a selection, and only for the singleton types.
 
     Raises:
         LookupError: Snapshot not found or not a ZIA snapshot for that tenant.
         ValueError: Template name already taken (409 equivalent).
+        ValueError: Selection names an entry that isn't portable (422 equivalent).
         ValueError: No portable resources remain after stripping (422 equivalent).
 
     The caller is responsible for writing audit events AFTER the session closes
@@ -340,14 +877,43 @@ def create_template_from_snapshot(
     """
     existing = session.query(ZIATemplate).filter_by(name=name).first()
     if existing is not None:
-        raise ValueError(f"duplicate_name:A template with this name already exists")
+        owner = existing.owner_username
+        suffix = f" (owned by {owner})" if owner else ""
+        raise ValueError(
+            f'duplicate_name:A template named "{name}" already exists{suffix}'
+        )
 
     snap = _load_snapshot(snapshot_id, source_tenant_id, session)
     resources = snap.snapshot.get("resources", {})
     kept, stripped_types, _, _ = _strip_snapshot(resources)
 
+    scope = "full"
+    selection_meta: Optional[Dict] = None
+    if selection:
+        closed, additions, warnings = resolve_dependencies(selection, kept)
+        kept = _apply_selection(kept, closed, field_selection)
+        scope = "scoped"
+        selection_meta = {
+            "selected": {k: sorted(str(i) for i in v) for k, v in selection.items() if v},
+            "auto_included": additions,
+            "warnings": warnings,
+        }
+        if field_selection:
+            selection_meta["fields"] = {
+                k: sorted(v) for k, v in field_selection.items() if v
+            }
+    elif field_selection:
+        raise ValueError(
+            "invalid_selection:Individual settings can only be chosen for a "
+            "scoped template"
+        )
+
     resource_count = sum(len(v) for v in kept.values())
     if resource_count == 0:
+        if selection:
+            raise ValueError(
+                "invalid_selection:No resources were selected"
+            )
         stripped_summary = ", ".join(stripped_types) if stripped_types else "all types"
         raise ValueError(
             f"no_portable_resources:Snapshot has no portable resources after stripping "
@@ -365,19 +931,33 @@ def create_template_from_snapshot(
         resource_count=resource_count,
         stripped_types=stripped_types,
         snapshot=kept,
+        owner_user_id=owner_user_id,
+        owner_username=owner_username,
+        visibility=visibility,
+        scope=scope,
+        selection_meta=selection_meta,
     )
     session.add(tmpl)
     session.flush()
     return tmpl
 
 
-def list_templates(session: Session) -> List[ZIATemplate]:
-    """Return all ZIATemplate rows, newest first."""
-    return (
-        session.query(ZIATemplate)
-        .order_by(ZIATemplate.created_at.desc())
-        .all()
-    )
+def list_templates(
+    session: Session,
+    visible_ids: Optional[Set[int]] = None,
+) -> List[ZIATemplate]:
+    """Return ZIATemplate rows, newest first.
+
+    `visible_ids` is the set from template_share_service.visible_template_ids;
+    None means no restriction (an admin), which is why it is not defaulted to an
+    empty set — those two cases are opposites.
+    """
+    query = session.query(ZIATemplate)
+    if visible_ids is not None:
+        if not visible_ids:
+            return []
+        query = query.filter(ZIATemplate.id.in_(visible_ids))
+    return query.order_by(ZIATemplate.created_at.desc()).all()
 
 
 def get_template(template_id: int, session: Session) -> ZIATemplate:

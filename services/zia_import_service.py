@@ -89,6 +89,13 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     ResourceDef("vpn_credential", "list_vpn_credentials", id_field="id"),
     ResourceDef("gre_tunnel",     "list_gre_tunnels",     id_field="id"),
     ResourceDef("sublocation",    "list_sublocations",    id_field="id"),
+    # Third-party proxy chaining — the forwarding-rule -> proxyGateway ->
+    # proxy -> cert chain.  root_certificate is undocumented and has no SDK
+    # method; ZIAClient reaches it over direct HTTP, so it stores camelCase.
+    ResourceDef("proxy",            "list_proxies",           id_field="id", name_field="name"),
+    ResourceDef("proxy_gateway",    "list_proxy_gateways",    id_field="id", name_field="name"),
+    ResourceDef("root_certificate", "list_root_certificates", id_field="id", name_field="displayName",
+                list_args={"include_cert": True}),
     # Traffic Forwarding — subclouds imported for PAC file generator.
     ResourceDef("sub_cloud", "list_sub_clouds", id_field="id", name_field="name"),
     # PAC Files — metadata plus the deployed version's pac_content, so PAC
@@ -97,6 +104,27 @@ RESOURCE_DEFINITIONS: List[ResourceDef] = [
     # Org info singleton — stored so domain dropdown doesn't require a live API call.
     ResourceDef("org_info", "list_org_info", id_field="id", name_field="name"),
 ]
+
+
+# Tenant-wide settings that ZIA exposes as one object at a fixed endpoint.  They
+# are wrapped in a one-element list at import so they store like any other
+# resource, always under id 1.
+#
+# They differ from every other type in one way that matters downstream: the unit
+# a person cares about is a single key, not the object.  Turning on the Claude
+# prompt toggle and taking the tenant's session timeouts with it is not a choice
+# anyone means to make.  A template can therefore carry a subset of the keys,
+# and ZIAPushService merges that subset over the target's live settings instead
+# of PUTting it whole.
+SETTINGS_SINGLETONS: frozenset = frozenset({
+    "url_filter_cloud_app_settings",
+    "advanced_settings",
+    "browser_control_settings",
+})
+
+# Wrapper fields added by the client so a singleton stores like a resource.  They
+# are not settings, and are never offered for selection or diffed as one.
+SETTINGS_METADATA_FIELDS: frozenset = frozenset({"id", "name", "access_control"})
 
 
 _META_KEYS = frozenset({"creation_time", "modified_time", "modified_by"})
