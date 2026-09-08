@@ -94,6 +94,10 @@ _EXCLUDED_FROM_SYNC: set = {
     "url_filter_cloud_app_settings",
     "allowlist",
     "denylist",
+    # Imported for reference only — there is no write path for it anywhere
+    # (no client methods, absent from the push service).  Offering it in the
+    # cloud_app_control group made every run of that group fail on it.
+    "cloud_app_instance",
 }
 
 # Resource types that carry a 'labels' field and are therefore eligible for

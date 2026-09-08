@@ -157,6 +157,9 @@ class _DiffRecord:
     operation: str       # "create" | "update" | "delete"
     source_raw: Optional[Dict] = None   # None for deletes
     target_id: Optional[str] = None     # existing ID on target (update/delete)
+    target_raw: Optional[Dict] = None   # target's raw_config; set on deletes, where
+                                        # source_raw is None but the delete call still
+                                        # needs type-specific args (e.g. rule_type)
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +920,7 @@ def _compute_diff(
                             content_diff.append(_DiffRecord(
                                 resource_type=rtype, name=del_name, operation="delete",
                                 target_id=r.zia_id,
+                                target_raw=copy.deepcopy(r.raw_config or {}),
                             ))
 
     return content_diff + reorder_diff
@@ -961,6 +965,18 @@ _EMPTY_STRIP_FIELDS: frozenset = frozenset({
 })
 
 
+def _cloud_app_rule_type(raw_config: Optional[Dict]) -> Optional[str]:
+    """Return the cloud app control rule's rule_type, or None if absent.
+
+    The ZIA cloud app control endpoints are keyed by rule type (WEBMAIL,
+    STREAMING_MEDIA, ...) as a path segment.  The rule body carries it as
+    'type'; 'rule_type' is accepted as a fallback for configs captured before
+    the field settled.  Matches ZIAPushService._push_cloud_app_rule.
+    """
+    cfg = raw_config or {}
+    return cfg.get("type") or cfg.get("rule_type")
+
+
 def _slim_payload(rtype: str, payload: Dict) -> Dict:
     """Reduce ref-array fields to [{id}] and apply per-type fixups.
 
@@ -970,7 +986,16 @@ def _slim_payload(rtype: str, payload: Dict) -> Dict:
     # Strip null values from the entire payload (null enum sub-fields cause 400s)
     payload = _drop_nulls(payload)
 
-    for f in _REF_FIELDS:
+    ref_fields = _REF_FIELDS
+    if rtype == "cloud_app_control_rule":
+        # 'applications' on this type is a flat list of app-name strings
+        # (["GOOGLE_WEBMAIL", ...]), not [{id}].  Running it through the ref loop
+        # below finds no dicts, empties the list and drops the field, which the
+        # ZIA UI reads as "Any" — silently widening the rule.  Exempt it here and
+        # handle it in the per-type fixup instead.
+        ref_fields = _REF_FIELDS - {"applications"}
+
+    for f in ref_fields:
         val = payload.get(f)
         if isinstance(val, list):
             if val:
@@ -1006,6 +1031,15 @@ def _slim_payload(rtype: str, payload: Dict) -> Dict:
     if rtype == "firewall_dns_rule":
         for f in ("default_dns_rule_name_used", "is_web_eun_enabled"):
             payload.pop(f, None)
+
+    if rtype == "cloud_app_control_rule":
+        # Mirrors ZIAPushService._norm_cloud_app_control_rule: an empty
+        # 'applications' means "Any", which the API expresses by omitting the
+        # field — sending [] is rejected as invalid.
+        if not payload.get("applications"):
+            payload.pop("applications", None)
+        if not payload.get("cloud_app_instances"):
+            payload.pop("cloud_app_instances", None)
 
     if rtype == "forwarding_rule":
         gw = payload.get("zpa_gateway")
@@ -1170,20 +1204,31 @@ def _apply_one(
     rtype = rec.resource_type
 
     if rec.operation == "delete":
+        if rtype == "cloud_app_control_rule":
+            # Deletes carry no source_raw — take the rule type off the target row.
+            rule_type = _cloud_app_rule_type(rec.target_raw)
+            if not rule_type:
+                raise ValueError(
+                    f"cloud_app_control_rule '{rec.name}' has no rule type in its "
+                    "target config; cannot delete"
+                )
+            target_client.delete_cloud_app_rule(rule_type, rec.target_id)
+            return
         if rtype not in _DELETE_METHODS:
             raise ValueError(f"No delete method for {rtype}")
         delete_method_name = _DELETE_METHODS[rtype]
         if delete_method_name is None:
-            # cloud_app_control_rule needs special handling — skip for now
             raise NotImplementedError(f"delete not implemented for {rtype} in sync engine")
         delete_method = getattr(target_client, delete_method_name)
         delete_method(rec.target_id)
         return
 
-    if rtype not in _WRITE_METHODS:
+    # cloud_app_control_rule is absent from _WRITE_METHODS on purpose: its create
+    # and update calls take a leading rule_type argument, which the two-name
+    # (create, update) tuple cannot express.  It is dispatched separately below,
+    # after the payload is built.
+    if rtype != "cloud_app_control_rule" and rtype not in _WRITE_METHODS:
         raise ValueError(f"No write method for {rtype}")
-
-    create_method_name, update_method_name = _WRITE_METHODS[rtype]
 
     # Build a cleaned payload: strip read-only fields
     payload = {
@@ -1228,6 +1273,24 @@ def _apply_one(
             max_target = _next_order(target_tenant_id, rtype) - 1
             if max_target > 0 and src_order > max_target:
                 payload["order"] = max_target
+
+    if rtype == "cloud_app_control_rule":
+        # rule_type is a path segment on this endpoint, so it is passed positionally
+        # and also left in the payload (the rule body carries its own 'type').
+        rule_type = _cloud_app_rule_type(rec.source_raw)
+        if not rule_type:
+            raise ValueError(
+                f"cloud_app_control_rule '{rec.name}' has no rule type in its "
+                "source config; cannot push"
+            )
+        if rec.operation == "create":
+            target_client.create_cloud_app_rule(rule_type, payload)
+        else:
+            payload["id"] = rec.target_id
+            target_client.update_cloud_app_rule(rule_type, rec.target_id, payload)
+        return
+
+    create_method_name, update_method_name = _WRITE_METHODS[rtype]
 
     if rec.operation == "create":
         create_method = getattr(target_client, create_method_name)
