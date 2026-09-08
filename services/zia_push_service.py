@@ -2039,45 +2039,7 @@ class ZIAPushService:
 
         payload = self._build_payload(resource_type, raw_config)
 
-        # Detect scope fields that were stripped during normalization because the
-        # target tenant has no matching resources (locations, groups, departments,
-        # users, ZPA segments are all tenant-specific and not pushed cross-tenant).
-        # When ANY scope field is stripped on a create, insert the rule as DISABLED
-        # so it cannot fire without its intended audience.  Always warn regardless of
-        # action so the operator knows manual fixup is required.
-        _SCOPE_CHECKS = [
-            ("locations",       "location",          "create locations manually"),
-            ("location_groups", "location_group",    "create location groups manually"),
-            ("groups",          "group",             "create groups manually"),
-            ("departments",     "department",        "create departments manually"),
-            ("users",           "user",              "assign users manually"),
-            ("devices",         "device",            "assign devices manually"),
-            ("device_groups",   "device_group",      "assign device groups manually"),
-            ("zpa_app_segments","zpa_app_segment",   "provision ZPA app segments, then re-enable"),
-        ]
-        record_warnings: List[str] = []
-        # Extract warnings embedded by normalizers as __norm_warning sentinel keys.
-        norm_warning = payload.pop("__norm_warning", None)
-        if norm_warning:
-            record_warnings.append(norm_warning)
-        scope_was_stripped = False
-        for field, rtype, hint in _SCOPE_CHECKS:
-            baseline_vals = raw_config.get(field) or []
-            if baseline_vals and not payload.get(field):
-                scope_was_stripped = True
-                names = [
-                    v.get("name", str(v.get("id", "?"))) if isinstance(v, dict) else str(v)
-                    for v in baseline_vals
-                ]
-                record_warnings.append(
-                    f"{field} scope stripped — {hint}: {', '.join(names)}"
-                )
-        if scope_was_stripped:
-            payload = dict(payload, state="DISABLED")
-            if action == "create":
-                record_warnings.insert(0, "rule inserted DISABLED — scope fields stripped (see below)")
-            else:
-                record_warnings.insert(0, "rule kept DISABLED — scope fields still stripped; resolve manually before enabling (see below)")
+        payload, record_warnings = self._apply_scope_checks(payload, raw_config, action)
 
         # Detect cbi_profile remapped to a different profile (name mismatch or fallback to default).
         if resource_type == "url_filtering_rule":
@@ -2160,6 +2122,60 @@ class ZIAPushService:
                 )
             return self._classify_error(resource_type, name, exc)
 
+    # Scope fields that are tenant-specific: they resolve to the target's own
+    # resources, so a reference that finds no match is dropped by the normalizers.
+    # (payload field, resource type, operator remediation hint)
+    _SCOPE_CHECKS = [
+        ("locations",       "location",          "create locations manually"),
+        ("location_groups", "location_group",    "create location groups manually"),
+        ("groups",          "group",             "create groups manually"),
+        ("departments",     "department",        "create departments manually"),
+        ("users",           "user",              "assign users manually"),
+        ("devices",         "device",            "assign devices manually"),
+        ("device_groups",   "device_group",      "assign device groups manually"),
+        ("zpa_app_segments","zpa_app_segment",   "provision ZPA app segments, then re-enable"),
+    ]
+
+    def _apply_scope_checks(
+        self, payload: dict, raw_config: dict, action: str
+    ) -> Tuple[dict, List[str]]:
+        """Disable a rule whose scope was stripped entirely, and collect warnings.
+
+        A scope field the source populated but the payload lost means the target
+        has none of those resources.  The rule would then apply to *everything*
+        instead of the intended subset, so on a create it is inserted DISABLED
+        rather than allowed to fire; on an update the target's state is left as
+        the operator set it.  Only total loss trips this — a partially resolved
+        field narrows rather than widens, so it passes silently.
+
+        Extracted from _push_one so the dedicated rule handlers, which return
+        before the generic tail, get the same protection.
+        """
+        record_warnings: List[str] = []
+        # Extract warnings embedded by normalizers as __norm_warning sentinel keys.
+        norm_warning = payload.pop("__norm_warning", None)
+        if norm_warning:
+            record_warnings.append(norm_warning)
+        scope_was_stripped = False
+        for field, rtype, hint in self._SCOPE_CHECKS:
+            baseline_vals = raw_config.get(field) or []
+            if baseline_vals and not payload.get(field):
+                scope_was_stripped = True
+                names = [
+                    v.get("name", str(v.get("id", "?"))) if isinstance(v, dict) else str(v)
+                    for v in baseline_vals
+                ]
+                record_warnings.append(
+                    f"{field} scope stripped — {hint}: {', '.join(names)}"
+                )
+        if scope_was_stripped:
+            payload = dict(payload, state="DISABLED")
+            if action == "create":
+                record_warnings.insert(0, "rule inserted DISABLED — scope fields stripped (see below)")
+            else:
+                record_warnings.insert(0, "rule kept DISABLED — scope fields still stripped; resolve manually before enabling (see below)")
+        return payload, record_warnings
+
     def _push_cloud_app_rule(
         self,
         name: str,
@@ -2178,12 +2194,15 @@ class ZIAPushService:
             )
 
         payload = self._build_payload("cloud_app_control_rule", raw_config)
+        # This handler returns before _push_one's generic tail, so the scope check
+        # has to be applied here or this rule type never gets it at all.
+        payload, record_warnings = self._apply_scope_checks(payload, raw_config, action)
 
         if action == "update" and target_id:
             try:
                 self._client.update_cloud_app_rule(rule_type, target_id, payload)
                 return PushRecord(resource_type="cloud_app_control_rule", name=name,
-                                  status="updated")
+                                  status="updated", warnings=record_warnings)
             except Exception as exc:
                 return self._classify_error("cloud_app_control_rule", name, exc)
 
@@ -2196,7 +2215,7 @@ class ZIAPushService:
             if source_id and new_target_id:
                 self._register_remap(source_id, new_target_id)
             return PushRecord(resource_type="cloud_app_control_rule", name=name,
-                              status="created")
+                              status="created", warnings=record_warnings)
         except Exception as exc:
             exc_str = str(exc)
             if ("409" in exc_str or "DUPLICATE_ITEM" in exc_str
