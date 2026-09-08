@@ -163,6 +163,58 @@ class _DiffRecord:
 
 
 # ---------------------------------------------------------------------------
+# Apply ordering
+# ---------------------------------------------------------------------------
+
+def _push_order_index() -> Dict[str, int]:
+    """resource_type → its index in PUSH_ORDER (the dependency tier sequence).
+
+    zia_push_service is imported lazily, matching the rest of this module, which
+    keeps the import graph acyclic.
+    """
+    from services.zia_push_service import PUSH_ORDER
+    return {rt: i for i, rt in enumerate(PUSH_ORDER)}
+
+
+def _sort_content_batch(records: List[_DiffRecord]) -> None:
+    """Sort create/update/rename records in place, dependency tier first.
+
+    Keying the sort on the resource_type *string* alphabetises the types, which
+    puts dependents ahead of the things they depend on: "cloud_app_control_rule"
+    sorts before "cloud_app_instance", "firewall_rule" before "ip_source_group".
+    A rule applied before its referenced object loses that reference and is
+    stripped, self-healing only on a later run.  Key on the PUSH_ORDER index
+    instead.
+
+    Types absent from PUSH_ORDER sort last, which is where they land today.
+    resource_type stays as a secondary key so records of one type remain grouped,
+    and the source `order` as a tertiary key so creates within a type keep the
+    ascending sequence the order_tracker depends on.
+    """
+    index = _push_order_index()
+    fallback = len(index)
+
+    def _key(rec: _DiffRecord):
+        tier = index.get(rec.resource_type, fallback)
+        if rec.operation != "create":
+            return (tier, rec.resource_type, float("inf"))
+        return (tier, rec.resource_type, (rec.source_raw or {}).get("order", float("inf")))
+
+    records.sort(key=_key)
+
+
+def _sort_delete_batch(records: List[_DiffRecord]) -> None:
+    """Sort delete records in place into reverse PUSH_ORDER.
+
+    ZIA refuses to delete a resource another resource still references, so the
+    referencing rule has to be deleted first — the mirror of _sort_content_batch.
+    """
+    index = _push_order_index()
+    fallback = len(index)
+    records.sort(key=lambda rec: (-index.get(rec.resource_type, fallback), rec.resource_type))
+
+
+# ---------------------------------------------------------------------------
 # Public entry point — dispatches by task_type
 # ---------------------------------------------------------------------------
 
@@ -601,22 +653,22 @@ def _execute_sync_pipeline(
             label_name=t_label_name if t_sync_mode == "label" else None,
         )
 
-        # 8. Split diff into phases returned by _compute_diff:
-        #    phase 1 — create / update / rename / delete  (content operations)
+        # 8. Split diff into phases:
+        #    phase 1 — create / update / rename  (content operations)
         #    phase 2 — reorder  (positional, after all rules exist on target)
-        phase1 = [r for r in diff if r.operation != "reorder"]
+        #    phase 3 — delete   (last, in reverse dependency order)
+        #
+        # Deletes are split out of phase 1 rather than mixed into it: a resource
+        # that is still referenced cannot be deleted, so a rule has to be removed
+        # before the object it points at, which is the opposite of the create
+        # ordering.  Deletes also run after the reorder phase so that a rule being
+        # deleted and a rule being repositioned do not fight over positions.
+        phase1 = [r for r in diff if r.operation not in ("reorder", "delete")]
         phase2 = [r for r in diff if r.operation == "reorder"]
+        deletes = [r for r in diff if r.operation == "delete"]
 
-        # Sort creates within phase1 by ascending source order so that
-        # API-level position shifts are applied in the correct sequence and
-        # the order_tracker below hands out strictly increasing values for
-        # rules that need to be clamped.
-        def _create_sort_key(r):
-            if r.operation != "create":
-                return (r.resource_type, float("inf"))
-            return (r.resource_type, (r.source_raw or {}).get("order", float("inf")))
-
-        phase1.sort(key=_create_sort_key)
+        _sort_content_batch(phase1)
+        _sort_delete_batch(deletes)
 
         def _apply_batch(batch):
             nonlocal synced
@@ -663,6 +715,7 @@ def _execute_sync_pipeline(
 
         _apply_batch(phase1)
         _apply_batch(phase2)
+        _apply_batch(deletes)
 
         # 9. Activate target if any resources were pushed
         if synced > 0:
