@@ -90,6 +90,9 @@ PUSH_ORDER: List[str] = [
     "dlp_engine",
     "dlp_dictionary",
     "tenancy_restriction_profile",
+    # References nothing — its only children are inline instance_identifiers —
+    # and it must precede Tier 3, where the rules that scope to it live.
+    "cloud_app_instance",
     # Tier 1 — object building blocks
     "ip_source_group",
     "ip_destination_group",
@@ -131,6 +134,9 @@ WIPE_ORDER: List[str] = [
     # Tier 3 — rules in reverse
     "sandbox_rule",
     "cloud_app_control_rule",
+    # After the rules that reference it — ZIA refuses to delete an instance a
+    # cloud app control rule still scopes to.
+    "cloud_app_instance",
     "traffic_capture_rule",
     "bandwidth_control_rule",
     "dlp_web_rule",
@@ -254,6 +260,8 @@ READONLY_FIELDS: set = {
     "updated_at",
     "modified_time",
     "modified_by",
+    "modified_at",        # server-assigned timestamp on cloud_app_instance
+    "instance_id",        # cloud_app_instance PK — tenant-local, positional on update
     "last_modified_by_user",
     "is_deleted",
     "db_category_index",
@@ -289,6 +297,7 @@ _DELETE_METHODS: Dict[str, str] = {
     "bandwidth_control_rule": "delete_bandwidth_control_rule",
     "traffic_capture_rule":   "delete_traffic_capture_rule",
     "cloud_app_control_rule": None,   # handled via delete_cloud_app_rule(rule_type, id)
+    "cloud_app_instance":     "delete_cloud_app_instance",
     "sandbox_rule":           "delete_sandbox_rule",
     "workload_group":                "delete_workload_group",
     "dlp_engine":                    "delete_dlp_engine",
@@ -329,6 +338,10 @@ _WRITE_METHODS: Dict[str, Tuple[str, str]] = {
     "tenancy_restriction_profile":   ("create_tenancy_restriction_profile",
                                       "update_tenancy_restriction_profile"),
     "sandbox_rule":                  ("create_sandbox_rule",   "update_sandbox_rule"),
+    # Listed for membership checks only — the create/update calls themselves go
+    # through _push_cloud_app_instance, which knows the instance_id PK.
+    "cloud_app_instance":            ("create_cloud_app_instance",
+                                      "update_cloud_app_instance"),
     "proxy":                         ("create_proxy",         "update_proxy"),
     # Certificate material is create-only — see _CREATE_ONLY_TYPES.  The update
     # slot is never reached; it repeats the create name rather than lying about
@@ -540,6 +553,9 @@ class ZIAPushService:
         self._full_clone = full_clone
         self._id_remap: Dict[str, str] = {}          # source_id (str) → target_id (str)
         self._target_known_ids: Dict[str, set] = {}  # resource_type → set of zia_ids in target
+        # cloud_app_instance name → target instance_id, built lazily on first
+        # resolve and reused for the rest of the push.
+        self._instance_name_index: Optional[Dict[str, str]] = None
         self._usable_dlp_engine_ids: set = set()     # target DLP engine IDs that can be used in rules
         self._cbi_profile_map: Dict[str, dict] = {}  # profile name (lower) → {id, name, url, default}
         # Tracks static IPs created during a Full Clone push (source_id → target_id).
@@ -1899,6 +1915,9 @@ class ZIAPushService:
         if resource_type == "cloud_app_control_rule":
             return self._push_cloud_app_rule(name, source_id, raw_config, action, target_id)
 
+        if resource_type == "cloud_app_instance":
+            return self._push_cloud_app_instance(name, source_id, raw_config, action, target_id)
+
         # Settings singletons: GET-then-merge, always.
         #
         # The endpoints replace the whole object on PUT, so a payload carrying a
@@ -2134,6 +2153,7 @@ class ZIAPushService:
         ("devices",         "device",            "assign devices manually"),
         ("device_groups",   "device_group",      "assign device groups manually"),
         ("zpa_app_segments","zpa_app_segment",   "provision ZPA app segments, then re-enable"),
+        ("cloud_app_instances", "cloud_app_instance", "create cloud app instances manually"),
     ]
 
     def _apply_scope_checks(
@@ -2194,8 +2214,9 @@ class ZIAPushService:
             )
 
         payload = self._build_payload("cloud_app_control_rule", raw_config)
-        # This handler returns before _push_one's generic tail, so the scope check
-        # has to be applied here or this rule type never gets it at all.
+        # This handler returns before _push_one's generic tail, so the scope
+        # check has to be applied here — cloud_app_instances is one of the fields
+        # it covers, and it is the only rule type that carries them.
         payload, record_warnings = self._apply_scope_checks(payload, raw_config, action)
 
         if action == "update" and target_id:
@@ -2240,6 +2261,137 @@ class ZIAPushService:
                     status="failed:permanent:duplicate — rule exists but name lookup failed",
                 )
             return self._classify_error("cloud_app_control_rule", name, exc)
+
+    def _push_cloud_app_instance(
+        self,
+        name: str,
+        source_id: str,
+        raw_config: dict,
+        action: str,
+        target_id: Optional[str],
+    ) -> PushRecord:
+        """Push a cloud app instance (primary key is instance_id, not id).
+
+        Dedicated for the same reason _push_cloud_app_rule is: the generic tail
+        cannot express this resource.  There it was the rule_type path segment;
+        here it is the PK.  The create response carries instance_id and no id, so
+        the generic tail's ``str(result.get("id", ""))`` yields "" and skips
+        _register_remap without raising — every rule scoped to the instance would
+        then lose its scope silently, which is the worst failure mode available.
+
+        Strategy is replicate-falling-back-to-resolve: create when the target has
+        no instance of that name, otherwise reuse the target's own and remap onto
+        it.  Either way source_id ends up in _id_remap, which is what
+        _ref_resolved reads when the rules are pushed later in the same run.
+        """
+        rtype = "cloud_app_instance"
+        payload = self._build_payload(rtype, raw_config)
+        # _norm_cloud_app_instance already popped it; kept explicit because the
+        # update contract is "target ID positionally, never in the body".
+        payload.pop("instance_id", None)
+        payload.pop("id", None)
+
+        if action == "update" and target_id:
+            try:
+                self._client.update_cloud_app_instance(str(target_id), payload)
+                if source_id:
+                    self._register_remap(source_id, target_id)
+                return PushRecord(resource_type=rtype, name=name, status="updated",
+                                  zia_id=str(target_id))
+            except Exception as exc:
+                return self._classify_error(rtype, name, exc)
+
+        # Resolve-first: instance_name is the cross-tenant identity key, so a
+        # same-named instance on the target is the same instance.
+        found_id = self._find_instance_by_name(rtype, name)
+        if found_id:
+            if source_id:
+                self._register_remap(source_id, found_id)
+            try:
+                self._client.update_cloud_app_instance(found_id, payload)
+                return PushRecord(resource_type=rtype, name=name, status="updated",
+                                  zia_id=found_id)
+            except Exception as exc:
+                return self._classify_error(rtype, name, exc)
+
+        try:
+            result = self._client.create_cloud_app_instance(payload) or {}
+        except Exception as exc:
+            exc_str = str(exc)
+            if ("409" in exc_str or "DUPLICATE_ITEM" in exc_str
+                    or "already exists" in exc_str.lower() or "conflict" in exc_str.lower()):
+                dup_id = self._find_instance_by_name(rtype, name, live_only=True)
+                if dup_id:
+                    if source_id:
+                        self._register_remap(source_id, dup_id)
+                    try:
+                        self._client.update_cloud_app_instance(dup_id, payload)
+                        return PushRecord(resource_type=rtype, name=name,
+                                          status="updated", zia_id=dup_id)
+                    except Exception as upd_exc:
+                        return self._classify_error(rtype, name, upd_exc)
+                # Non-permanent so the multi-pass retry gets another go — the
+                # lookup itself is the likely casualty (rate limit on the list).
+                return PushRecord(
+                    resource_type=rtype,
+                    name=name,
+                    status="failed:duplicate — instance exists but name lookup failed (will retry)",
+                )
+            return self._classify_error(rtype, name, exc)
+
+        new_target_id = str(result.get("instance_id", "") or "")
+        if not new_target_id:
+            # Loud rather than silent: without the ID there is no remap, and every
+            # rule scoped to this instance would be stripped and disabled.
+            return PushRecord(
+                resource_type=rtype,
+                name=name,
+                status=("failed:permanent:created but the API returned no instance_id; "
+                        "rule scoping cannot be resolved"),
+            )
+        if source_id:
+            self._register_remap(source_id, new_target_id)
+        return PushRecord(resource_type=rtype, name=name, status="created",
+                          zia_id=new_target_id)
+
+    def _find_instance_by_name(
+        self,
+        resource_type: str,
+        name: str,
+        live_only: bool = False,
+    ) -> Optional[str]:
+        """Case-insensitive instance_name lookup in the target: DB first, API second.
+
+        The classified target set (the DB snapshot classify_baseline imported from)
+        answers without a network call.  _find_by_name_live is the fallback for the
+        stale-snapshot case, which is also the 409 path — hence live_only.
+        """
+        if not name:
+            return None
+        key = name.strip().lower()
+        if not live_only:
+            if self._instance_name_index is None:
+                index: Dict[str, str] = {}
+                for entry in (self._load_existing_from_db().get(resource_type) or {}).values():
+                    entry_name = (entry.get("name") or "").strip().lower()
+                    if entry_name:
+                        index.setdefault(entry_name, str(entry.get("id") or ""))
+                self._instance_name_index = index
+            found = self._instance_name_index.get(key)
+            if found:
+                return found
+        exact = self._find_by_name_live(resource_type, name)
+        if exact:
+            return exact
+        # _find_by_name_live matches exactly; instance names are compared
+        # case-insensitively across tenants, so sweep once more for that.
+        try:
+            for item in self._client.list_cloud_app_instances():
+                if (item.get("instance_name") or "").strip().lower() == key:
+                    return str(item.get("instance_id", "") or "") or None
+        except Exception:
+            pass
+        return None
 
     def _push_list_resource(self, resource_type: str, entries: List[dict]) -> List[PushRecord]:
         """Special handler for allowlist / denylist — merge only (add new URLs)."""
@@ -2340,6 +2492,7 @@ class ZIAPushService:
             "bandwidth_control_rule": self._norm_bandwidth_control_rule,
             "traffic_capture_rule":   self._norm_traffic_capture_rule,
             "cloud_app_control_rule": self._norm_cloud_app_control_rule,
+            "cloud_app_instance":     self._norm_cloud_app_instance,
             "location":               self._norm_location,
             "proxy":                  self._norm_proxy,
             "root_certificate":       self._norm_root_certificate,
@@ -2787,10 +2940,39 @@ class ZIAPushService:
                 ("departments",            "department"),
                 ("users",                  "user"),
                 ("tenancy_profile_ids",    "tenancy_restriction_profile"),
+                ("cloud_app_instances",    "cloud_app_instance"),
             ),
-            empty_strip=("device_trust_levels", "user_agent_types", "user_risk_score_levels",
-                         "cloud_app_instances"),
+            empty_strip=("device_trust_levels", "user_agent_types", "user_risk_score_levels"),
         )
+        return cfg
+
+    def _norm_cloud_app_instance(self, cfg: dict) -> dict:
+        # instance_id is the tenant-local PK — it is positional on update and must
+        # never travel in the body.  _strip already removes the top-level one via
+        # READONLY_FIELDS; the trap is the copy inside each instance_identifiers
+        # entry, which _strip does not reach and which would be camel-cased to
+        # instanceId and POSTed to the target.
+        for f in ("instance_id", "modified_at", "modified_by"):
+            cfg.pop(f, None)
+        idents = cfg.get("instance_identifiers")
+        if idents:
+            cleaned = []
+            for ident in idents:
+                if not isinstance(ident, dict):
+                    continue
+                entry = {k: v for k, v in ident.items()
+                         if k not in ("instance_id", "modified_at", "modified_by")
+                         and v is not None}
+                if entry:
+                    cleaned.append(entry)
+            if cleaned:
+                cfg["instance_identifiers"] = cleaned
+            else:
+                # Empty → omit, the same convention the rule normalizer uses for
+                # applications; the API rejects an empty list.
+                cfg.pop("instance_identifiers", None)
+        else:
+            cfg.pop("instance_identifiers", None)
         return cfg
 
     # ---- Full Clone normalizers ----
@@ -3169,7 +3351,8 @@ class ZIAPushService:
             for item in items:
                 # Use the resource-specific name field (e.g. configured_name for url_category)
                 if item.get(defn.name_field) == name or item.get("name") == name:
-                    return str(item.get("id", ""))
+                    # id_field defaults to "id"; cloud_app_instance keys on instance_id.
+                    return str(item.get(defn.id_field, ""))
         except Exception:
             pass
         return None

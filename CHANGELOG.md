@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Cloud app instances replicate across tenants** — a cloud app control rule can be scoped to a named instance of a SaaS app (the corporate Google Drive tenant, say, as opposed to a personal one), and that scope was the one part of the rule that could not travel. Instances were imported for reference only: no client methods, no push handler, and an entry in the sync exclusion list. A rule that named one arrived on the target with the field stripped, which the API reads as *Any* — the widest possible reading of a rule written to be narrow. Instances now push and sync like any other resource, ahead of the rules that reference them, and a rule's `cloud_app_instances` refs resolve to the target's own IDs. The strategy is replicate-falling-back-to-resolve: an instance absent from the target is created, and one already there under the same name is reused and updated in place rather than duplicated. The resource keys on `instance_id` rather than `id`, which is why it needs a handler of its own — the generic create path reads `id` off the response, would have found nothing, and would have dropped the mapping without saying so.
+- **A rule that still cannot resolve its instance scope is disabled, not widened** — when every instance a rule names is missing from the target and cannot be created, the rule is created DISABLED with a warning naming the instances, rather than created enabled against everything. On an update the target's own state is left as the operator set it, with the same warning. This is the treatment locations, groups, departments and ZPA app segments already get.
+
+### Fixed
+
+- **Scheduled sync applied resources in alphabetical order** — phase 1 sorted on the resource type string, which puts dependents ahead of what they depend on: `cloud_app_control_rule` before `cloud_app_instance`, `firewall_rule` before `ip_source_group`. The reference was unresolvable at apply time and got stripped, self-healing only on some later run once the dependency happened to exist. The sort now keys on the push dependency tier. Deletes had the mirror problem — mixed into phase 1 they inherited the create ordering, so an object could be deleted while a rule still referenced it; they are now their own batch, in reverse tier order, applied after the reorder phase.
+- **The stripped-scope check never reached cloud app control rules** — it lives after the point where that rule type returns through its own handler, so a cloud app control rule whose locations all failed to resolve was created enabled and tenant-wide. It now runs for that type too.
+
+### Notes for operators
+
+- Label-mode scheduled sync does **not** carry cloud app instances. The resource has no `labels` field, so it cannot be selected by label; a task that syncs cloud app control rules by label will resolve their instance scope against whatever the target already has, and warn where it cannot. To replicate the instances themselves, sync by resource type with the **Cloud App Control** group selected — it now carries both the rules and the instances.
+- A sync that reports `partial` with a `WARNING:` line naming a cloud app instance means the rule landed with its scope widened or dropped. The named instance has to exist on the target before the next run resolves it.
+
+---
+
 ## [3.5.2] - 2026-08-19
 
 A bug fix release. Privilege separation between the admin and user roles, in the two places it was never applied.

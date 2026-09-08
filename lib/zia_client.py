@@ -573,6 +573,26 @@ class ZIAClient:
         result, resp, err = self._sdk.zia.cloud_app_instances.list_cloud_app_instances()
         return _to_dicts(_unwrap(result, resp, err))
 
+    # The resource's primary key is instance_id, not id — the create response
+    # carries instance_id and the item path is keyed by it.  Method names stay
+    # singular to match the create_<resource_type> / update_<resource_type> /
+    # delete_<resource_type> convention the push service dispatches on, the same
+    # way create_rule_label fronts rule_labels.add_label.
+    def create_cloud_app_instance(self, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_app_instances.add_cloud_app_instances(**config)
+        return _to_dict(_unwrap(result, resp, err))
+
+    def update_cloud_app_instance(self, instance_id: str, config: Dict) -> Dict:
+        result, resp, err = self._sdk.zia.cloud_app_instances.update_cloud_app_instances(
+            instance_id, **config
+        )
+        return _to_dict(_unwrap(result, resp, err))
+
+    def delete_cloud_app_instance(self, instance_id: str) -> None:
+        _, resp, err = self._sdk.zia.cloud_app_instances.delete_cloud_app_instances(instance_id)
+        if err:
+            raise RuntimeError(str(err))
+
     # ------------------------------------------------------------------
     # Cloud App Control
     # ------------------------------------------------------------------

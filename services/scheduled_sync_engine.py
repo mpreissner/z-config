@@ -17,7 +17,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from db.database import get_session
 from db.models import ScheduledTask, TaskRunHistory, ZIAResource
@@ -55,6 +55,11 @@ _COMPARE_STRIP = frozenset({
     "created_by", "creation_time", "created_at", "updated_at", "modified_time",
     "modified_by", "last_modified_by_user", "is_deleted", "db_category_index",
     "deleted", "default_rule", "access_control", "managed_by",
+    # cloud_app_instance: instance_id is the tenant-local PK (top level and inside
+    # every instance_identifiers entry) and modified_at is server-assigned.  Both
+    # differ on every tenant, so leaving them in makes each run re-update the
+    # instance forever.  _norm_for_compare filters these keys at every depth.
+    "instance_id", "modified_at",
 })
 
 
@@ -629,6 +634,10 @@ def _execute_sync_pipeline(
     pending_audit: List[Dict] = []
     # Fresh order_tracker per pipeline call — not shared across fan-out targets
     order_tracker: Dict[str, int] = {}
+    # Same lifetime, same fan-out isolation: resources created during this run,
+    # as rtype → {name.lower(): target_id}, so a rule can resolve a reference to
+    # something created after the target snapshot was imported.
+    created_ids: Dict[str, Dict[str, str]] = {}
 
     try:
         # 4. Build clients (sessions closed before clients are used)
@@ -674,7 +683,11 @@ def _execute_sync_pipeline(
             nonlocal synced
             for rec in batch:
                 try:
-                    _apply_one(target_client, t_target, t_source, rec, source_zia_id=t_source_zia_id, order_tracker=order_tracker)
+                    _apply_one(target_client, t_target, t_source, rec,
+                               source_zia_id=t_source_zia_id,
+                               order_tracker=order_tracker,
+                               created_ids=created_ids,
+                               warning_sink=errors)
                     synced += 1
                     pending_audit.append(dict(
                         tenant_id=t_target,
@@ -998,6 +1011,7 @@ _REF_FIELDS: frozenset = frozenset({
     "zpa_application_segments", "zpa_application_segment_groups",
     "threat_categories",
     "applications", "application_groups",
+    "cloud_app_instances",
 })
 
 
@@ -1093,6 +1107,25 @@ def _slim_payload(rtype: str, payload: Dict) -> Dict:
             payload.pop("applications", None)
         if not payload.get("cloud_app_instances"):
             payload.pop("cloud_app_instances", None)
+
+    if rtype == "cloud_app_instance":
+        # Mirrors ZIAPushService._norm_cloud_app_instance.  READONLY_FIELDS is
+        # applied at the top level only, so the instance_id inside each
+        # instance_identifiers entry would otherwise ride along to the target.
+        idents = payload.get("instance_identifiers")
+        cleaned = []
+        if isinstance(idents, list):
+            for ident in idents:
+                if not isinstance(ident, dict):
+                    continue
+                entry = {k: v for k, v in ident.items()
+                         if k not in ("instance_id", "modified_at", "modified_by")}
+                if entry:
+                    cleaned.append(entry)
+        if cleaned:
+            payload["instance_identifiers"] = cleaned
+        else:
+            payload.pop("instance_identifiers", None)
 
     if rtype == "forwarding_rule":
         gw = payload.get("zpa_gateway")
@@ -1228,6 +1261,88 @@ def _remap_label_ids(payload: Dict, source_tenant_id: int, target_tenant_id: int
     return payload
 
 
+def _remap_instance_ids(
+    payload: Dict,
+    source_tenant_id: int,
+    target_tenant_id: int,
+    created_ids: Optional[Dict[str, Dict[str, str]]] = None,
+    source_refs: Optional[List[Dict]] = None,
+) -> Tuple[Dict, List[str]]:
+    """Replace source cloud app instance IDs with the target's, matched by name.
+
+    Same shape as _remap_label_ids, with one addition: instances created earlier
+    in this same run are not in the target DB snapshot (it was imported before any
+    write), so created_ids — the in-run map threaded through _apply_batch — is
+    consulted first.  Without it a rule created in the same run as the instance it
+    scopes to would lose that scope and only recover on the next run.
+
+    source_refs is the rule's pre-slim cloud_app_instances list, which still carries
+    each instance's name; the DB is only consulted for names it does not supply.
+
+    Returns (payload, dropped_names).  Unresolved refs are dropped and named so the
+    caller can warn; an empty result pops the field, which the API reads as "Any".
+    """
+    refs = payload.get("cloud_app_instances")
+    if not isinstance(refs, list) or not refs:
+        return payload, []
+
+    # Names off the source config first — _slim_payload has already reduced the
+    # payload refs to {id}, and the source rule carries the name the target is
+    # matched on.  This also keeps the remap working when the source tenant's
+    # instance rows were never imported (an instance-less resource group).
+    src_id_to_name: Dict[str, str] = {
+        str(r.get("id", "")): (r.get("name") or "")
+        for r in (source_refs or []) if isinstance(r, dict) and r.get("name")
+    }
+
+    with get_session() as session:
+        src_rows = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=source_tenant_id,
+                       resource_type="cloud_app_instance", is_deleted=False)
+            .all()
+        )
+        tgt_rows = (
+            session.query(ZIAResource)
+            .filter_by(tenant_id=target_tenant_id,
+                       resource_type="cloud_app_instance", is_deleted=False)
+            .all()
+        )
+
+    for r in src_rows:
+        src_id_to_name.setdefault(str(r.zia_id), r.name or "")
+    tgt_name_to_id: Dict[str, str] = {
+        (r.name or "").strip().lower(): r.zia_id for r in tgt_rows if r.name
+    }
+    in_run: Dict[str, str] = dict((created_ids or {}).get("cloud_app_instance", {}))
+
+    remapped: List[Dict] = []
+    dropped: List[str] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        src_id = str(ref.get("id", ""))
+        name = ref.get("name") or src_id_to_name.get(src_id) or ""
+        key = name.strip().lower()
+        tgt_id = in_run.get(key) if key else None
+        if not tgt_id and key:
+            tgt_id = tgt_name_to_id.get(key)
+        if tgt_id:
+            try:
+                remapped.append({"id": int(tgt_id)})
+            except (ValueError, TypeError):
+                remapped.append({"id": tgt_id})
+        else:
+            dropped.append(name or src_id or "?")
+
+    if remapped:
+        payload["cloud_app_instances"] = remapped
+    else:
+        payload.pop("cloud_app_instances", None)
+
+    return payload, dropped
+
+
 # ---------------------------------------------------------------------------
 # Apply a single diff record to the target
 # ---------------------------------------------------------------------------
@@ -1239,12 +1354,18 @@ def _apply_one(
     rec: _DiffRecord,
     source_zia_id: Optional[str] = None,
     order_tracker: Optional[Dict[str, int]] = None,
+    created_ids: Optional[Dict[str, Dict[str, str]]] = None,
+    warning_sink: Optional[List[Dict[str, str]]] = None,
 ) -> None:
     """Apply a single diff record to the target tenant.
 
     For creates: strips read-only fields and calls the SDK create method.
     For updates: strips read-only fields, injects target_id, calls update.
     For deletes: calls the SDK delete method.
+
+    created_ids: rtype → {name.lower(): target_id} for resources created earlier in
+    this same pipeline run, so a rule can reference an object the target DB snapshot
+    predates.  warning_sink: the run's errors list, for non-fatal WARNING: entries.
 
     Raises on any failure — caller catches and logs to errors list.
     """
@@ -1319,6 +1440,33 @@ def _apply_one(
     # Remap location/location_group refs: IDs are tenant-specific
     payload = _resolve_env_refs(payload, source_tenant_id, target_tenant_id)
 
+    # Remap cloud app instance refs the same way, then report a total scope loss.
+    # Partial loss is silent here, matching ZIAPushService._SCOPE_CHECKS.
+    if rtype == "cloud_app_control_rule":
+        had_instance_refs = bool((rec.source_raw or {}).get("cloud_app_instances"))
+        payload, dropped_names = _remap_instance_ids(
+            payload, source_tenant_id, target_tenant_id, created_ids,
+            source_refs=(rec.source_raw or {}).get("cloud_app_instances"),
+        )
+        if had_instance_refs and not payload.get("cloud_app_instances"):
+            # Every ref was lost, so the rule would apply to *any* instance —
+            # wider than the source intended.  Disable it on create rather than
+            # let it fire; on update the target's own state is left alone.
+            disabled = rec.operation == "create"
+            if disabled:
+                payload["state"] = "DISABLED"
+            if warning_sink is not None:
+                warning_sink.append({
+                    "resource_type": "cloud_app_control_rule",
+                    "resource_name": rec.name,
+                    "operation": rec.operation,
+                    "error": (
+                        "WARNING: cloud app instance scope could not be resolved on "
+                        f"the target ({', '.join(dropped_names)}); rule scope widened "
+                        "to Any" + (" and rule disabled" if disabled else "")
+                    ),
+                })
+
     # Clamp reorder operations to the target's valid range
     if rec.operation == "reorder" and "order" in payload:
         src_order = payload["order"]
@@ -1341,6 +1489,26 @@ def _apply_one(
         else:
             payload["id"] = rec.target_id
             target_client.update_cloud_app_rule(rule_type, rec.target_id, payload)
+        return
+
+    if rtype == "cloud_app_instance":
+        # The PK is instance_id, not id: the generic tail below would read
+        # result["id"], find nothing, and discard the new ID — leaving every rule
+        # scoped to this instance unable to resolve it.  See
+        # ZIAPushService._push_cloud_app_instance for the same reasoning.
+        payload.pop("instance_id", None)
+        if rec.operation == "create":
+            result = target_client.create_cloud_app_instance(payload) or {}
+            new_id = str(result.get("instance_id", "") or "")
+            if not new_id:
+                raise RuntimeError(
+                    f"cloud app instance '{rec.name}' was created but the API "
+                    "returned no instance_id; rule scoping cannot be resolved"
+                )
+            if created_ids is not None and rec.name:
+                created_ids.setdefault(rtype, {})[rec.name.strip().lower()] = new_id
+        else:
+            target_client.update_cloud_app_instance(rec.target_id, payload)
         return
 
     create_method_name, update_method_name = _WRITE_METHODS[rtype]
