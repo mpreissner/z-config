@@ -664,19 +664,27 @@ def _execute_sync_pipeline(
 
         # 8. Split diff into phases:
         #    phase 1 — create / update / rename  (content operations)
-        #    phase 2 — reorder  (positional, after all rules exist on target)
-        #    phase 3 — delete   (last, in reverse dependency order)
+        #    phase 2 — delete   (reverse dependency order)
+        #    phase 3 — reorder  (positional, last)
         #
         # Deletes are split out of phase 1 rather than mixed into it: a resource
         # that is still referenced cannot be deleted, so a rule has to be removed
         # before the object it points at, which is the opposite of the create
-        # ordering.  Deletes also run after the reorder phase so that a rule being
-        # deleted and a rule being repositioned do not fight over positions.
-        phase1 = [r for r in diff if r.operation not in ("reorder", "delete")]
-        phase2 = [r for r in diff if r.operation == "reorder"]
+        # ordering.  They run after phase 1 for that reason — an update that drops
+        # a reference has to land before the referent goes away.
+        #
+        # Deletes run *before* the reorder phase because a delete is addressed by
+        # target_id and is position-independent, while a reorder writes an absolute
+        # position taken from the source.  Removing a rule compacts every position
+        # below it, so a reorder applied first would be silently shifted up by each
+        # later delete above it.  Deleting first makes the target's membership match
+        # the source's, which is the list the source `order` values are numbered
+        # against.
+        content = [r for r in diff if r.operation not in ("reorder", "delete")]
         deletes = [r for r in diff if r.operation == "delete"]
+        reorders = [r for r in diff if r.operation == "reorder"]
 
-        _sort_content_batch(phase1)
+        _sort_content_batch(content)
         _sort_delete_batch(deletes)
 
         def _apply_batch(batch):
@@ -726,9 +734,9 @@ def _execute_sync_pipeline(
                         error_message=str(exc),
                     ))
 
-        _apply_batch(phase1)
-        _apply_batch(phase2)
+        _apply_batch(content)
         _apply_batch(deletes)
+        _apply_batch(reorders)
 
         # 9. Activate target if any resources were pushed
         if synced > 0:
