@@ -16,6 +16,15 @@ Scheduled cross-tenant sync moved a rule's shape but not always its scope. This 
 - **A rule that still cannot resolve its instance scope is disabled, not widened** — when every instance a rule names is missing from the target and cannot be created, the rule is created DISABLED with a warning naming the instances, rather than created enabled against everything. On an update the target's own state is left as the operator set it, with the same warning. This is the treatment locations, groups, departments and ZPA app segments already get.
 
 ### Fixed
+- A synced rule's locations, groups, departments and users are now resolved against
+  the target's current state. A sync run imports the resource types it was given and
+  the types the dependency walk replicates, but never the resolve-only types — so
+  the scope of a rule was matched by name against whatever an earlier import had
+  left in the database. Where that row had since been deleted on the target, the
+  rule was pushed with a dead ID and rejected; where the target had reassigned the
+  ID to something else, the rule was accepted and silently scoped to the wrong
+  object. The target's rows for these types are now refreshed before the diff runs,
+  and only for the types a selected rule actually references.
 - Custom URL categories are now translated between tenants. `urlCategories` arrives
   as a flat list of strings (`["CUSTOM_05"]`), and the sync engine treated every
   such string as a Zscaler-defined constant and shipped it unchanged — but

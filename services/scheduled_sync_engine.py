@@ -683,10 +683,12 @@ def _execute_sync_pipeline(
         pulled: Dict[str, Set[str]] = {}
         origin: Dict[Tuple[str, str], str] = {}
         closure_warnings: List[str] = []
+        resolve_only: Set[str] = set()
         for _ in range(_CLOSURE_MAX_DEPTH):
-            pulled, origin, closure_warnings, missing = _close_over(
+            pulled, origin, closure_warnings, missing, round_resolve = _close_over(
                 t_source, resource_types, label_for_diff, loaded
             )
+            resolve_only |= round_resolve
             to_load = sorted(missing - loaded)
             if not to_load:
                 break
@@ -731,6 +733,43 @@ def _execute_sync_pipeline(
                 "operation": "closure",
                 "error": f"WARNING: {warning}",
             })
+
+        # 6c. Refresh the target's rows for the resolve-only types these rules point
+        # at.  Steps 5, 6 and 6b import the selected types and the types the closure
+        # replicates; a location, group or department is neither, so nothing in the
+        # run had ever refreshed it and _remap_refs resolved rule scope by name
+        # against whatever an earlier import happened to leave behind.  A row that
+        # has since been deleted on the target resolves to a dead ID and the API
+        # rejects the rule; worse, an ID the target has since reassigned resolves to
+        # a live object that is not the one the operator scoped to, and the rule
+        # lands silently pointing at it.  Neither is recoverable from the source
+        # side, so refresh before diffing.
+        #
+        # These are the types the closure deliberately will not replicate, and user
+        # and group can run to tens of thousands of rows — which is why this imports
+        # only the types a selected rule actually references, and only on the target.
+        # The source side does not need them: a rule's own reference arrays carry
+        # the names, which is what the remap resolves through.
+        if resolve_only:
+            from services.zia_import_service import RESOURCE_DEFINITIONS
+            importable = {d.resource_type for d in RESOURCE_DEFINITIONS}
+            to_refresh = sorted(resolve_only & importable)
+            skipped = sorted(resolve_only - importable)
+            if to_refresh:
+                ZIAImportService(target_client, tenant_id=t_target).run(
+                    resource_types=to_refresh
+                )
+            if skipped:
+                errors.append({
+                    "resource_type": "system",
+                    "resource_name": "reference_refresh",
+                    "operation": "closure",
+                    "error": "WARNING: the selected rules reference "
+                             + ", ".join(skipped)
+                             + ", which cannot be imported; those references are "
+                               "resolved against whatever the target snapshot holds "
+                               "and may be stale",
+                })
 
         # 7. Compute diff between source and target DB rows
         diff = _compute_diff(
@@ -1273,7 +1312,7 @@ def _close_over(
     resource_types: List[str],
     label_name: Optional[str],
     loaded_types: Set[str],
-) -> Tuple[Dict[str, Set[str]], Dict[Tuple[str, str], str], List[str], Set[str]]:
+) -> Tuple[Dict[str, Set[str]], Dict[Tuple[str, str], str], List[str], Set[str], Set[str]]:
     """Walk the selected source rules' references and return what they require.
 
     Selecting a rule for sync without the types it depends on produces a rule that
@@ -1294,11 +1333,15 @@ def _close_over(
     first-ever sync would find no dependencies at all, because nothing but the
     selected types has ever been imported for that tenant.
 
-    Returns (pulled, origin, warnings, missing):
+    Returns (pulled, origin, warnings, missing, resolve_only):
       pulled   rtype -> set of source names to add to the job
       origin   (rtype, name) -> name of the seed rule that required it, for audit
       warnings human-readable strings for the run history
       missing  replicable types referenced but not yet loaded
+      resolve_only  non-replicable types a selected rule actually points at.  The
+               walk will not create these, but _remap_refs still has to resolve
+               them by name against the target's rows, so the caller refreshes
+               them there before diffing — see step 6c in _execute_sync_pipeline.
 
     Breadth-first, so origin records the shortest path to a seed rule, which is the
     most useful attribution for an operator reading an audit row.  Runs entirely in
@@ -1310,6 +1353,7 @@ def _close_over(
     origin: Dict[Tuple[str, str], str] = {}
     warnings: List[str] = []
     missing: Set[str] = set()
+    resolve_only: Set[str] = set()
     selected = set(resource_types)
 
     with get_session() as session:
@@ -1379,13 +1423,22 @@ def _close_over(
                     refs.append((ref_type, {"id": ref}))
 
         for ref_type, ref in refs:
-            if ref_type not in _REPLICABLE_TYPES or not isinstance(ref, dict):
+            if not isinstance(ref, dict):
                 continue
             raw_id = ref.get("id")
             if raw_id is None:
                 continue
             if isinstance(raw_id, (int, float)) and raw_id < 0:
                 continue  # Zscaler system constant, identical on every tenant
+            if ref_type not in _REPLICABLE_TYPES:
+                # Not ours to create, but the rule is still scoped by it and
+                # _remap_refs has to find it by name on the target.  Name the type
+                # so the caller can refresh the target's rows for it; a stale row
+                # here resolves to an ID that no longer exists (the API rejects the
+                # rule) or that a different object now holds (it does not, and the
+                # rule lands silently mis-scoped).
+                resolve_only.add(ref_type)
+                continue
             if ref_type not in loaded_types:
                 # Rows for this type are absent or stale; the caller imports it and
                 # calls again rather than losing the dependency here.
@@ -1432,7 +1485,7 @@ def _close_over(
             f"nested dependencies may not have been included"
         )
 
-    return pulled, origin, warnings, missing
+    return pulled, origin, warnings, missing, resolve_only
 
 
 def _drop_nulls(obj):
