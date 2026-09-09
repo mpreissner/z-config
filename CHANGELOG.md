@@ -16,6 +16,14 @@ Scheduled cross-tenant sync moved a rule's shape but not always its scope. This 
 - **A rule that still cannot resolve its instance scope is disabled, not widened** — when every instance a rule names is missing from the target and cannot be created, the rule is created DISABLED with a warning naming the instances, rather than created enabled against everything. On an update the target's own state is left as the operator set it, with the same warning. This is the treatment locations, groups, departments and ZPA app segments already get.
 
 ### Fixed
+- Custom URL categories are now translated between tenants. `urlCategories` arrives
+  as a flat list of strings (`["CUSTOM_05"]`), and the sync engine treated every
+  such string as a Zscaler-defined constant and shipped it unchanged — but
+  `CUSTOM_NN` is a tenant-local slot assigned in creation order, so a rule scoped to
+  "Customer Blocklist" on one tenant could land pointing at an unrelated category,
+  or at none. Custom categories referenced by a synced rule are also created on the
+  target now, and categories whose name the API returns only in `configured_name`
+  are no longer invisible to the sync.
 
 - **`No write method for cloud_app_control_rule`** — pushing or syncing a cloud app control rule failed outright with that error. The rule's endpoints take the rule type (WEBMAIL, STREAMING_MEDIA, AI_ML and the rest) as a leading path segment, so the call takes an argument the shared write table has no way to express; the type was in the table with no method behind it. It now routes through a handler of its own, as its delete path already did.
 - **Most cross-tenant references shipped the source tenant's IDs** — the sync engine remapped labels, locations and location groups by name, and passed every other reference array through untouched. ZIA IDs are small dense integers, so a source ID almost always exists on the target as an unrelated object: a rule scoped to network service `SMTP-Custom` (id 5) arrived scoped to whatever id 5 is on the target. The API accepts it, the rule looks configured, and it filters the wrong traffic. Worse, it never settles — the target's name differs from the source's every run, so the rule is rewritten on every sync forever. **If a sync task's history shows the same rules updating on every run and never reaching a clean state, this is why.** Every reference array is now resolved by name against the target.
