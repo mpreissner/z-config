@@ -1003,15 +1003,17 @@ def _compute_diff(
             # Source: name → row
             src_by_name: Dict[str, ZIAResource] = {}
             for r in src_rows:
-                if r.name and not _is_zscaler_managed(rtype, r.raw_config or {}):
-                    src_by_name[r.name] = r
+                nm = _resource_name(r)
+                if nm and not _is_zscaler_managed(rtype, r.raw_config or {}):
+                    src_by_name[nm] = r
 
             # Target: name → [all rows]  and  content_fingerprint → [all rows]
             tgt_by_name_all: Dict[str, List[ZIAResource]] = {}
             tgt_by_content: Dict[str, List[ZIAResource]] = {}
             for r in tgt_rows:
-                if r.name and not _is_zscaler_managed(rtype, r.raw_config or {}):
-                    tgt_by_name_all.setdefault(r.name, []).append(r)
+                nm = _resource_name(r)
+                if nm and not _is_zscaler_managed(rtype, r.raw_config or {}):
+                    tgt_by_name_all.setdefault(nm, []).append(r)
                     ck = _content_fingerprint(r.raw_config or {})
                     tgt_by_content.setdefault(ck, []).append(r)
 
@@ -1249,6 +1251,23 @@ _REPLICABLE_TYPES: frozenset = frozenset({
 _CLOSURE_MAX_DEPTH = 5
 
 
+def _resource_name(row) -> str:
+    """The name every stage of the sync must agree on for one imported row.
+
+    Custom url_categories are the reason this exists: the API returns the operator's
+    name in configured_name and leaves the top-level name empty, so the importer
+    stores an empty name column for some of them.  Keying on that column alone made
+    those rows invisible to the diff and the remap while the closure still pulled
+    them in by their real name — a dependency that could never be satisfied.
+
+    Every stage resolves the name through here so they cannot drift apart again.
+    """
+    if getattr(row, "name", None):
+        return row.name
+    cfg = getattr(row, "raw_config", None) or {}
+    return cfg.get("configured_name") or ""
+
+
 def _close_over(
     source_tenant_id: int,
     resource_types: List[str],
@@ -1313,22 +1332,26 @@ def _close_over(
         # round trip per reference.
         by_id: Dict[Tuple[str, str], Tuple[str, Dict]] = {}
         for r in rows:
-            if r.zia_id is not None and r.name:
-                by_id[(r.resource_type, str(r.zia_id))] = (r.name, r.raw_config or {})
+            if r.zia_id is None:
+                continue
+            rname = _resource_name(r)
+            if rname:
+                by_id[(r.resource_type, str(r.zia_id))] = (rname, r.raw_config or {})
 
         # Seeds: the rows this job already selected, filtered exactly as
         # _compute_diff filters them, so the walk starts from the same set that
         # will actually be pushed.
         seeds: List[Tuple[str, str, Dict]] = []
         for r in rows:
-            if r.resource_type not in selected or not r.name:
+            seed_nm = _resource_name(r)
+            if r.resource_type not in selected or not seed_nm:
                 continue
             cfg = r.raw_config or {}
             if _is_zscaler_managed(r.resource_type, cfg):
                 continue
             if label_name is not None and not _has_label(cfg, label_name):
                 continue
-            seeds.append((r.resource_type, r.name, cfg))
+            seeds.append((r.resource_type, seed_nm, cfg))
 
     visited: Set[Tuple[str, str]] = set()
     queue: List[Tuple[str, Dict, str, int]] = [(rt, cfg, name, 0) for rt, name, cfg in seeds]
@@ -1348,6 +1371,12 @@ def _close_over(
             for ref in cfg.get(field) or []:
                 if isinstance(ref, dict):
                     refs.append((ref_type, ref))
+                elif isinstance(ref, str):
+                    # Flat-string form.  A custom category is a tenant-local slot
+                    # ("CUSTOM_01") and so is a genuine dependency that has to be
+                    # pulled in; a Zscaler-defined constant ("ADULT_THEMES") has no
+                    # name in by_id and drops out at the lookup below.
+                    refs.append((ref_type, {"id": ref}))
 
         for ref_type, ref in refs:
             if ref_type not in _REPLICABLE_TYPES or not isinstance(ref, dict):
@@ -1607,11 +1636,12 @@ def _ref_name_index(
             .all()
         )
         for r in rows:
+            nm = _resource_name(r)
             if r.tenant_id == source_tenant_id:
-                src_id_to_name[r.resource_type][str(r.zia_id)] = r.name or ""
+                src_id_to_name[r.resource_type][str(r.zia_id)] = nm
             else:
-                if r.name:
-                    tgt_name_to_id[r.resource_type][r.name.strip().lower()] = r.zia_id
+                if nm:
+                    tgt_name_to_id[r.resource_type][nm.strip().lower()] = r.zia_id
 
     # Fold location_lite into location in both directions so callers see one type.
     if "location" in rtypes:
@@ -1706,9 +1736,12 @@ def _remap_refs(
         if lost:
             dropped[field] = lost
 
-    # Mixed-form fields: string elements are Zscaler-defined constants that mean the
-    # same thing on every tenant and pass through untouched; dict elements are
-    # tenant-local objects and are remapped exactly as above.
+    # Mixed-form fields carry two kinds of element.  A dict is a tenant-local object
+    # and is remapped exactly as above.  A string is either a Zscaler-defined
+    # constant ("ADULT_THEMES"), identical on every tenant, or a custom category
+    # slot ("CUSTOM_01") whose number is assigned in creation order and therefore
+    # routinely names a *different* category on the target.  Both are remapped by
+    # name, which is what tells them apart: only the tenant-local ones have one.
     for field in mixed:
         ref_type = _MIXED_REF_FIELDS[field]
         by_id = src_index.get(ref_type, {})
@@ -1723,6 +1756,20 @@ def _remap_refs(
         remapped_mixed: List[Any] = []
         lost = []
         for ref in payload[field]:
+            if isinstance(ref, str):
+                nm = inline.get(ref) or by_id.get(ref) or ""
+                key = nm.strip().lower()
+                if not key:
+                    # No name on either side: a Zscaler-defined constant, which
+                    # means the same thing on the target.  Ship it unchanged.
+                    remapped_mixed.append(ref)
+                    continue
+                tgt_id = in_run.get(key) or by_name.get(key)
+                if tgt_id:
+                    remapped_mixed.append(str(tgt_id))
+                else:
+                    lost.append(nm)
+                continue
             if not isinstance(ref, dict):
                 remapped_mixed.append(ref)
                 continue
