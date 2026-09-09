@@ -753,7 +753,15 @@ def _execute_sync_pipeline(
         if resolve_only:
             from services.zia_import_service import RESOURCE_DEFINITIONS
             importable = {d.resource_type for d in RESOURCE_DEFINITIONS}
-            to_refresh = sorted(resolve_only & importable)
+            # Widen through the companion map for the same reason _ref_name_index
+            # does: the remap resolves a location name against location_lite rows
+            # too, so refreshing only `location` leaves the other half stale and the
+            # dead ID still answers.
+            wanted_refresh = set(resolve_only)
+            for primary, companions in _REF_TYPE_COMPANIONS.items():
+                if primary in wanted_refresh:
+                    wanted_refresh.update(companions)
+            to_refresh = sorted(wanted_refresh & importable)
             skipped = sorted(resolve_only - importable)
             if to_refresh:
                 ZIAImportService(target_client, tenant_id=t_target).run(
@@ -1284,6 +1292,17 @@ _REPLICABLE_TYPES: frozenset = frozenset({
     "url_category", "dlp_engine", "dlp_dictionary",
 })
 
+# Some reference types are imported under more than one resource_type, and a name
+# lookup has to consider all of them: predefined locations (Road Warrior, Mobile
+# Users) arrive as location_lite rather than location.  _ref_name_index widens its
+# query through this map and folds the results together, and the pipeline refreshes
+# the target through it too -- a companion left stale resolves names the primary
+# type no longer has, which is exactly how a deleted location kept answering.
+_REF_TYPE_COMPANIONS: Dict[str, Tuple[str, ...]] = {
+    "location": ("location_lite",),
+}
+
+
 # The real structural maximum is 2 (rule -> network_svc_group -> network_service);
 # every other replicable type is a leaf.  5 leaves headroom while still bounding a
 # runaway walk over a malformed import.  Hitting it is a bug, so it is reported.
@@ -1674,8 +1693,9 @@ def _ref_name_index(
     if not rtypes:
         return {}, {}
     lookup = set(rtypes)
-    if "location" in lookup:
-        lookup.add("location_lite")
+    for primary, companions in _REF_TYPE_COMPANIONS.items():
+        if primary in lookup:
+            lookup.update(companions)
 
     src_id_to_name: Dict[str, Dict[str, str]] = {rt: {} for rt in lookup}
     tgt_name_to_id: Dict[str, Dict[str, str]] = {rt: {} for rt in lookup}
@@ -1696,12 +1716,16 @@ def _ref_name_index(
                 if nm:
                     tgt_name_to_id[r.resource_type][nm.strip().lower()] = r.zia_id
 
-    # Fold location_lite into location in both directions so callers see one type.
-    if "location" in rtypes:
-        for name, zid in tgt_name_to_id.get("location_lite", {}).items():
-            tgt_name_to_id["location"].setdefault(name, zid)
-        for sid, name in src_id_to_name.get("location_lite", {}).items():
-            src_id_to_name["location"].setdefault(sid, name)
+    # Fold each companion into its primary in both directions so callers see one
+    # type.  setdefault keeps the primary's own row when both carry the same name.
+    for primary, companions in _REF_TYPE_COMPANIONS.items():
+        if primary not in rtypes:
+            continue
+        for companion in companions:
+            for name, zid in tgt_name_to_id.get(companion, {}).items():
+                tgt_name_to_id[primary].setdefault(name, zid)
+            for sid, name in src_id_to_name.get(companion, {}).items():
+                src_id_to_name[primary].setdefault(sid, name)
 
     return src_id_to_name, tgt_name_to_id
 
