@@ -155,6 +155,18 @@ def _compare_subscriptions(src_subs: Any, tgt_subs: Any) -> Optional[str]:
 # Diff record
 # ---------------------------------------------------------------------------
 
+def _blocking(errors: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Entries that should count against a run's status.
+
+    The dependency closure records what it pulled in as an INFO entry, because an
+    operator needs to see which objects arrived and why.  That is the feature
+    working, not a degradation, so it must not push every dependency-carrying run
+    to "partial".  INFO entries stay in errors_json and are shown; they just do not
+    decide status.
+    """
+    return [e for e in errors if not str(e.get("error", "")).startswith("INFO:")]
+
+
 @dataclass
 class _DiffRecord:
     resource_type: str
@@ -165,6 +177,8 @@ class _DiffRecord:
     target_raw: Optional[Dict] = None   # target's raw_config; set on deletes, where
                                         # source_raw is None but the delete call still
                                         # needs type-specific args (e.g. rule_type)
+    pulled_in_by: Optional[str] = None  # name of the selected rule that required this
+                                        # object; None means it was selected directly
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +463,7 @@ def _run_fanout_sync_task(task_id: int, target_tenant_ids: List[int]) -> Optiona
         all_pending_audit.extend(child_audit)
 
         # 3d. Compute child status and update child row
-        if not child_errors:
+        if not _blocking(child_errors):
             child_status = "success"
         elif child_synced > 0:
             child_status = "partial"
@@ -574,7 +588,7 @@ def _run_single_sync_task(task_id: int) -> Optional[TaskRunHistory]:
 
     # 12. Update run record
     finished_at = datetime.utcnow()
-    if not errors:
+    if not _blocking(errors):
         status = "success"
     elif synced > 0:
         status = "partial"
@@ -655,11 +669,78 @@ def _execute_sync_pipeline(
             resource_types=resource_types
         )
 
+        # 6a. Close over the selected rules' dependencies.  Selecting a rule without
+        # the types it references lands it on the target with those references
+        # dropped — widened to Any, or disabled.  Pull the required objects into the
+        # job so the rule arrives intact.
+        label_for_diff = t_label_name if t_sync_mode == "label" else None
+        # The walk can only follow a reference into a type whose source rows are
+        # current, and step 5 imported the selected types only.  Import what the
+        # walk asks for and walk again — the second pass reaches the depth-2 edges
+        # (a service group's services) that the first could not see.  Bounded by
+        # the same depth limit; in practice it settles in two rounds.
+        loaded = set(resource_types)
+        pulled: Dict[str, Set[str]] = {}
+        origin: Dict[Tuple[str, str], str] = {}
+        closure_warnings: List[str] = []
+        for _ in range(_CLOSURE_MAX_DEPTH):
+            pulled, origin, closure_warnings, missing = _close_over(
+                t_source, resource_types, label_for_diff, loaded
+            )
+            to_load = sorted(missing - loaded)
+            if not to_load:
+                break
+            ZIAImportService(source_client, tenant_id=t_source).run(
+                resource_types=to_load
+            )
+            loaded |= set(to_load)
+        all_types = list(resource_types)
+        if pulled:
+            # 6b. A pulled-in type was not in the import above, so its rows are stale
+            # or absent for both tenants.  The added API cost is bounded by the
+            # number of types pulled in, not the number of objects.
+            new_types = [rt for rt in pulled if rt not in all_types]
+            all_types = all_types + new_types
+            if new_types:
+                # Source rows for these are already current from the walk loop; the
+                # target has never been imported for them.
+                ZIAImportService(target_client, tenant_id=t_target).run(
+                    resource_types=new_types
+                )
+            listed = [
+                f"{rt} '{n}' (for '{origin.get((rt, n), '?')}')"
+                for rt in sorted(pulled) for n in sorted(pulled[rt])
+            ]
+            # errors_json is rendered in the run-history UI; a closure over a large
+            # rule set can run to hundreds of entries, so name the first 20 and count
+            # the rest.  The audit log carries the full per-object attribution.
+            summary = ", ".join(listed[:20])
+            if len(listed) > 20:
+                summary += f", and {len(listed) - 20} more"
+            errors.append({
+                "resource_type": "system",
+                "resource_name": "dependency_closure",
+                "operation": "closure",
+                "error": f"INFO: included {sum(len(v) for v in pulled.values())} "
+                         f"dependencies required by the selected rules: {summary}",
+            })
+        for warning in closure_warnings:
+            errors.append({
+                "resource_type": "system",
+                "resource_name": "dependency_closure",
+                "operation": "closure",
+                "error": f"WARNING: {warning}",
+            })
+
         # 7. Compute diff between source and target DB rows
         diff = _compute_diff(
-            t_source, t_target, resource_types,
+            t_source, t_target, all_types,
             sync_deletes=t_sync_deletes,
-            label_name=t_label_name if t_sync_mode == "label" else None,
+            label_name=label_for_diff,
+            type_scope={rt: names for rt, names in pulled.items()
+                        if rt not in resource_types},
+            sync_delete_types=set(resource_types),
+            origin=origin,
         )
 
         # 8. Split diff into phases:
@@ -709,6 +790,7 @@ def _execute_sync_pipeline(
                             "task_id": task_id,
                             "task_name": t_name,
                             "source_tenant_id": t_source,
+                            **({"pulled_in_by": rec.pulled_in_by} if rec.pulled_in_by else {}),
                         },
                     ))
                 except Exception as exc:
@@ -730,6 +812,7 @@ def _execute_sync_pipeline(
                             "task_id": task_id,
                             "task_name": t_name,
                             "source_tenant_id": t_source,
+                            **({"pulled_in_by": rec.pulled_in_by} if rec.pulled_in_by else {}),
                         },
                         error_message=str(exc),
                     ))
@@ -754,7 +837,7 @@ def _execute_sync_pipeline(
         # the actual post-push state (real API-assigned order values, etc.).
         try:
             ZIAImportService(target_client, tenant_id=t_target).run(
-                resource_types=resource_types
+                resource_types=all_types
             )
         except Exception as exc:
             errors.append({
@@ -857,6 +940,9 @@ def _compute_diff(
     resource_types: List[str],
     sync_deletes: bool = False,
     label_name: Optional[str] = None,
+    type_scope: Optional[Dict[str, Set[str]]] = None,
+    sync_delete_types: Optional[Set[str]] = None,
+    origin: Optional[Dict[Tuple[str, str], str]] = None,
 ) -> List[_DiffRecord]:
     """Compare source and target ZIAResource rows; return ordered diff list.
 
@@ -875,6 +961,22 @@ def _compute_diff(
     Zscaler-managed resources are excluded via _is_zscaler_managed().
     When label_name is set, only source rules carrying that label are synced;
     deletes are also scoped to labelled target rules.
+
+    type_scope restricts a type to a named set of source objects instead of diffing
+    every row of it.  Dependency-pulled types are scoped this way: a rule needing
+    one network service must not drag every network service on the tenant along
+    with it.  A type absent from type_scope is unscoped, which is the existing
+    behavior for everything the operator selected directly.
+
+    sync_delete_types limits deletes to the explicitly-selected types.  A pulled-in
+    type must never produce one: an unscoped delete pass over network_service,
+    added to the job because a single rule referenced one, would reap every target
+    network service the source lacks — including those belonging to target-local
+    rules that have nothing to do with this task.  None preserves today's behavior
+    for existing callers.
+
+    origin supplies the seed rule name recorded on each pulled-in record, so an
+    audit row can say which rule caused the object to appear.
     """
     from services.zia_push_service import _is_zscaler_managed, PUSH_ORDER
 
@@ -913,9 +1015,17 @@ def _compute_diff(
                     ck = _content_fingerprint(r.raw_config or {})
                     tgt_by_content.setdefault(ck, []).append(r)
 
+            scoped = type_scope is not None and rtype in type_scope
+
             # Label filtering: restrict source to labelled rules; deletes are
             # scoped to labelled target rules only (tgt_labelled_names).
-            if label_name is not None:
+            #
+            # A pulled-in type is never label-supported — a network_service carries
+            # no labels field — so applying the label filter to one would empty it
+            # and the closure would achieve nothing.  A type is filtered by label or
+            # scoped by identity, never both: the seed rules are chosen by label,
+            # their dependencies by reference.
+            if label_name is not None and not scoped:
                 src_by_name = {
                     name: r for name, r in src_by_name.items()
                     if _has_label(r.raw_config or {}, label_name)
@@ -927,6 +1037,12 @@ def _compute_diff(
                 }
             else:
                 tgt_labelled_names = set(tgt_by_name_all.keys())
+
+            # Dependency-pulled types carry only the identities the selected rules
+            # actually referenced.
+            if scoped:
+                allowed = type_scope[rtype]
+                src_by_name = {n: r for n, r in src_by_name.items() if n in allowed}
 
             # Track claimed target zia_ids to prevent double-matching.
             claimed: set = set()
@@ -948,6 +1064,7 @@ def _compute_diff(
                         reorder_diff.append(_DiffRecord(
                             resource_type=rtype, name=name, operation="reorder",
                             source_raw=copy.deepcopy(src.raw_config or {}),
+                            pulled_in_by=(origin or {}).get((rtype, name)) if scoped else None,
                             target_id=same_name.zia_id,
                         ))
                     continue
@@ -962,6 +1079,7 @@ def _compute_diff(
                     content_diff.append(_DiffRecord(
                         resource_type=rtype, name=name, operation="rename",
                         source_raw=copy.deepcopy(src.raw_config or {}),
+                        pulled_in_by=(origin or {}).get((rtype, name)) if scoped else None,
                         target_id=diff_name.zia_id,
                     ))
                     continue
@@ -976,6 +1094,7 @@ def _compute_diff(
                     content_diff.append(_DiffRecord(
                         resource_type=rtype, name=name, operation="update",
                         source_raw=copy.deepcopy(src.raw_config or {}),
+                        pulled_in_by=(origin or {}).get((rtype, name)) if scoped else None,
                         target_id=name_match.zia_id,
                     ))
                     continue
@@ -984,10 +1103,12 @@ def _compute_diff(
                 content_diff.append(_DiffRecord(
                     resource_type=rtype, name=name, operation="create",
                     source_raw=copy.deepcopy(src.raw_config or {}),
+                    pulled_in_by=(origin or {}).get((rtype, name)) if scoped else None,
                 ))
 
-            # DELETE — unclaimed labelled target rows not matched by any source rule
-            if sync_deletes:
+            # DELETE — unclaimed labelled target rows not matched by any source rule.
+            # Never for a pulled-in type: see sync_delete_types in the docstring.
+            if sync_deletes and (sync_delete_types is None or rtype in sync_delete_types):
                 for del_name in tgt_labelled_names:
                     for r in tgt_by_name_all.get(del_name, []):
                         if r.zia_id not in claimed:
@@ -1014,13 +1135,29 @@ _REF_FIELDS: frozenset = frozenset({
     "workload_groups", "proxy_gateways",
     "time_windows", "labels",
     "nw_services", "nw_service_groups",
+    # A network_svc_group's member services.  The SDK models this field on exactly one
+    # resource, so the name is unambiguous.  Note the write path takes it as
+    # service_ids; the wire key is services either way.
+    "services",
     "nw_applications", "nw_application_groups",
     "ec_groups", "zpa_app_segments",
     "zpa_application_segments", "zpa_application_segment_groups",
     "threat_categories",
     "applications", "application_groups",
     "cloud_app_instances",
+    "override_users", "override_groups",
+    "dlp_engines", "bandwidth_classes", "tenancy_profile_ids",
 })
+
+# Ref fields the API accepts in either form: a flat list of Zscaler-defined string
+# constants, or a list of embedded objects for tenant-local entries.  They cannot go
+# in _REF_FIELDS because _slim_payload's ref loop finds no dicts in the string form,
+# empties the list and drops the field — which the ZIA UI reads as "Any", widening
+# the rule.  Each element is classified individually instead.
+_MIXED_REF_FIELDS: Dict[str, str] = {
+    "url_categories":  "url_category",
+    "url_categories2": "url_category",
+}
 
 # Every ref field above, mapped to the resource type its IDs belong to — the type
 # name the importer stores in ZIAResource.resource_type.  ZIA IDs are tenant-local:
@@ -1045,10 +1182,16 @@ _REF_TYPE_MAP: Dict[str, str] = {
     "time_windows":          "time_interval",
     "labels":                "rule_label",
     "nw_services":           "network_service",
+    "services":              "network_service",
     "nw_service_groups":     "network_svc_group",
     "nw_applications":       "network_app",
     "nw_application_groups": "network_app_group",
     "cloud_app_instances":   "cloud_app_instance",
+    "override_users":        "user",
+    "override_groups":       "group",
+    "dlp_engines":           "dlp_engine",
+    "bandwidth_classes":     "bandwidth_class",
+    "tenancy_profile_ids":   "tenancy_restriction_profile",
 }
 
 # Ref fields whose referent type the importer does not collect, so there is no
@@ -1073,6 +1216,194 @@ _SCOPE_REF_FIELDS: frozenset = frozenset({
     "locations", "location_groups", "groups", "departments", "users",
     "devices", "device_groups", "zpa_app_segments", "cloud_app_instances",
 })
+
+
+# ---------------------------------------------------------------------------
+# Dependency closure
+# ---------------------------------------------------------------------------
+
+# Types a closure may create on the target from source content.  Everything else
+# reachable from a rule is resolve-only: identity and environment objects
+# (location, group, department, user, device_group, proxy_gateway) carry
+# tenant-specific state — IPs, VPN credentials, gateway bindings, IdP membership —
+# that a dependency walk has no business inventing on another tenant, and
+# predefined catalogs (network_app, threat_category) exist identically everywhere
+# and need no help.  Those still resolve by name in _remap_refs; they are simply
+# never created.
+#
+# location is deliberately absent even though it has a write path.  That path
+# exists for the Full Clone flow, which carries static IPs, VPN credentials, GRE
+# tunnels and sublocations alongside it.  A closure has none of that context.
+_REPLICABLE_TYPES: frozenset = frozenset({
+    "rule_label", "time_interval",
+    "ip_source_group", "ip_destination_group",
+    "network_service", "network_svc_group", "network_app_group",
+    "workload_group", "bandwidth_class",
+    "cloud_app_instance", "tenancy_restriction_profile",
+    "url_category", "dlp_engine", "dlp_dictionary",
+})
+
+# The real structural maximum is 2 (rule -> network_svc_group -> network_service);
+# every other replicable type is a leaf.  5 leaves headroom while still bounding a
+# runaway walk over a malformed import.  Hitting it is a bug, so it is reported.
+_CLOSURE_MAX_DEPTH = 5
+
+
+def _close_over(
+    source_tenant_id: int,
+    resource_types: List[str],
+    label_name: Optional[str],
+    loaded_types: Set[str],
+) -> Tuple[Dict[str, Set[str]], Dict[Tuple[str, str], str], List[str], Set[str]]:
+    """Walk the selected source rules' references and return what they require.
+
+    Selecting a rule for sync without the types it depends on produces a rule that
+    lands on the target with its references dropped — scope widened to Any, or the
+    rule disabled.  The operator picked a rule; they did not knowingly opt out of
+    the objects that rule needs.  This walk closes that gap by pulling the required
+    objects into the same job.
+
+    Source-side only: it answers "what does this rule need?", not "what is missing
+    on the target?".  The second question is _compute_diff's, which is where target
+    state already lives — a dependency that already matches on the target produces
+    no record at all, so a steady-state run costs nothing.
+
+    loaded_types names the types whose source rows are known to be current in the
+    DB.  A reference into a type outside that set cannot be followed — the rows are
+    absent or stale — so it is reported in `missing` instead of being silently
+    dropped, and the caller imports those types and walks again.  Without this a
+    first-ever sync would find no dependencies at all, because nothing but the
+    selected types has ever been imported for that tenant.
+
+    Returns (pulled, origin, warnings, missing):
+      pulled   rtype -> set of source names to add to the job
+      origin   (rtype, name) -> name of the seed rule that required it, for audit
+      warnings human-readable strings for the run history
+      missing  replicable types referenced but not yet loaded
+
+    Breadth-first, so origin records the shortest path to a seed rule, which is the
+    most useful attribution for an operator reading an audit row.  Runs entirely in
+    one session and holds none while writing, matching _execute_sync_pipeline.
+    """
+    from services.zia_push_service import _is_zscaler_managed
+
+    pulled: Dict[str, Set[str]] = {}
+    origin: Dict[Tuple[str, str], str] = {}
+    warnings: List[str] = []
+    missing: Set[str] = set()
+    selected = set(resource_types)
+
+    with get_session() as session:
+        # Only the seed types and the types a walk can actually replicate.  The
+        # resolve-only types are deliberately excluded: user, group and location can
+        # run to tens of thousands of rows per tenant and the walk never follows a
+        # reference into them.
+        wanted = sorted(selected | (_REPLICABLE_TYPES & loaded_types))
+        rows = (
+            session.query(ZIAResource)
+            .filter(
+                ZIAResource.tenant_id == source_tenant_id,
+                ZIAResource.resource_type.in_(wanted),
+                ZIAResource.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        # (rtype, source_id) -> (name, raw_config), the whole source tenant.  Loaded
+        # once: the walk hops between types by ID and a query per hop would mean one
+        # round trip per reference.
+        by_id: Dict[Tuple[str, str], Tuple[str, Dict]] = {}
+        for r in rows:
+            if r.zia_id is not None and r.name:
+                by_id[(r.resource_type, str(r.zia_id))] = (r.name, r.raw_config or {})
+
+        # Seeds: the rows this job already selected, filtered exactly as
+        # _compute_diff filters them, so the walk starts from the same set that
+        # will actually be pushed.
+        seeds: List[Tuple[str, str, Dict]] = []
+        for r in rows:
+            if r.resource_type not in selected or not r.name:
+                continue
+            cfg = r.raw_config or {}
+            if _is_zscaler_managed(r.resource_type, cfg):
+                continue
+            if label_name is not None and not _has_label(cfg, label_name):
+                continue
+            seeds.append((r.resource_type, r.name, cfg))
+
+    visited: Set[Tuple[str, str]] = set()
+    queue: List[Tuple[str, Dict, str, int]] = [(rt, cfg, name, 0) for rt, name, cfg in seeds]
+    depth_exceeded = False
+
+    while queue:
+        _rt, cfg, seed_name, depth = queue.pop(0)
+        if depth >= _CLOSURE_MAX_DEPTH:
+            depth_exceeded = True
+            continue
+
+        refs: List[Tuple[str, Any]] = []
+        for field, ref_type in _REF_TYPE_MAP.items():
+            for ref in cfg.get(field) or []:
+                refs.append((ref_type, ref))
+        for field, ref_type in _MIXED_REF_FIELDS.items():
+            for ref in cfg.get(field) or []:
+                if isinstance(ref, dict):
+                    refs.append((ref_type, ref))
+
+        for ref_type, ref in refs:
+            if ref_type not in _REPLICABLE_TYPES or not isinstance(ref, dict):
+                continue
+            raw_id = ref.get("id")
+            if raw_id is None:
+                continue
+            if isinstance(raw_id, (int, float)) and raw_id < 0:
+                continue  # Zscaler system constant, identical on every tenant
+            if ref_type not in loaded_types:
+                # Rows for this type are absent or stale; the caller imports it and
+                # calls again rather than losing the dependency here.
+                missing.add(ref_type)
+                continue
+            key = (ref_type, str(raw_id))
+            if key in visited:
+                continue
+            visited.add(key)
+
+            found = by_id.get(key)
+            if found is None:
+                # Dangling in the source tenant — already broken before this sync,
+                # and there is nothing to replicate.
+                continue
+            dep_name, dep_cfg = found
+            # Predefined objects exist identically on every tenant and resolve by
+            # name without help; creating them is what the API refuses.  This is the
+            # same predicate _compute_diff applies, so a pulled-in name that would
+            # be filtered out there is never added here.
+            if _is_zscaler_managed(ref_type, dep_cfg):
+                continue
+
+            if ref_type not in selected:
+                pulled.setdefault(ref_type, set()).add(dep_name)
+                origin.setdefault((ref_type, dep_name), seed_name)
+                if ref_type == "dlp_engine":
+                    # A DLP engine names its dictionaries inside engine_expression
+                    # ("((D63.S > 1))"), not through a reference array, so the walk
+                    # cannot see that edge.  Say so rather than implying the engine
+                    # arrived complete.
+                    warnings.append(
+                        f"dlp_engine '{dep_name}' was replicated for rule "
+                        f"'{seed_name}'; its engine_expression may name dictionary "
+                        f"IDs that do not exist on the target and were not verified"
+                    )
+            # Recurse regardless of whether the type was already selected: a
+            # selected network_svc_group still leads to network_services that are not.
+            queue.append((ref_type, dep_cfg, seed_name, depth + 1))
+
+    if depth_exceeded:
+        warnings.append(
+            f"dependency walk hit its depth bound of {_CLOSURE_MAX_DEPTH}; some "
+            f"nested dependencies may not have been included"
+        )
+
+    return pulled, origin, warnings, missing
 
 
 def _drop_nulls(obj):
@@ -1137,6 +1468,22 @@ def _slim_payload(rtype: str, payload: Dict) -> Dict:
                     payload.pop(f, None)
             else:
                 payload.pop(f, None)  # drop empty ref arrays
+
+    # Mixed-form fields keep their Zscaler-defined string constants verbatim; only
+    # the embedded tenant-local objects are reduced to [{id}].
+    for f in _MIXED_REF_FIELDS:
+        val = payload.get(f)
+        if isinstance(val, list):
+            if val:
+                payload[f] = [
+                    {"id": item["id"]} if isinstance(item, dict) else item
+                    for item in val
+                    if not isinstance(item, dict) or item.get("id") is not None
+                ]
+                if not payload[f]:
+                    payload.pop(f, None)
+            else:
+                payload.pop(f, None)
 
     # Strip empty string-enum arrays that the API rejects when empty
     for f in _EMPTY_STRIP_FIELDS:
@@ -1313,7 +1660,8 @@ def _remap_refs(
     src_raw = source_raw or {}
 
     present = [f for f in _REF_TYPE_MAP if isinstance(payload.get(f), list) and payload.get(f)]
-    needed = {_REF_TYPE_MAP[f] for f in present}
+    mixed = [f for f in _MIXED_REF_FIELDS if isinstance(payload.get(f), list) and payload.get(f)]
+    needed = {_REF_TYPE_MAP[f] for f in present} | {_MIXED_REF_FIELDS[f] for f in mixed}
     src_index, tgt_index = _ref_name_index(source_tenant_id, target_tenant_id, needed)
 
     for field in present:
@@ -1353,6 +1701,43 @@ def _remap_refs(
 
         if remapped:
             payload[field] = remapped
+        else:
+            payload.pop(field, None)
+        if lost:
+            dropped[field] = lost
+
+    # Mixed-form fields: string elements are Zscaler-defined constants that mean the
+    # same thing on every tenant and pass through untouched; dict elements are
+    # tenant-local objects and are remapped exactly as above.
+    for field in mixed:
+        ref_type = _MIXED_REF_FIELDS[field]
+        by_id = src_index.get(ref_type, {})
+        by_name = tgt_index.get(ref_type, {})
+        in_run = (created_ids or {}).get(ref_type, {})
+        inline = {
+            str(r.get("id", "")): (r.get("name") or r.get("configured_name") or "")
+            for r in (src_raw.get(field) or [])
+            if isinstance(r, dict) and (r.get("name") or r.get("configured_name"))
+        }
+
+        remapped_mixed: List[Any] = []
+        lost = []
+        for ref in payload[field]:
+            if not isinstance(ref, dict):
+                remapped_mixed.append(ref)
+                continue
+            src_id = str(ref.get("id", "") or "")
+            name = (ref.get("name") or ref.get("configured_name")
+                    or inline.get(src_id) or by_id.get(src_id) or "")
+            key = name.strip().lower()
+            tgt_id = (in_run.get(key) or by_name.get(key)) if key else None
+            if tgt_id:
+                remapped_mixed.append({"id": tgt_id})
+            else:
+                lost.append(name or src_id or "?")
+
+        if remapped_mixed:
+            payload[field] = remapped_mixed
         else:
             payload.pop(field, None)
         if lost:
