@@ -17,7 +17,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from db.database import get_session
 from db.models import ScheduledTask, TaskRunHistory, ZIAResource
@@ -1022,6 +1022,58 @@ _REF_FIELDS: frozenset = frozenset({
     "cloud_app_instances",
 })
 
+# Every ref field above, mapped to the resource type its IDs belong to — the type
+# name the importer stores in ZIAResource.resource_type.  ZIA IDs are tenant-local:
+# the same object has a different ID on each tenant, and because the ID space is
+# small and dense a source ID almost always collides with some unrelated object on
+# the target.  The reference is then accepted rather than rejected, and the rule
+# silently scopes to the wrong thing.  Every field here is remapped by name.
+_REF_TYPE_MAP: Dict[str, str] = {
+    "locations":             "location",
+    "location_groups":       "location_group",
+    "groups":                "group",
+    "departments":           "department",
+    "users":                 "user",
+    "device_groups":         "device_group",
+    "source_ip_groups":      "ip_source_group",
+    "src_ip_groups":         "ip_source_group",
+    "dest_ip_groups":        "ip_destination_group",
+    "src_ipv6_groups":       "ip_source_group",
+    "dest_ipv6_groups":      "ip_destination_group",
+    "workload_groups":       "workload_group",
+    "proxy_gateways":        "proxy_gateway",
+    "time_windows":          "time_interval",
+    "labels":                "rule_label",
+    "nw_services":           "network_service",
+    "nw_service_groups":     "network_svc_group",
+    "nw_applications":       "network_app",
+    "nw_application_groups": "network_app_group",
+    "cloud_app_instances":   "cloud_app_instance",
+}
+
+# Ref fields whose referent type the importer does not collect, so there is no
+# target-side name index to match against.  Their source IDs cannot be made
+# meaningful on the target, and shipping them anyway is the mis-scoping bug above,
+# so they are dropped and reported.  This matches ZIAPushService._ref_resolved,
+# which strips the same references for the same reason.
+_UNRESOLVABLE_REF_FIELDS: frozenset = frozenset({
+    "devices",
+    "ec_groups",
+    "zpa_app_segments",
+    "zpa_application_segments",
+    "zpa_application_segment_groups",
+    "threat_categories",
+    "application_groups",
+})
+
+# Scope fields: losing every ref widens the rule to "Any" rather than narrowing it.
+# Mirrors ZIAPushService._SCOPE_CHECKS — a rule that lost its whole audience is
+# created DISABLED instead of being allowed to fire against the entire tenant.
+_SCOPE_REF_FIELDS: frozenset = frozenset({
+    "locations", "location_groups", "groups", "departments", "users",
+    "devices", "device_groups", "zpa_app_segments", "cloud_app_instances",
+})
+
 
 def _drop_nulls(obj):
     """Recursively remove None values from dicts; preserve empty lists."""
@@ -1147,52 +1199,6 @@ def _slim_payload(rtype: str, payload: Dict) -> Dict:
     return payload
 
 
-def _resolve_env_refs(payload: Dict, source_tenant_id: int, target_tenant_id: int) -> Dict:
-    """Remap location/location_group refs from source IDs to target IDs by name.
-
-    Location IDs are tenant-specific. Sending source IDs to the target API causes
-    "id(s) do not exist" rejections. Refs with no name match in the target are dropped.
-    """
-    _ENV_REF_TYPES = {
-        "locations": "location",
-        "location_groups": "location_group",
-    }
-    for field, rtype in _ENV_REF_TYPES.items():
-        refs = payload.get(field)
-        if not isinstance(refs, list) or not refs:
-            continue
-        with get_session() as session:
-            src_rows = (
-                session.query(ZIAResource)
-                .filter_by(tenant_id=source_tenant_id, resource_type=rtype, is_deleted=False)
-                .all()
-            )
-            tgt_rows = (
-                session.query(ZIAResource)
-                .filter_by(tenant_id=target_tenant_id, resource_type=rtype, is_deleted=False)
-                .all()
-            )
-        src_id_to_name = {str(r.zia_id): r.name for r in src_rows}
-        tgt_name_to_id = {r.name: r.zia_id for r in tgt_rows}
-        remapped = []
-        for ref in refs:
-            if not isinstance(ref, dict):
-                continue
-            name = src_id_to_name.get(str(ref.get("id", "")))
-            if name:
-                tgt_id = tgt_name_to_id.get(name)
-                if tgt_id:
-                    try:
-                        remapped.append({"id": int(tgt_id)})
-                    except (ValueError, TypeError):
-                        remapped.append({"id": tgt_id})
-        if remapped:
-            payload[field] = remapped
-        else:
-            payload.pop(field, None)
-    return payload
-
-
 def _next_order(target_tenant_id: int, rtype: str) -> int:
     """Return max(order) + 1 across user-created rules of this type in the target tenant.
 
@@ -1221,132 +1227,153 @@ def _next_order(target_tenant_id: int, rtype: str) -> int:
     return max_order + 1
 
 
-def _remap_label_ids(payload: Dict, source_tenant_id: int, target_tenant_id: int) -> Dict:
-    """Replace source-tenant label IDs with corresponding target-tenant IDs (matched by name).
+def _ref_name_index(
+    source_tenant_id: int,
+    target_tenant_id: int,
+    rtypes: Set[str],
+) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    """Build per-type name indexes for both tenants in a single DB session.
 
-    Labels are tenant-specific resources — the same label name has a different
-    numeric ID on each tenant.  Sending the source ID causes a referential
-    integrity 500.  Labels absent in the target are dropped from the payload.
+    Returns (src_id_to_name, tgt_name_to_id), each keyed by resource type.  One
+    query per tenant covering every type the payload actually references, rather
+    than a session per field — _apply_one runs once per resource, so a session per
+    ref field would mean tens of thousands of opens on a large sync.
+
+    Predefined locations (Road Warrior, Mobile Users) are imported as location_lite
+    rather than location, so a location lookup has to consider both.
     """
-    labels = payload.get("labels")
-    if not labels:
-        return payload
+    if not rtypes:
+        return {}, {}
+    lookup = set(rtypes)
+    if "location" in lookup:
+        lookup.add("location_lite")
+
+    src_id_to_name: Dict[str, Dict[str, str]] = {rt: {} for rt in lookup}
+    tgt_name_to_id: Dict[str, Dict[str, str]] = {rt: {} for rt in lookup}
 
     with get_session() as session:
-        src_rows = (
+        rows = (
             session.query(ZIAResource)
-            .filter_by(tenant_id=source_tenant_id, resource_type="rule_label", is_deleted=False)
+            .filter(ZIAResource.tenant_id.in_([source_tenant_id, target_tenant_id]),
+                    ZIAResource.resource_type.in_(sorted(lookup)),
+                    ZIAResource.is_deleted == False)  # noqa: E712
             .all()
         )
-        tgt_rows = (
-            session.query(ZIAResource)
-            .filter_by(tenant_id=target_tenant_id, resource_type="rule_label", is_deleted=False)
-            .all()
-        )
+        for r in rows:
+            if r.tenant_id == source_tenant_id:
+                src_id_to_name[r.resource_type][str(r.zia_id)] = r.name or ""
+            else:
+                if r.name:
+                    tgt_name_to_id[r.resource_type][r.name.strip().lower()] = r.zia_id
 
-    src_id_to_name: Dict[str, str] = {r.zia_id: r.name for r in src_rows}
-    tgt_name_to_id: Dict[str, str] = {r.name: r.zia_id for r in tgt_rows}
+    # Fold location_lite into location in both directions so callers see one type.
+    if "location" in rtypes:
+        for name, zid in tgt_name_to_id.get("location_lite", {}).items():
+            tgt_name_to_id["location"].setdefault(name, zid)
+        for sid, name in src_id_to_name.get("location_lite", {}).items():
+            src_id_to_name["location"].setdefault(sid, name)
 
-    remapped = []
-    for lbl in labels:
-        if not isinstance(lbl, dict):
-            continue
-        src_id = str(lbl.get("id", ""))
-        name = src_id_to_name.get(src_id)
-        if name:
-            tgt_id = tgt_name_to_id.get(name)
+    return src_id_to_name, tgt_name_to_id
+
+
+def _remap_refs(
+    payload: Dict,
+    rtype: str,
+    source_raw: Optional[Dict],
+    source_tenant_id: int,
+    target_tenant_id: int,
+    created_ids: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Dict, Dict[str, List[str]]]:
+    """Rewrite every reference array from source-tenant IDs to the target's, by name.
+
+    The sync engine previously remapped only labels, locations and location_groups.
+    Every other reference — ip groups, network services, service groups, time
+    windows, app groups, workload groups, proxy gateways — shipped the source
+    tenant's ID unchanged.  ZIA IDs are small dense integers, so such an ID usually
+    *does* exist on the target as some unrelated object: the API accepts the rule
+    and it silently scopes to the wrong resource.  That is the failure this fixes.
+
+    Resolution order per ref, mirroring ZIAPushService:
+      1. negative IDs pass through — Zscaler system constants (-3 = Mobile Users)
+         mean the same thing on every tenant
+      2. created_ids — objects created earlier in this same run, which the target
+         DB snapshot (imported before any write) cannot know about
+      3. the target's imported objects, matched on name
+
+    A ref that resolves nowhere is dropped, and its name recorded in the returned
+    dict so the caller can warn and, for scope fields, disable the rule.  Fields in
+    _UNRESOLVABLE_REF_FIELDS are dropped wholesale: their referent type is never
+    imported, so no name index exists to match against.
+
+    Names come from source_raw's pre-slim refs first — _slim_payload has by now
+    reduced the payload to [{id}] — and from the source tenant's imported rows
+    second, which covers a rule whose refs carry no inline name.
+    """
+    dropped: Dict[str, List[str]] = {}
+    src_raw = source_raw or {}
+
+    present = [f for f in _REF_TYPE_MAP if isinstance(payload.get(f), list) and payload.get(f)]
+    needed = {_REF_TYPE_MAP[f] for f in present}
+    src_index, tgt_index = _ref_name_index(source_tenant_id, target_tenant_id, needed)
+
+    for field in present:
+        ref_type = _REF_TYPE_MAP[field]
+        by_id = src_index.get(ref_type, {})
+        by_name = tgt_index.get(ref_type, {})
+        in_run = (created_ids or {}).get(ref_type, {})
+
+        # Inline names off the source config, which survive even when the source
+        # tenant's rows for this type were never imported.
+        inline: Dict[str, str] = {
+            str(r.get("id", "")): (r.get("name") or "")
+            for r in (src_raw.get(field) or [])
+            if isinstance(r, dict) and r.get("name")
+        }
+
+        remapped: List[Dict] = []
+        lost: List[str] = []
+        for ref in payload[field]:
+            if not isinstance(ref, dict):
+                continue
+            raw_id = ref.get("id")
+            if isinstance(raw_id, (int, float)) and raw_id < 0:
+                remapped.append({"id": raw_id})
+                continue
+            src_id = str(raw_id if raw_id is not None else "")
+            name = ref.get("name") or inline.get(src_id) or by_id.get(src_id) or ""
+            key = name.strip().lower()
+            tgt_id = (in_run.get(key) or by_name.get(key)) if key else None
             if tgt_id:
                 try:
                     remapped.append({"id": int(tgt_id)})
                 except (ValueError, TypeError):
                     remapped.append({"id": tgt_id})
+            else:
+                lost.append(name or src_id or "?")
 
-    if remapped:
-        payload["labels"] = remapped
-    else:
-        payload.pop("labels", None)
-
-    return payload
-
-
-def _remap_instance_ids(
-    payload: Dict,
-    source_tenant_id: int,
-    target_tenant_id: int,
-    created_ids: Optional[Dict[str, Dict[str, str]]] = None,
-    source_refs: Optional[List[Dict]] = None,
-) -> Tuple[Dict, List[str]]:
-    """Replace source cloud app instance IDs with the target's, matched by name.
-
-    Same shape as _remap_label_ids, with one addition: instances created earlier
-    in this same run are not in the target DB snapshot (it was imported before any
-    write), so created_ids — the in-run map threaded through _apply_batch — is
-    consulted first.  Without it a rule created in the same run as the instance it
-    scopes to would lose that scope and only recover on the next run.
-
-    source_refs is the rule's pre-slim cloud_app_instances list, which still carries
-    each instance's name; the DB is only consulted for names it does not supply.
-
-    Returns (payload, dropped_names).  Unresolved refs are dropped and named so the
-    caller can warn; an empty result pops the field, which the API reads as "Any".
-    """
-    refs = payload.get("cloud_app_instances")
-    if not isinstance(refs, list) or not refs:
-        return payload, []
-
-    # Names off the source config first — _slim_payload has already reduced the
-    # payload refs to {id}, and the source rule carries the name the target is
-    # matched on.  This also keeps the remap working when the source tenant's
-    # instance rows were never imported (an instance-less resource group).
-    src_id_to_name: Dict[str, str] = {
-        str(r.get("id", "")): (r.get("name") or "")
-        for r in (source_refs or []) if isinstance(r, dict) and r.get("name")
-    }
-
-    with get_session() as session:
-        src_rows = (
-            session.query(ZIAResource)
-            .filter_by(tenant_id=source_tenant_id,
-                       resource_type="cloud_app_instance", is_deleted=False)
-            .all()
-        )
-        tgt_rows = (
-            session.query(ZIAResource)
-            .filter_by(tenant_id=target_tenant_id,
-                       resource_type="cloud_app_instance", is_deleted=False)
-            .all()
-        )
-
-    for r in src_rows:
-        src_id_to_name.setdefault(str(r.zia_id), r.name or "")
-    tgt_name_to_id: Dict[str, str] = {
-        (r.name or "").strip().lower(): r.zia_id for r in tgt_rows if r.name
-    }
-    in_run: Dict[str, str] = dict((created_ids or {}).get("cloud_app_instance", {}))
-
-    remapped: List[Dict] = []
-    dropped: List[str] = []
-    for ref in refs:
-        if not isinstance(ref, dict):
-            continue
-        src_id = str(ref.get("id", ""))
-        name = ref.get("name") or src_id_to_name.get(src_id) or ""
-        key = name.strip().lower()
-        tgt_id = in_run.get(key) if key else None
-        if not tgt_id and key:
-            tgt_id = tgt_name_to_id.get(key)
-        if tgt_id:
-            try:
-                remapped.append({"id": int(tgt_id)})
-            except (ValueError, TypeError):
-                remapped.append({"id": tgt_id})
+        if remapped:
+            payload[field] = remapped
         else:
-            dropped.append(name or src_id or "?")
+            payload.pop(field, None)
+        if lost:
+            dropped[field] = lost
 
-    if remapped:
-        payload["cloud_app_instances"] = remapped
-    else:
-        payload.pop("cloud_app_instances", None)
+    for field in _UNRESOLVABLE_REF_FIELDS:
+        refs = payload.get(field)
+        if not isinstance(refs, list) or not refs:
+            continue
+        keep = [r for r in refs if isinstance(r, dict)
+                and isinstance(r.get("id"), (int, float)) and r["id"] < 0]
+        lost = [
+            (r.get("name") or str(r.get("id", "?"))) if isinstance(r, dict) else str(r)
+            for r in refs if r not in keep
+        ]
+        if keep:
+            payload[field] = keep
+        else:
+            payload.pop(field, None)
+        if lost:
+            dropped[field] = lost
 
     return payload, dropped
 
@@ -1442,36 +1469,44 @@ def _apply_one(
     # Reduce embedded ref objects to [{id}] and apply per-type fixups
     payload = _slim_payload(rtype, payload)
 
-    # Remap label IDs: source tenant IDs differ from target tenant IDs
-    payload = _remap_label_ids(payload, source_tenant_id, target_tenant_id)
+    # Rewrite every reference array from source-tenant IDs to the target's, by name.
+    payload, dropped_refs = _remap_refs(
+        payload, rtype, rec.source_raw,
+        source_tenant_id, target_tenant_id, created_ids,
+    )
 
-    # Remap location/location_group refs: IDs are tenant-specific
-    payload = _resolve_env_refs(payload, source_tenant_id, target_tenant_id)
-
-    # Remap cloud app instance refs the same way, then report a total scope loss.
-    # Partial loss is silent here, matching ZIAPushService._SCOPE_CHECKS.
-    if rtype == "cloud_app_control_rule":
-        had_instance_refs = bool((rec.source_raw or {}).get("cloud_app_instances"))
-        payload, dropped_names = _remap_instance_ids(
-            payload, source_tenant_id, target_tenant_id, created_ids,
-            source_refs=(rec.source_raw or {}).get("cloud_app_instances"),
-        )
-        if had_instance_refs and not payload.get("cloud_app_instances"):
-            # Every ref was lost, so the rule would apply to *any* instance —
-            # wider than the source intended.  Disable it on create rather than
-            # let it fire; on update the target's own state is left alone.
-            disabled = rec.operation == "create"
-            if disabled:
-                payload["state"] = "DISABLED"
-            if warning_sink is not None:
+    # Report references that resolved nowhere.  A scope field that lost *every*
+    # ref widens the rule to "Any" rather than narrowing it, so on a create the
+    # rule is inserted DISABLED rather than allowed to fire against the whole
+    # tenant; on an update the target's own state is left as the operator set it.
+    # Partial loss narrows and passes silently, matching ZIAPushService._SCOPE_CHECKS.
+    if dropped_refs:
+        widened = [
+            f for f in dropped_refs
+            if f in _SCOPE_REF_FIELDS and not payload.get(f)
+        ]
+        disabled = bool(widened) and rec.operation == "create"
+        if disabled:
+            payload["state"] = "DISABLED"
+        if warning_sink is not None:
+            for field, names in sorted(dropped_refs.items()):
+                total = not payload.get(field)
+                scope = field in _SCOPE_REF_FIELDS
+                if total and scope:
+                    detail = "; rule scope widened to Any" + (
+                        " and rule disabled" if disabled else ""
+                    )
+                elif total:
+                    detail = "; the reference was dropped entirely"
+                else:
+                    detail = "; the remaining references were kept"
                 warning_sink.append({
-                    "resource_type": "cloud_app_control_rule",
+                    "resource_type": rtype,
                     "resource_name": rec.name,
                     "operation": rec.operation,
                     "error": (
-                        "WARNING: cloud app instance scope could not be resolved on "
-                        f"the target ({', '.join(dropped_names)}); rule scope widened "
-                        "to Any" + (" and rule disabled" if disabled else "")
+                        f"WARNING: {field} could not be resolved on the target "
+                        f"({', '.join(names)}){detail}"
                     ),
                 })
 
@@ -1523,7 +1558,16 @@ def _apply_one(
 
     if rec.operation == "create":
         create_method = getattr(target_client, create_method_name)
-        create_method(payload)
+        result = create_method(payload)
+        # Record the new ID so a rule pushed later in this same run can resolve a
+        # reference to it.  The target DB snapshot was imported before any write,
+        # so without this an object and the rule that references it can only be
+        # joined up on the *next* run — the rule is created with its reference
+        # dropped, and _remap_refs reports it as unresolvable.
+        if created_ids is not None and rec.name and isinstance(result, dict):
+            new_id = result.get("id")
+            if new_id is not None:
+                created_ids.setdefault(rtype, {})[rec.name.strip().lower()] = str(new_id)
     else:
         # update / rename / reorder — inject the target's ID and call update
         payload["id"] = rec.target_id
